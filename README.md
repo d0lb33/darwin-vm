@@ -99,12 +99,9 @@ If you've ever compiled Linux + busybox and booted in qemu (with `-kernel` and
 | M4 Mac Mini    | `Mac16,10`   | `t8132`  | ✅                | ✅         |
 | M3 Macbook Air | `Mac15,13`   | `t8122`  | ✅                | ✅         |
 | M2 Mac Mini    | `Mac14,3`    | `t8112`  | ✅                | ✅         |
-| M1 Mac Mini    | `Macmini9,1` | `t8103`  | ✅                | ❌         |
-
+| M1 Mac Mini    | `Macmini9,1` | `t8103`  | ✅                | ✅         |
 
 ✅ = boots to root shell and can run commands
-
-❌ = panics before `launchd` / shell
 
 Notes:
 - If you don't need MIE, use something without it, as emulating MIE can be slow.
@@ -364,7 +361,7 @@ with `darwin-vm` too.
 To boot a `development` kernel, we need to create a new kernelcache combining
 the kernel we want to use plus all the kexts for the system we're targeting.
 
-### 1. Select a Mac and macOS version. You need to know
+### 1. Select a Mac and macOS version. You need to know:
 
 - The device name of the Mac you want to use (eg. `Mac16,10` is an M4 Mac Mini).
 - The exact macOS version number to target (eg. `25G70`).

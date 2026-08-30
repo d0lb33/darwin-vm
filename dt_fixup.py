@@ -22,6 +22,9 @@ class ADTNode:
         return c
     raise ValueError(f"key {key} not present in node {self.props['name']}")
 
+  def __contains__(self, key):
+    return any(c.props['name'] == key for c in self.children)
+
   def remove_child(self, child_name):
     for c in self.children:
       if c.props['name'] == child_name:
@@ -191,7 +194,7 @@ def fixup(d, nvram_file):
   d['chosen'].props['nvram-total-size'] = f"u32:{len(d['chosen'].props['nvram-proxy-data'])}"
   d['chosen'].props['nvram-bank-size']  = f"u32:{len(d['chosen'].props['nvram-proxy-data'])}"
 
-  if 'InvalidateHmac' in d['arm-io']['sep']['iop-sep-nub'].props:
+  if 'InvalidateHmac' in d['arm-io']['sep']['iop-sep-nub']:
     d['arm-io']['sep']['iop-sep-nub']['InvalidateHmac'].props['config'] = "u32:1"
     d['arm-io']['sep']['iop-sep-nub']['InvalidateHmac'].props['sio-hmac1-offset'] = "u64:0"
     d['arm-io']['sep']['iop-sep-nub']['InvalidateHmac'].props['sio-hmac1-disable-mask'] = "u64:0xffffffffffffffff"
