@@ -84,7 +84,7 @@ If you've ever compiled Linux + busybox and booted in qemu (with `-kernel` and
 
 `darwin-vm` has been tested with the following systems:
 
-| Device          | `devname`    | CPU name | iOS 27.0 beta 7 | iOS 26.6 |
+| Device          | `devname`    | CPU name | iOS 27.0 beta 8 | iOS 26.6 |
 |-----------------|--------------|----------|-----------------|----------|
 | iPhone 17 (A19) | `iPhone18,3` | `t8150`  | ✅              | ✅       |
 | iPhone 16 (A18) | `iPhone17,3` | `t8140`  | ✅              | ✅       |
@@ -93,7 +93,7 @@ If you've ever compiled Linux + busybox and booted in qemu (with `-kernel` and
 | iPhone 13 (A15) | `iPhone14,5` | `t8110`  | ✅              | ✅       |
 | iPhone 12 (A14) | `iPhone13,2` | `t8101`  | ✅              | ✅       |
 
-| Device         | `devname`    | CPU name | macOS 27.0 beta 7 | macOS 26.6 |
+| Device         | `devname`    | CPU name | macOS 27.0 beta 8 | macOS 26.6 |
 |----------------|--------------|----------|-------------------|------------|
 | M5 Macbook Air | `Mac17,4`    | `t8142`  | ✅                | ✅         |
 | M4 Mac Mini    | `Mac16,10`   | `t8132`  | ✅                | ✅         |
