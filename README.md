@@ -105,9 +105,6 @@ If you've ever compiled Linux + busybox and booted in qemu (with `-kernel` and
 
 Notes:
 - If you don't need MIE, use something without it, as emulating MIE can be slow.
-- Occasionally the system can randomly crash during early boot; if you see a
-kernel panic before `launchd`, just restart and try again (potentially a few
-times). This problem primarily affects `t8110` devices.
 
 # Setup
 
