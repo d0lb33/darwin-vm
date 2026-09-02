@@ -116,47 +116,111 @@ name; the orchestrator merges.
 - **The normal boot path.** `rootdev=md0` plus a kernel patch gets iOS off its
   restore path onto the `local` boot spec, so `mount-phase-1`/`-2` run and
   `/private/var` is mounted writable as a tmpfs (`-ephemeral-data`).
+- `darwin-sep`: enough SEP for `AppleSEPManager` to reach "control endpoints
+  created" and answer `AppleCredentialManager`. That wait used to burn 890 of
+  every 900 seconds; it is now zero. `-enable sep`.
+- `darwin-ans` prerequisites: SART works, `-enable ans -enable smc` boots
+  clean, and Apple's own storage drivers probe (`AppleANS3CGv2Controller`,
+  score 500000). The controller behind them is being written.
 - A root shell inside the booted system volume, for poking at it live
   (`/tmp/dvm/build/rootfs_sh.dmg`, 102 tools from the restore ramdisk, uid 0).
   `tools/serial.py` drives it over a socket.
 
 ## Where the DCP bring-up stands
 
-The transport is up. A plain `dt_fixup.py -enable dcp` tree now brings all
-eleven endpoints through the full AFK handshake, with zero unhandled opcodes and
-zero unmapped DVAs:
+Two channels, and both are now talking. Everything below is behind an env
+switch and **off by default**; the default `-enable dcp` boot reaches the shell
+with 0 panics and 11/11 AFK endpoints.
+
+### The control plane (endpoints 0x20-0x2a, AFK + EPIC) — working
+
+All eleven endpoints complete the AFK handshake, and `DARWIN_DCP_EPIC=all`
+announces the EPIC services XNU's sub-drivers match on, so real drivers bind:
 
 ```
-RTBuddy(DCP): start(...)
-IOMFB: service matched: AppleDCPExpert
-afk(DCP): ep 0x20 started (rings at dva 0x10000000000)
-...  through  ...
-afk(DCP): ep 0x2a started (rings at dva 0x10000050000)
+afk(DCP): ep 0x20 started (rings at dva 0x10000000000)   ... through 0x2a
+Registering: ../AppleH17PPlatformIO/dcp-sac-controller/DCPAVSACController
 ```
 
-What makes the coprocessor actually *start*, as opposed to merely matching
-drivers, is `fixup_iops()`: `ignore-gating` on the IOP node so `AppleA7IOP`
-does not poll an unmodelled PMGR gate, and `pre-loaded` + `region-base` +
-`region-size` + `no-firmware-service` on its nub. Full derivation with
-addresses in `docs/re/dcp-iop-start.md`. Note `quiesced` must NOT be set: it
-makes RTBuddy assume the IOP is already running and skip the `CPU_CONTROL.RUN`
-write, and ours is cold.
+`DARWIN_DCP_REPLY=1` answers the standard-service commands that follow. Two
+protocol facts, both derived from the guest rather than the M1-era references:
 
-**Next step: EPIC on top of AFK.** Announce one service on endpoint `0x20` and
-see whether XNU binds a sub-driver. `darwin_afk_send_qe()` is the entry point
-and has no caller yet; `docs/re/dcp-firmware-services.md` has the service map
-and `docs/re/afk-epic-references.md` §2.2 the ANNOUNCE payload shape. That
-document is wrong on one load-bearing point: the ring granule is `0x80` on iOS
-27, not `0x40`, making the header `0x180`. With `0x40` the guest panics in
-`afk_messenger_common.c:126`.
+- The message header's byte 0 is a **sequence counter**, not flags.
+- A command body's u32 at +4 is a **payload length inbound and a return code
+  outbound**. Echoing it back made `DCPAVRemoteSACControllerProxy` — interface
+  8, whose command carried `arg 0x50` — report `bootCompleteGated() error:
+  ret = 0x50`. Not echoing it clears the error.
 
-Endpoint map, from the kext IOKit personalities:
+Answering at all is what makes the AP proceed: with no reply it sends one
+`OPEN` and one command and stops; with one it opens every announced interface.
 
-| Endpoint | XNU name | Driver |
-|---|---|---|
-| 0x20–0x2a | `DCPEndpoint1`..`23` | `DCPEndpointV2` (AFK/EPIC framing) |
-| 0x37 | `DCPEndpoint24` | `AppleDCPLinkServiceSoC` (IOMFB link) |
-| — | `disp0,t8140` | `AppleCLCD2`, the display driver |
+### The pixel path (endpoint 0x37, IOMFB) — handshake done
+
+`DARWIN_DCP_IOMFB=1` advertises `0x37` (`AppleDCPLinkServiceSoC`). Merely
+advertising it starts the whole framebuffer stack — `AppleDCPLinkService`
+matches, `IOMFB: AP DRIVER START!`, `IOMobileFramebufferAP::start` on `disp0`.
+
+Its framing is **not** AFK's. Derived in `docs/re/iomfb-link.md` from
+`link_send_message` / `link_handle_message`: the low 16 bits are a structured
+header and bits[63:16] a 48-bit payload, masked by a literal
+`and x8, x2, 0xffffffffffff0000`.
+
+```
+[1:0] class   [7:6] subkind   [8] ack   [15:10] tag   [63:16] payload
+```
+
+The AP's opening message `0x0100000000000040` is class 0, subkind 1, payload
+DVA `0x10000000000` — a shared-heap announce. It is **send-only**: echoing it
+panics at `AppleDCPLinkService.cpp:882` with `kIOReturnNoMemory`. Replying with
+the class-1 init-ack (`DARWIN_DCP_IOMFB=2`) is accepted and the link advances to
+firmware verification, which is the current wall:
+
+```
+IOMFB: Firmware hash checksum mismatched: local=0x15A5C96B, remote=0x00000000
+panic @AppleDCPLinkService.cpp:624
+```
+
+`AppleCLCD2` has never bound; it sits above IOMFB and needs this to complete.
+
+### Method that keeps working
+
+Static RE names the next gate, a cheap probe tests it, and the *failure
+message* names the gate after that — `882` to `624` in one iteration. Several
+confident hypotheses have been wrong (the flags byte, a "16 MB length" reading
+of the IOMFB header, `genter` as the HVF cost driver); in each case a
+measurement corrected them, not more reasoning. Reach for the experiment first.
+
+## Storage
+
+Decided and specified, not yet implemented. `docs/re/storage-path.md`: **ANS**,
+not PCIe NVMe (all three `apcie` ports are taken by WLAN/BT/baseband) and not
+virtio (no virtio kexts in this kernelcache). `docs/re/ans-nvme-references.md`
+has the register map, the 11-step bring-up and the protocol divergences — the
+submission path is a **tag-indexed array, not a ring**, and our
+`nvme-secure-bar` generation needs extra IO-queue base writes at `0x1200`/
+`0x1208` that the Linux driver never does.
+
+Note we cannot wrap QEMU's stock `hw/nvme`: it is a PCI device, `CONFIG_NVME_PCI`
+is off, and this machine has no PCI bus.
+
+Worth it because **228 of the 257 seconds to `Early boot complete` is
+`mount-phase-2` rebuilding `/private/var` from 41,557 files**, purely for want
+of a Data volume. It also drops the guest from 40 GB to ~8 GB and retires
+`-ephemeral-data`.
+
+## Performance
+
+TCG is the architecture, not a stopgap. HVF acceleration was costed and
+rejected with measurements in `docs/re/hvf-acceleration.md`: the guest runs at
+**EL2**, where the Apple IMP-DEF registers, `genter`, `gexit` and `HVC` are all
+taken by the guest, so there is nothing for a trap-and-emulate scheme to land
+on — and the projected win was only 1.9-3.3x anyway. Windows ARM, the actual
+endgame, has no Apple IMP-DEF registers at all and needs TCG regardless.
+
+`tools/time_boot.py` times a boot to a serial marker, `hvf-probe/hvf_exitbench`
+measures exit cost, and `target/arm/gxfstat.c` counts per-boot guest events at
+0.6% overhead. Note `darwin.c` sets `mc->max_cpus = 1` while the device tree
+describes six CPUs, so MTTCG headroom is unused.
 
 ## Where the userspace boot stands
 
