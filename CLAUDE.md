@@ -307,21 +307,55 @@ describes six CPUs, so MTTCG headroom is unused.
 
 ## Where the userspace boot stands
 
-**SpringBoard launches.** The system volume boots to `Early boot complete`
-with 0 panics, and with `-skip-keybag` launchd gets as far as starting
-SpringBoard, which then crashes:
+**SpringBoard launches, and we know why it dies.** The system volume boots to
+`Early boot complete` with 0 panics, and with `-skip-keybag` launchd starts
+SpringBoard, which crashes:
 
 ```
 (boot) <Notice>: Early boot complete. Continuing system boot.
 <Critical>: rebooting due to critical process crashes: SpringBoard
 ```
 
-`backboardd` (pid 69) and `keybagd` (pid 54) are alive as lingering coalitions
-at that point. **Why SpringBoard crashes is the current top question**, and the
-reason is not on the serial console — the only nearby clue is AMFI rejecting
-`PeerTimeSyncPlugin` for `unsuitable CT policy 0`, which is a plugin, not
-SpringBoard. `tools/serial.py` against a shell rootfs, or a `ReportCrash` /
-`os_log` route, would name it.
+The reason is not on the serial console — it was read out of guest RAM with
+`tools/oskcdata.py`, which scans a `pmemsave` dump for the kernel's OS_REASON
+records. SpringBoard's own exit reason:
+
+```
+EXIT_REASON_USER_DESC  "couldn't dlopen libobjc-trampolines.dylib:
+   dlopen(/usr/lib/libobjc-trampolines.dylib, 0x0106): tried:
+   '/usr/lib/libobjc-trampolines.dylib' (no such file, not in dyld cache)"
+PROC_NAME              'SpringBoard'
+```
+
+That is libobjc's `_objc_fatal` on the first IMP trampoline, which no UIKit app
+can avoid. Not dyld, not codesigning, not the spawn — the same dump has dyld's
+launch record showing the shared cache and executable mapped and dyld reaching
+`main`. `temporary-sandbox` dies on the identical string; `lockdownd` dies on
+`/usr/lib/libramrod.dylib`.
+
+**The cause is that the image we boot lost its cryptex merge in the `/tmp`
+wipe.** `libobjc-trampolines.dylib` deliberately is not in the shared cache; it
+ships in the OS cryptex. **2,105 of the cryptex's 2,113 loose files are missing
+from `rootfs.dmg`** — the surviving artifact is the pre-merge one, and every
+boot since has run without it. `docs/re/userspace-boot-state.md` documents the
+merge; `merge_cryptex.sh` itself is still lost. No trust-cache change is needed:
+`merged_sysvol_cryptex_tc.bin` already covers all 49 signed cryptex Mach-Os. One
+trap on the rebuild: the cryptex files are APFS-compressed (`com.apple.decmpfs`,
+type 14), so archive tools list them and extract zero bytes — the copy has to go
+through a mounted volume with `cp`/`ditto`.
+
+Three results worth not re-deriving, all in `docs/re/springboard-crash.md`:
+
+- **The display stack is not the critical path for SpringBoard.** A boot with
+  `-enable dcp` and `DARWIN_DCP_IOMFB=4` (11/11 AFK endpoints, `A401` answering
+  `0x01`) crashes identically in the same 19.6 s window. That hypothesis is
+  refuted, not untested.
+- **`-enable sep` is required for SpringBoard to launch at all.** Without it the
+  `.app` spawn blocks in AMFI/ACM and nothing appears for 600 s past
+  `Early boot complete`.
+- **`-enable ans` plus `-enable dcp` panics SPTM** at `RTBuddy(DCP): start`
+  with `VIOLATION_FRAME_TYPE ... XNU_KERNEL_RESTRICTED`. Either alone is fine.
+  This currently blocks testing the display on the storage path.
 
 Without `-skip-keybag`, `SEPFINAL` still runs 42,020 lines to 0 panics,
 finishes `mount-phase-2`, and reaches launchd's `keybag` boot task and
