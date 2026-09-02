@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import math
+import re
 import struct
 import argparse
 
@@ -134,6 +135,7 @@ EMULATED_FEATURES = {
   'sep': ['arm-io/sep', 'arm-io/dart-sep'],
 }
 KEEP_COMPAT_PATHS = set()
+EPHEMERAL_DATA_BLOCKS = None
 
 def del_compat(d, path=''):
   for c in d.children:
@@ -179,6 +181,44 @@ def fixup_darts(d):
     if c.props.get('device_type') == 'dart' and 'compatible' in c.props:
       c.props['dart-id'] = f"u32:{dart_id}"
       dart_id += 1
+
+def fixup_ephemeral_data(d, size_blocks):
+  # iOS will not finish booting with a read-only root: it needs a writable
+  # /private/var for personas, keybags, containers and databases. Twelve daemons
+  # die with "mkdirat: [30: Read-only file system]" without one, and remounting
+  # by hand does not work — from a root shell inside the guest,
+  #
+  #   /dev/md0 on / (apfs, local, read-only, journaled, noatime)
+  #   mount_apfs: volume could not be mounted: Operation not permitted
+  #
+  # We have no storage controller, so there is no second partition to mount.
+  # Apple's own answer for exactly this situation is already in the device tree:
+  # the recovery/diagnostic environments run /private/var as a tmpfs seeded from
+  # the template that ships on the system volume. /sbin/mount picks the fstab
+  # node by os_env_type, and the apfs kext reads whichever child node is named
+  # literally "fstab" (DT_get_fstab_entries), so selecting that environment is a
+  # matter of renaming: the disk fstab out of the way, the ephemeral one in.
+  #
+  # env 2 (recovery) rather than 3 (diagnostic) because /sbin/fsck only runs its
+  # OS-container check when (os_env_type & ~2) == 1, and that check needs an
+  # APFS boot device we cannot provide; env 2 skips it and exits 0.
+  #
+  # vol.fs_mntopts size= is in 512-byte units. Apple ships 524288 (256 MiB) for
+  # recovery, which is far too small: the /private/var template on this system
+  # volume is over 1 GiB.
+  #
+  # This is a tmpfs. Everything written to /private/var is lost on reboot.
+  fs = d['filesystems']
+  if 'fstab-ephemeral-recovery-data' not in fs:
+    raise ValueError("no fstab-ephemeral-recovery-data node to promote")
+  fs['fstab'].props['name'] = 'fstab-disk'
+  eph = fs['fstab-ephemeral-recovery-data']
+  eph.props['name'] = 'fstab'
+
+  for vol in eph.children:
+    opts = vol.props.get('vol.fs_mntopts')
+    if isinstance(opts, str) and 'size=' in opts:
+      vol.props['vol.fs_mntopts'] = re.sub(r'size=\d+', f'size={size_blocks}', opts)
 
 def fixup_iops(d):
   # Getting an IOP's drivers to *match* is not the same as getting XNU to start
@@ -244,6 +284,18 @@ def fixup_sep(d):
   # coprocessor's own driver — RTBuddy on the DCP's iop-dcp-nub, AppleSEPManager
   # on iop-sep-nub. Setting it on /arm-io/sep alone leaves the assert firing.
   if 'arm-io/sep' not in KEEP_COMPAT_PATHS:
+    # Stripping "compatible" is enough to keep a driver from binding, but not
+    # enough for /usr/libexec/seputil: the data-protection boot task keys off
+    # the mere presence of IODeviceTree:/arm-io/sep. On the normal boot path,
+    # with the node present and no AppleSEPManager answering, it waits 60s and
+    # takes launchd down with it, since the task is RequireSuccess:
+    #
+    #   init_data_protection: Timeout trying to connect to the SEP
+    #   panic(cpu 0 ...): seputil[4] exited ... (signal 0, exit status 60)
+    #
+    # With the node gone it prints "No SEP present on this device" and exits 0.
+    if 'sep' in d['arm-io']:
+      d['arm-io'].remove_child('sep')
     return
   d['arm-io']['sep']['iop-sep-nub'].props['rom-panic-bytes'] = "u32:0x100"
 
@@ -410,6 +462,8 @@ def fixup(d, nvram_file):
   drop_exclave_routes(d)
   fixup_darts(d)
   fixup_iops(d)
+  if EPHEMERAL_DATA_BLOCKS is not None:
+    fixup_ephemeral_data(d, EPHEMERAL_DATA_BLOCKS)
   fixup_sep(d)
   fixup_aic(d['arm-io']['aic'])
   fixup_sptm(d)
@@ -474,6 +528,12 @@ def main():
   p.add_argument('-nvram', required=True, type=argparse.FileType('rb', 0))
   p.add_argument('-enable', action='append', default=[], choices=sorted(EMULATED_FEATURES.keys()),
                  help='keep the device tree nodes for an emulated feature so its XNU drivers bind (eg. -enable dcp)')
+  p.add_argument('-ephemeral-data', dest='ephemeral_data', nargs='?', const='8388608', default=None,
+                 metavar='BLOCKS',
+                 help='promote the ephemeral-recovery fstab so /private/var is a writable tmpfs '
+                      'seeded from the on-volume template. Needs boot-args rootdev=md0 '
+                      '(not rd=md0, which selects the restore path). Size in 512-byte blocks, '
+                      'default 8388608 (4 GiB). Contents are lost on reboot.')
   p.add_argument('-dram', default=None,
                  help='DRAM size for the guest, eg. 24G. Must be matched by qemu -m. Default 8G.')
   args = p.parse_args()
@@ -482,6 +542,9 @@ def main():
     v = args.dram.strip().upper()
     mult = {'G': 1 << 30, 'M': 1 << 20, 'K': 1 << 10}.get(v[-1])
     DRAM_SIZE = int(v[:-1], 0) * mult if mult else int(v, 0)
+  if args.ephemeral_data:
+    global EPHEMERAL_DATA_BLOCKS
+    EPHEMERAL_DATA_BLOCKS = int(args.ephemeral_data, 0)
   for f in args.enable:
     KEEP_COMPAT_PATHS.update(EMULATED_FEATURES[f])
 

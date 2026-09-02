@@ -154,7 +154,7 @@ fi
 echo "logs: $SERIAL  $ERR"
 
 if [[ "$KEEP" -eq 0 ]]; then
-    pkill -f "monitor unix:$SOCK" >/dev/null 2>&1
+    pkill -f "unix:$SOCK" >/dev/null 2>&1
 else
     echo "guest left frozen; resume with: python3 $HMP $SOCK cont"
 fi
