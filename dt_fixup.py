@@ -334,6 +334,36 @@ def fixup_sep(d):
     return
   d['arm-io']['sep']['iop-sep-nub'].props['rom-panic-bytes'] = "u32:0x100"
 
+  # AppleSEPManager::start never returns with the nub's power-gate function
+  # in place. After "control endpoints created" it calls
+  #
+  #   callPlatformFunction("function-wait_for_power_gate", waitForFunction=true)
+  #
+  # on the nub (AppleSEPManager kext 0xfffffff0095a3328 -> kernel
+  # 0xfffffff0085c1a04, x2 = -1). The property points at phandle 0x22, /arm-io/
+  # pmgr, whose driver we strip along with every other unmodelled node, so the
+  # wait-for-function never completes: no "PM init done", no registerService(),
+  # and every waitForMatchingService(AppleSEPManager) in the system times out.
+  # Established with gdbstub breakpoints on the calls either side (docs/re/
+  # sep-bringup.md). The sibling lookup, "function-sep_sleep_prep", is absent
+  # from the tree and returns at once, which is the behaviour we want here.
+  d['arm-io']['sep']['iop-sep-nub'].props.pop('function-wait_for_power_gate', None)
+
+  # With the power gate out of the way, _setPowerState(0 -> 2) still does not
+  # talk to the ROM: AppleSEPManager only boots the SEP itself when it holds a
+  # firmware object, and the one normal boots use comes from
+  # AppleSEPFirmware::fromPreload, gated on the nub property "sepfw-loaded"
+  # (kext 0xfffffff0095a33a0: copyProperty("sepfw-loaded") -> 0x5a33b0
+  # fromPreload). fromPreload wraps the /chosen/memory-map "SEPFW" range in a
+  # memory descriptor without parsing it (0xfffffff009591df4..0x591eb4), so
+  # the loader's zero-filled SEPFW region is enough. qemu-t8030 sets the same
+  # property for the same reason (hw/arm/apple_sep.c, "sepfw-loaded").
+  d['arm-io']['sep']['iop-sep-nub'].props['sepfw-loaded'] = "u32:0x1"
+  # The loader (xnuboot_sptm.c) fills this in with a reserved, zero-filled
+  # range when the entry exists; iBoot's convention for an unset entry is
+  # (-1, -1), same as fixup_sptm() uses for the others.
+  d['chosen']['memory-map'].props['SEPFW'] = struct.pack("<QQ", 0xffffffffffffffff, 0xffffffffffffffff)
+
   # The same constructor then wants a non-zero chip id:
   #
   #   REQUIRE fail: _chip_id = *(uint32_t *)entry->getBytesNoCopy()

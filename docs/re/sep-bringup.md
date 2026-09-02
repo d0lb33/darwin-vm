@@ -12,6 +12,14 @@ address as `0xfffffff029582de0` (runtime); `ipsw macho info` on the extracted
 kext gives `__TEXT_EXEC` starting at unslid `0xfffffff009582de0` — the
 difference is exactly `0x20000000`.
 
+> **Correction (2026-09-02, later the same day):** the "next gate" section
+> below misreads the log. `ACMTRM: waitForSEPEndpoint: timed out waiting for
+> AppleSEPManager` is printed for *both* waits, and at the time it was the
+> class wait that failed: `AppleSEPManager::start()` never returned (it blocks
+> in `callPlatformFunction("function-wait_for_power_gate")`), so it never
+> called `registerService()`. With that and two more gates fixed, the SEP
+> boots and `sep-endpoint,scrd` is published. See `sep-protocol.md`.
+
 ## Summary
 
 `AppleSEPBooter::initForSEP` reads a literal-named IORegistryEntry property,
