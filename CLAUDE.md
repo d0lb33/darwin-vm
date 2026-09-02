@@ -132,6 +132,38 @@ Mirror it in `darwin_asc.c` when the mailbox finally sees traffic.
 
 ## Where the rootfs work stands
 
+**The real iOS system volume now boots as a ramdisk.** APFS mounts it,
+libignition runs, and the kernel execs the real /sbin/launchd off it:
+
+```
+md0 device_handle block size 512 block count 19582976
+md0s1 mount-complete volume RaveSeed24A5430a.D47DeveloperOS
+libignition: 1:   program : launchd
+```
+
+This needed the memdev patch (qemu-sptm/hw/arm/xnu_patch.c) to lift XNU's 4GiB
+ramdisk cap, plus `dt_fixup.py -dram` and `probe.sh --mem` to raise guest DRAM,
+plus an assembled image with the dyld shared cache copied to
+System/Library/Caches/com.apple.dyld (dyld skips cryptex mounting when it finds
+one there). See docs/re/rootfs-assembly.md for how the image is built without
+sudo, and for the merged v2 trustcache.
+
+The current blocker is dyld failing to map that cache:
+
+```
+dyld[1]: dyld cache '(null)' not loaded: syscall to map cache into shared region failed
+dyld[1]: Library not loaded: /usr/lib/libSystem.B.dylib
+```
+
+Ruled out: memory pressure (identical at 32G and 40G, which leaves 20GB free),
+shared region capacity (4.97 GiB of mappable subcaches against a 6.00 GiB
+SHARED_REGION_SIZE_ARM64), and code signing (amfi_get_out_of_my_way=1 changes
+nothing; cs_enforcement_disable is refused outright). Leading theory is that
+`rd=md0` makes libignition classify this as a "ramdisk" (restore) boot, which on
+real hardware has no shared cache at all.
+
+### Historical
+
 The real iOS filesystem is decrypted and mounted locally (see
 `docs/re/rootfs-boot.md`). `ipsw fw aea --fcs-key` issues decryption keys with
 no credentials. The system volume is unsealed, so authenticated-root is not a
