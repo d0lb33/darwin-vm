@@ -136,6 +136,7 @@ EMULATED_FEATURES = {
 }
 KEEP_COMPAT_PATHS = set()
 EPHEMERAL_DATA_BLOCKS = None
+SKIP_KEYBAG = False
 
 def del_compat(d, path=''):
   for c in d.children:
@@ -181,6 +182,26 @@ def fixup_darts(d):
     if c.props.get('device_type') == 'dart' and 'compatible' in c.props:
       c.props['dart-id'] = f"u32:{dart_id}"
       dart_id += 1
+
+def fixup_skip_keybag(d):
+  # The `keybag` boot task hangs forever on a machine with no SEP, and unlike
+  # seputil's 60-second wait it has no deadline at all: the guest's only vCPU
+  # parks in the SPTM WFI trap with nothing runnable.
+  #
+  # The chain, from docs/re/keybag.md: keybagd finds no systembag.kb (normal on
+  # a first boot — the "-7" it logs is a hardcoded literal that its own caller
+  # swallows), and falls into AppleKeyStore.framework's aks_get_system(). That
+  # lands in com.apple.driver.AppleSEPKeyStore, which is the *only* keystore
+  # kext in this kernelcache — there is no software fallback to fall back to —
+  # and which routes the operation through a SEP mailbox with nothing behind it.
+  #
+  # keybagd --init checks /product for "boot-ios-diagnostics" before any of
+  # that, and exits 0 immediately when it is present. Presence is what is
+  # checked, not the value.
+  #
+  # This is a skip, not a fix: nothing gets a real keybag, so anything that
+  # actually needs one will fail later. It buys us the rest of the boot.
+  d['product'].props['boot-ios-diagnostics'] = "u32:1"
 
 def fixup_ephemeral_data(d, size_blocks):
   # iOS will not finish booting with a read-only root: it needs a writable
@@ -464,6 +485,8 @@ def fixup(d, nvram_file):
   fixup_iops(d)
   if EPHEMERAL_DATA_BLOCKS is not None:
     fixup_ephemeral_data(d, EPHEMERAL_DATA_BLOCKS)
+  if SKIP_KEYBAG:
+    fixup_skip_keybag(d)
   fixup_sep(d)
   fixup_aic(d['arm-io']['aic'])
   fixup_sptm(d)
@@ -528,6 +551,9 @@ def main():
   p.add_argument('-nvram', required=True, type=argparse.FileType('rb', 0))
   p.add_argument('-enable', action='append', default=[], choices=sorted(EMULATED_FEATURES.keys()),
                  help='keep the device tree nodes for an emulated feature so its XNU drivers bind (eg. -enable dcp)')
+  p.add_argument('-skip-keybag', dest='skip_keybag', action='store_true',
+                 help='set /product boot-ios-diagnostics so keybagd --init exits instead of '
+                      'blocking forever on a SEP that is not there. A skip, not a fix.')
   p.add_argument('-ephemeral-data', dest='ephemeral_data', nargs='?', const='8388608', default=None,
                  metavar='BLOCKS',
                  help='promote the ephemeral-recovery fstab so /private/var is a writable tmpfs '
@@ -542,6 +568,9 @@ def main():
     v = args.dram.strip().upper()
     mult = {'G': 1 << 30, 'M': 1 << 20, 'K': 1 << 10}.get(v[-1])
     DRAM_SIZE = int(v[:-1], 0) * mult if mult else int(v, 0)
+  if args.skip_keybag:
+    global SKIP_KEYBAG
+    SKIP_KEYBAG = True
   if args.ephemeral_data:
     global EPHEMERAL_DATA_BLOCKS
     EPHEMERAL_DATA_BLOCKS = int(args.ephemeral_data, 0)
