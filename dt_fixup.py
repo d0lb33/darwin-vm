@@ -262,6 +262,20 @@ def fixup_iops(d):
   # Only RTBuddy-style nubs get the nub properties. SEP's nub is "iop-nub,sep"
   # and is driven by AppleSEPManager, which boots the coprocessor its own way;
   # telling it the firmware is pre-loaded would be a claim we have not tested.
+  #
+  # And only where iBoot did not already describe a firmware region. We are
+  # substituting for iBoot, not overriding it: the DCP's nub ships with no
+  # region-base at all, which is why we invent one, but ANS and SMC ship real
+  # ones (ANS also ships "power-managed", so RTBuddy starts it without being
+  # asked). Clobbering those with the DCP's invented address made RTBuddy map
+  # memory SPTM had typed XNU_KERNEL_RESTRICTED, and SPTM killed the boot:
+  #
+  #   panic: [SPTM] VIOLATION_FRAME_TYPE: refcounts_update_page_op
+  #          (sptm_types.c:3347) ... fte->type(XNU_KERNEL_RESTRICTED)
+  #
+  # Leaving those nubs alone, ANS boots clean and Apple's own storage drivers
+  # probe: AppleANS3CGv2Controller returns score 500000, AppleANS2NVMeController
+  # 100000, and RTBuddy(ANS2) starts.
   for c in d['arm-io'].children:
     if 'compatible' not in c.props:
       continue
@@ -270,7 +284,7 @@ def fixup_iops(d):
       compat = nub.props.get('compatible', '')
       if isinstance(compat, bytes):
         compat = compat.decode('utf8', 'replace')
-      if 'rtbuddy' not in compat:
+      if 'rtbuddy' not in compat or 'region-base' in nub.props:
         continue
       nub.props['pre-loaded'] = "u32:1"
       nub.props['region-base'] = "u64:0x10010000000"
