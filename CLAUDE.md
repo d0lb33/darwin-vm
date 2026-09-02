@@ -296,40 +296,69 @@ describes six CPUs, so MTTCG headroom is unused.
 
 ## Where the userspace boot stands
 
-The real iOS system volume boots, and as of tonight it boots down iOS's
-**normal** path rather than the restore path:
+**SpringBoard launches.** The system volume boots to `Early boot complete`
+with 0 panics, and with `-skip-keybag` launchd gets as far as starting
+SpringBoard, which then crashes:
 
 ```
-tools/probe.sh --dtree <tree built with -ephemeral-data> \
-  --ramdisk /tmp/dvm/build/rootfs_sh.dmg \
-  --tc /tmp/dvm/tc/merged_sysvol_cryptex_ramdisk_tc.bin --mem 40G --secs 420 \
-  --bootargs 'rootdev=md0 ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort'
+(boot) <Notice>: Early boot complete. Continuing system boot.
+<Critical>: rebooting due to critical process crashes: SpringBoard
 ```
 
-reaches `libignition ... boot spec name : local` with seven stages and no
-"Restore environment", runs `mount-phase-1` and `-2` for the first time, and
-mounts `/private/var` as a tmpfs seeded from the on-volume template. It
-currently dies 2,493 files into that copy with
+`backboardd` (pid 69) and `keybagd` (pid 54) are alive as lingering coalitions
+at that point. **Why SpringBoard crashes is the current top question**, and the
+reason is not on the serial console — the only nearby clue is AMFI rejecting
+`PeerTimeSyncPlugin` for `unsuitable CT policy 0`, which is a plugin, not
+SpringBoard. `tools/serial.py` against a shell rootfs, or a `ReportCrash` /
+`os_log` route, would name it.
 
-```
-panic(cpu 0 ...): ramstrategy: buf_map failed @memdev.c:299
-```
+Without `-skip-keybag`, `SEPFINAL` still runs 42,020 lines to 0 panics,
+finishes `mount-phase-2`, and reaches launchd's `keybag` boot task and
+`MobileAssetEarlyBootTask`.
 
-Booting with plain `rd=md0` still works and still reaches a shell; that path
-just cannot reach SpringBoard, for the reasons in
-`docs/re/userspace-boot-state.md`.
+Three gates were cleared to get here, all in `docs/re/seputil-data-protection.md`
+with addresses:
 
-Two further things are known to stand between here and SpringBoard:
+- **the xART marker node.** `gigalocker_init`'s first call (`0x100014820`) is
+  just `IORegistryEntryFromPath` on
+  `"IODeviceTree:/arm-io/sep/iop-sep-nub/xART"`; with the node absent seputil
+  prints "xART is not supported on platform, skipping initialization" and
+  returns 0. `dt_fixup.py -enable sep` removes it.
+- **`/chosen/sepfw-load-at-boot = 0`.** The personalized `sep-firmware.img4`
+  lives on the **Preboot** volume, which the IPSW system-volume payload does
+  not contain. Clearing it takes the "Skipping SEP firmware load" branch. The
+  SEP still does its full ROM handshake and ACM still sends SCRD commands —
+  that was measured, not assumed.
+- **the `sks` endpoint is no longer advertised.** `AppleSEPKeyStore` starts its
+  IPC the moment `sep-endpoint,sks` appears and panics at strike 20 (`cmp w21,
+  0x14` at `0xfffffff00954c0b4`). Advertising an endpoint we cannot answer is
+  strictly worse than not advertising it. Default is `cntl,scrd,xars,xarm`;
+  `DARWIN_SEP_EPS` restores the old set. This also removed a latent panic from
+  the restore-ramdisk path, which was silently reaching strike 18.
 
-- **SEP.** AMFI asks ACM for developer-mode status on every spawn; ACM waits on
-  `AppleSEPManager`; that wait burns 890 seconds of every 900. `-enable sep`
-  plus three device tree values gets the driver to `control endpoints created`,
-  but ACM then waits for `sep-endpoint,scrd` — a name `AppleSEPManager` builds
-  at runtime from what the coprocessor reports over the mailbox, so no device
-  tree property can close it. `docs/re/sep-bringup.md`.
-- **Personas.** `usermanagerd` dies with "Daemon failed to load persona
-  manifest" and 248 `kpersona_find_by_type(type 6)` failures follow. Expected to
-  clear once `/private/var` is genuinely writable.
+A refuted idea worth not re-having: making `/private/xarts` writable cannot
+help. seputil's boot-task path passes 0 for "may I create the file" — only
+`--gigalocker-init` passes 1 — so it returns `errno` 2 without ever attempting
+a create.
+
+Still open: **personas.** `usermanagerd` dies with "Daemon failed to load
+persona manifest" and 248 `kpersona_find_by_type(type 6)` failures follow.
+
+### Two traps in the panic logs, both of which have already cost an hour
+
+- **This machine has no reset path.** Any launchd-initiated reboot ends in
+  `panic: Halt/Restart Timed Out @IOPlatformExpert.cpp:900`. That panic is a
+  *consequence* of the guest asking to reboot; the real failure is above it.
+- **The nested-panic block is not your fault.** Every run that panics at all
+  prints a byte-identical register dump inside `<Nested panic string>` with
+  `esr: 0x96000045` and `far: 0xb1`. It is the panic printer faulting, not a
+  NULL pointer in whatever you just changed. It appears in runs whose real
+  panic was `seputil[4] exited ... status 2`. Do not decode it and conclude
+  anything; find the *first* `panic(cpu` line instead.
+
+Artifacts now live at `~/dvm-artifacts/` (`build/rootfs.dmg`,
+`tc/merged_sysvol_cryptex_tc.bin`), not `/tmp/dvm/build`, which gets wiped.
+There is currently no `rootfs_sh.dmg` (the shell-tools rootfs) in that set.
 
 ## Reading the logs
 
