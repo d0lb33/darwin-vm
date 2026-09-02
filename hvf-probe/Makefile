@@ -10,6 +10,13 @@ hvf_probe: hvf_probe.c
 	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
 	codesign -s - --entitlements hvf.entitlements -f $@
 
+# How much does one VM exit cost on this Mac? Feeds docs/re/hvf-acceleration.md.
+exitbench: hvf_exitbench
+
+hvf_exitbench: hvf_exitbench.c
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS)
+	codesign -s - --entitlements hvf.entitlements -f $@
+
 # Cross-check the hand-assembled encodings against clang's assembler.
 check: hvf_probe check.o
 	./hvf_probe --selftest > selftest.txt
