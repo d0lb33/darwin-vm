@@ -288,6 +288,14 @@ resolvable from any of the four reference bodies — needs either an empirical
 MMIO trace (`DARWIN_UNIMP_DEBUG=1` once a device model claims reg[3]/reg[9]
 and something else backs the rest) or SPTM/firmware disassembly.**
 
+> **RESOLVED — reading (b), and the split is by *who* is accessing.** The trace
+> now exists (§11). Every access XNU's `IONVMeFamily` makes goes through
+> **reg[3]**, including the linear doorbells at `+0x24910` and the whole NVMMU
+> block; every access SPTM makes on the kernel's behalf goes through
+> **reg[9]**. Nothing ever touches `reg[9] + 0x24910`, so reg[9] only ever
+> needs its declared `0x10000` and no window has to be over-provisioned.
+> Full per-register list in §11.
+
 ## 3. What T8140's own kernelcache disassembly adds
 
 Extracted via `ipsw kernel dec` → `ipsw kernel extract ... com.apple.iokit.IONVMeFamily
@@ -689,3 +697,233 @@ above:
    `/arm-io/sart-ans` still falls through to `darwin-unimp` except the
    explicitly-unresolved reg windows from §1/§9 — any surprise hit there is
    this document's next correction.
+
+## 11. What the guest actually did — the MMIO trace
+
+Everything above §10 was static RE. This section is the opposite: the complete
+list of registers `IONVMeFamily` and SPTM touch in one boot, taken from
+`darwin-ans`'s own trace (`DARWIN_ANS_DEBUG=1`, probe tag `ANSDISK`, and
+re-confirmed on `A9FW` / `A9ROOT4`). Where it contradicts §1–§9, this wins.
+
+### 11.1 Which window each register is reached through
+
+The `reg[3]`-vs-`reg[9]` question (§2.4) has a two-part answer, because two
+different pieces of software program this controller:
+
+| Register | Offset | Window used | Who |
+|---|---|---|---|
+| CAP / CAP_HI | `0x0000` / `0x0004` | **reg[3]** | XNU |
+| VS | `0x0008` | **reg[3]** | XNU |
+| CC | `0x0014` | **reg[3]** | XNU |
+| CSTS | `0x001c` | **reg[3]** | XNU |
+| INTMS / INTMC | `0x000c` / `0x0010` | **reg[3]** | XNU (ISR) |
+| AQA | `0x0024` | **reg[9]** | SPTM |
+| ASQ lo/hi | `0x0028` / `0x002c` | **reg[9]** | SPTM |
+| ACQ lo/hi | `0x0030` / `0x0034` | **reg[9]** | SPTM |
+| ACQ_DB | `0x1004` | **reg[3]** | XNU |
+| IOCQ_DB | `0x100c` | **reg[3]** | XNU |
+| IOQ_SQ_BASE lo/hi | `0x1200` / `0x1204` | **reg[9]** | SPTM |
+| IOQ_CQ_BASE lo/hi | `0x1208` / `0x120c` | **reg[9]** | SPTM |
+| MAX_PEND_CMDS_CTRL | `0x1210` | **reg[9]** | SPTM |
+| BOOT_STATUS | `0x1300` | **reg[3]** | XNU |
+| MODESEL | `0x1304` | **reg[3]** | XNU |
+| BASE_CMD_ID | `0x1308` | **reg[3]** | XNU |
+| LINEAR_ASQ_DB | `0x2490c` | **reg[3]** | XNU |
+| LINEAR_IOSQ_DB | `0x24910` | **reg[3]** | XNU |
+| NUM_TCBS | `0x28100` | **reg[3]** | via SPTM ioctl |
+| ASQ_TCB_BASE lo/hi | `0x28108` / `0x2810c` | **reg[3]** | via SPTM ioctl |
+| IOSQ_TCB_BASE lo/hi | `0x28110` / `0x28114` | **reg[3]** | via SPTM ioctl |
+| TCB_INVAL | `0x28118` | **reg[3]** | XNU |
+
+This matches the SPTM disassembly in `darwin_ans.c`'s header exactly: SPTM maps
+`reg[3] + 0x28000` (one page, the NVMMU) *and* `reg[9]` (the "secure BAR"),
+while XNU's own driver uses the flat `reg[3] + 0x0` alias the M1-era parts use
+for everything. So `nvme-secure-bar` does not mean "the NVMe registers moved to
+reg[9]"; it means "SPTM gets its own alias of them at reg[9]".
+
+**`0x24910` never appears in reg[9].** §2.4's option (a) — that reg[9]'s
+declared `0x10000` understates the aperture — is wrong; reg[9] is exactly
+`0x10000` and that is all it needs to be.
+
+### 11.2 Registers no source predicted correctly
+
+- **`LINEAR_SQ_CTRL` (`0x24908`) is never written.** Linux (`apple.c:1132`) and
+  m1n1 (`nvme.c:382`) both set its EN bit as step 4 of bring-up. XNU does not
+  touch it at all; the equivalent step is
+  `AppleANS2CGv2Controller::SetupAdminQueue():439: Successfully enabled NVMe
+  CoastGuard`, which goes through `pmap_iommu_ioctl` (the kernelcache string is
+  `NVME_PPL_IOCTL_ENABLE_CG`), and SPTM evidently does not turn it into an MMIO
+  store to this offset. A model must not gate anything on it.
+- **`TCB_STAT` is never read**, at either `0x28120` (Linux `apple.c:60`) or
+  `0x29120` (m1n1 `nvme.c:55`). §2.3 flagged that discrepancy as unresolved; on
+  t8140 it is moot.
+- **`MODESEL` (`0x1304`) is real**, not a QAS guess. Written once with 0:
+  `AppleANS2NVMeController::SetModeselRegister(uint32_t)::1164: Setting modesel
+  to 0`. §2.2 can drop the "unverified" on this one.
+- **`BASE_CMD_ID` (`0x1308`) is real too**, but only as a *read*, once, and the
+  guest is content with 0. QAS's hardcoded `0x6000` readback is not needed.
+- **`0x28000`–`0x2803c` is swept as a 16-word block**, 12–16 times per boot, all
+  reading 0 and all tolerated. Unidentified; it sits immediately below the
+  documented NVMMU registers. Nothing branches on the contents.
+- **`0x1314` is read once and `0x13c8` written once** in the NVMe file.
+  Unidentified, zero readback tolerated.
+- **Vendor admin opcode `0xd8`**, issued twice per boot. Named by the guest's
+  own complaint when we reject it: `AppleNVMeController::ProcessTunnelCommand()
+  :1227` / `AppleANS2NVMeController::GetSanitizeCounters():5499: nvme:
+  CORE_DEBUG_EXPORT_STATS failed`. Advisory — the driver carries on.
+
+### 11.3 The count-vs-0-based conventions, pinned per register
+
+This hardware is not consistent, and getting one wrong is fatal in a way that
+does not look like a queue bug:
+
+| Register | Convention | Observed value for a 64-entry queue |
+|---|---|---|
+| `CAP.MQES` | **count** | `0x40` |
+| `AQA` ASQS/ACQS | **count** | `0x00400040` |
+| `MAX_PEND_CMDS_CTRL` | **count** | `0x00400040` |
+| `NUM_TCBS` | **0-based** | `0x3f` |
+
+`CAP.MQES` as a count is not optional: with the spec-correct `0x3f` the driver
+logs `GetNVMeSPTMQueueEntries():164: NVMe Queue Entries=64`, hands SPTM the raw
+`0x3f`, and SPTM kills the boot comparing it against the device tree's
+`nvme-queue-entries` (`0x40`):
+
+```
+panic: [SPTM] VIOLATION_NVME_ILLEGAL_NVMe_QUEUE_ENTRIES_MISMATCH:
+       validate_nvme_queue_entries(nvme_validation.h:182) - queue_entries(0x3f)
+```
+
+With `MQES = 0x40` the same driver reports `NVMe Queue Entries=65` — it adds
+one — and creates a 65-entry IO queue pair. The model must use the same 65 for
+the CQ wrap or the phase bit desynchronises; it does, because it applies the
+spec's `QSIZE + 1` to what the driver wrote. The two disagreements cancel,
+which is worth knowing before someone "fixes" one of them.
+
+The full CAP the guest is content with is `0x0040_0020_1401_0040`:
+MQES 64, CQR 1, TO 20, DSTRD 0, CSS = NVM command set, MPSMIN 0, MPSMAX 4.
+The guest then writes `CC = 0x460001`: EN 1, **MPS 0 (4 KiB NVMe pages, not the
+16 KiB guest page size)**, IOSQES 6, IOCQES 4.
+
+### 11.4 MDTS has a hard floor, and it is above 128 KiB
+
+Identify Controller byte `0x4d`. No source states Apple's value, but APFS
+issues 256 KiB reads and `IONVMeFamily` sizes its per-request PRP list from
+MDTS, so too small a value fails as an out-of-memory error several layers up:
+
+```
+libignition: dylib_cache: opened shared cache directory:
+                          /System/Library/Caches/com.apple.dyld
+AppleNVMe Assert failed: ( PRPEntryCount <= ( ( fPRPSize / sizeof ( PRPEntry ) )
+    + 1 ) ) Exit @AppleNVMeRequest.cpp:901
+IOBlockStorageDriver: executeRequest: request failed to start!
+disk1: resource shortage.
+apfs_vnop_read:11932: disk1s1 ... retval 12 ... resid 262144 ...
+dyld[1]: dyld cache '(null)' not loaded
+panic: launchd[1] fatal signal 6 -- Library not loaded: /usr/lib/libSystem.B.dylib
+```
+
+(probe `A9ROOT3`, MDTS 5 = 128 KiB). MDTS 8 (1 MiB, `A9ROOT4`) clears it and
+launchd runs. `darwin-ans` defaults to 8, overridable with `DARWIN_ANS_MDTS`.
+
+### 11.5 SART is never programmed through the window we can see
+
+`darwin_sart_allows()` returns false for every single DMA — 411,000 times in
+one system-volume boot. That is not a bug in `darwin_sart.c`: the CoastGuard
+mapper reaches the filter through
+`pmap_iommu_ioctl(&_ppl->super, SART_IOCTL_SET_ACTIVE, ...)` (string in
+`com.apple.driver.AppleSART`), and whatever SPTM does in response never lands
+on the CONFIG/PADDR/SIZE registers at `sart-ans` reg[0]. So the region table we
+can observe stays empty and enforcement would deny everything. `darwin-ans`
+logs the first few and then a running total, and only enforces under
+`DARWIN_ANS_SART=enforce` (which will refuse every transfer — it exists to
+prove the plumbing, not to be switched on).
+
+### 11.6 The NVRAM namespace is not backed
+
+`AppleEmbeddedNVMeNVRAM::GetNVRAMSize():564: NVRAM size is 8192 bytes`, then a
+one-block read of a namespace the model does not back, which returns Invalid
+Namespace (`0x0b`) and produces:
+
+```
+IONVMeController::HandleCompletionErrors():6421: Read LBA=0x00000000 BLOCKS=0x00000001 ... NVMeStatus=0xb
+AppleEmbeddedNVMeNVRAM::start():136: Failed to restore shadow (0x0000000B) - Initializing NVRAM service
+```
+
+Non-fatal — the service initialises empty NVRAM and the boot continues. Our DT
+lists seven namespaces (nsids 1, 2, 3, 4, 5, 8, 13); a real iPhone puts NVRAM,
+effaceable storage and the panic log in the others. Backing the small ones with
+scratch RAM is the obvious next increment if anything turns out to need them.
+
+## 12. Booting the root filesystem off ANS
+
+This works. The recipe, and what each piece is for:
+
+```bash
+# 1. device tree: -enable ans, plus the iop-ans-nub firmware region
+#    (see tools/ans/dt_ans_fixup.py for why dt_fixup.py alone is not enough)
+python3 tools/ans/dt_ans_fixup.py /tmp/dvm/dtree_raw /tmp/dvm/dt_ans.bin \
+    -nvram nvram.bin -enable ans -enable smc -ephemeral-data -dram 12G
+
+# 2. never write through to the 21 GB image; boot a copy-on-write overlay
+qemu-sptm/build/qemu-img create -f qcow2 -F raw \
+    -b ~/dvm-artifacts/build/rootfs.dmg ~/dvm-artifacts/build/rootfs-overlay.qcow2
+
+# 3. boot
+DARWIN_ANS_SELFWIRE=1 tools/probe.sh \
+    --dtree /tmp/dvm/dt_ans.bin \
+    --tc ~/dvm-artifacts/tc/merged_sysvol_cryptex_tc.bin \
+    --mem 12G --secs 900 --tag ROOT \
+    --bootargs 'rootdev=disk1s1 ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort' \
+    -- -drive if=none,id=ans,file=$HOME/dvm-artifacts/build/rootfs-overlay.qcow2,format=qcow2
+```
+
+Three details that each cost a boot to find:
+
+- **The volume is `disk1s1`, not `disk0s1`.** `disk0` is the NVMe media; APFS
+  synthesises a container device `disk1` on top of it and the system volume is
+  `disk1s1`. Confirmed from a guest shell:
+
+  ```
+  # ls /dev
+  disk0  disk1  disk1s1  rdisk0  rdisk1  rdisk1s1  md0  rmd0 ...
+  ```
+
+  With `rd=disk0s1` XNU just waits forever:
+  `Waiting on <dict ...><key>BSD Name</key><string>disk0s1</string></dict>`.
+
+- **`rootdev=`, not `rd=`.** With `rd=disk1s1` the volume mounts and then
+  `panic: rootvp not authenticated after mounting @bsd_init.c:976`, because
+  APFS decides `is_root_hash_authentication_required:611: disk1s1 Root Volume,
+  root hash authentication is required` and iBoot never forwarded a root hash
+  (`apfs_extract_root_hash_arm:13780: could not retrieve system-volume-auth-blob
+  from device tree`). `xnu_patch.c`'s `bsd_rooted_ramdisk()` patch suppresses
+  that check, but only on the branch where `PE_parse_boot_argn("rd")` *fails* —
+  so it only helps when the boot-arg is spelled `rootdev=`. Same reason
+  `rootdev=md0` is used for the ramdisk path.
+
+- **`-ephemeral-data` is still needed**, because `rootfs.dmg` is a single-volume
+  container with no Data volume:
+
+  ```
+  failed to lookup data volume - Attribute not found
+  mount: mount: missing data volume
+  panic: mount[8] exited ... exit status 66
+  ```
+
+  `tools/rootfs/build_dual_volume.sh` is the real fix; `-ephemeral-data` is the
+  workaround that proves the storage path.
+
+What this buys, beyond retiring the 21 GB ramdisk: `mount-phase-2` **completes**
+for the first time. On the ramdisk path it died 2,493 files into the
+`/private/var` copy with `panic: ramstrategy: buf_map failed @memdev.c:299`;
+with the filesystem on ANS the memory-disk driver is not in the path at all, so
+the copy runs to the end and the boot goes on to `init-with-data-volume`,
+`fixup-mobile-tmp`, `MSUEarlyBootTask`, `MobileAssetEarlyBootTask`, `fips` and
+`keybag`.
+
+`-enable sep` must **not** be combined with this yet: it panics in
+`AppleSEPXART::getFullEpochs()`,
+`REQUIRE fail: expected_out_len == out_len @AppleSEPXART_embedded.cpp:1021`
+(probe `A9LONG`). The SEP model answers enough for `AppleSEPManager` on the
+ramdisk path but not for the xART epoch query the system-volume path makes.

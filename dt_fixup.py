@@ -284,7 +284,14 @@ def fixup_iops(d):
       compat = nub.props.get('compatible', '')
       if isinstance(compat, bytes):
         compat = compat.decode('utf8', 'replace')
-      if 'rtbuddy' not in compat or 'region-base' in nub.props:
+      # ANS ships region-base = 0x0, iBoot's placeholder, so the "already has
+      # a real region" test has to look at the value, not just the key. SMC's
+      # is a genuine address (0x30de00000) and must still be left alone -- that
+      # overwrite is what caused VIOLATION_FRAME_TYPE / XNU_KERNEL_RESTRICTED.
+      # Without this, /arm-io/ans/iop-ans-nub never starts: the ASC logs zero
+      # messages and AppleANS2NVMeController parks forever in
+      # waitForMatchingService("ANS2Endpoint1", -1). Measured, tags A9DBG/A9FW.
+      if 'rtbuddy' not in compat or nub.props.get('region-base') not in (None, 'u64:0x0'):
         continue
       nub.props['pre-loaded'] = "u32:1"
       nub.props['region-base'] = "u64:0x10010000000"
