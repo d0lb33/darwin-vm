@@ -241,6 +241,51 @@ def fixup_ephemeral_data(d, size_blocks):
     if isinstance(opts, str) and 'size=' in opts:
       vol.props['vol.fs_mntopts'] = re.sub(r'size=\d+', f'size={size_blocks}', opts)
 
+def fixup_fstab_drop_unavailable(d):
+  # Apple's real fstab names six volumes: xART, Preboot, Data, Baseband-Data,
+  # Update and Hardware. We can build a disk image that has System, Data,
+  # Preboot and Hardware -- "diskutil apfs addVolume -role" covers those -- but
+  # NOT xART: macOS refuses to set that role at all, both at addVolume and via
+  # chrole afterwards ("Unable to set the APFS Volume Role (-69599)"). It is
+  # secure-enclave storage and the host will not hand it out.
+  #
+  # DT_get_fstab_entries resolves every fstab child to a volume by ROLE, and on
+  # the first boot of a real two-volume image it printed
+  #
+  #   DT_get_fstab_entries:12873: failed to get volume for role: 256
+  #
+  # (256 = 0x100 = xART) and then never mounted the Data volume at all -- no
+  # disk1s2 line appears in any apfs mount, /private/var stayed the sealed
+  # read-only system copy, and fixup-mobile-tmp died with "Read-only file
+  # system". So an entry we can never satisfy has to come out of the table.
+  #
+  # This is the filesystem-side twin of the xART node removal in fixup_sep():
+  # there we drop /arm-io/sep/iop-sep-nub/xART so seputil takes its
+  # "not supported on platform" path; here we drop the fstab entry so the
+  # mounter does not look for a volume that cannot exist.
+  fs = d['filesystems']
+  if 'fstab' not in fs:
+    return
+  tab = fs['fstab']
+  before = len(tab.children)
+  # Roles we cannot supply, and why. macOS's diskutil will create a volume for
+  # Preboot (B), Data (D) and Hardware (H), so those stay. It refuses xART
+  # outright, and offers no role letter for Baseband-Data (0x80) or Update
+  # (0xc0) -- the role field is a bitmask (Update = Data|Baseband,
+  # Hardware = xART|Data), and only some combinations are grantable.
+  #
+  # Measured one boot at a time, which is the point of leaving the failures
+  # legible: with only xART removed the mounter moved on to
+  # "failed to get volume for role: 128" (Baseband), so the same treatment is
+  # owed to every entry whose volume cannot exist.
+  DROP = ('xART', 'Baseband-Data', 'Update')
+  tab.children = [v for v in tab.children
+                  if str(v.props.get('vol.fs_name', '')) not in DROP]
+  removed = before - len(tab.children)
+  if removed and 'max_fs_entries' in tab.props:
+    tab.props['max_fs_entries'] = f"u32:{len(tab.children)}"
+  return removed
+
 def fixup_iops(d):
   # Getting an IOP's drivers to *match* is not the same as getting XNU to start
   # it. Without these, RTBuddy binds the DCP and AppleDCPExpert matches, but the
@@ -622,6 +667,7 @@ def fixup(d, nvram_file):
   if SKIP_KEYBAG:
     fixup_skip_keybag(d)
   fixup_sep(d)
+  fixup_fstab_drop_unavailable(d)
   fixup_aic(d['arm-io']['aic'])
   fixup_sptm(d)
   del d.props['secure-root-prefix']
