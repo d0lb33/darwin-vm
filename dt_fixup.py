@@ -129,6 +129,19 @@ def del_compat(d, path=''):
     if not any(x in compat for x in SUPPORTED_DRIVERS):
       del d.props['compatible']
 
+def drop_exclave_routes(d):
+  # An IOP nub's "routes" property points at a secure-rtbuddy-proxy node, i.e.
+  # the exclave (secure world) side of that coprocessor's mailbox. We don't
+  # emulate exclaves, and while the route is present RTBuddy brings the IOP up
+  # but the AP-side drivers above it never bind. Dropping it lets the normal
+  # driver stack attach (eg. AppleDCPExpert on the DCP).
+  for c in d['arm-io'].children:
+    if 'compatible' not in c.props:
+      continue
+    for nub in c.children:
+      if 'routes' in nub.props:
+        del nub.props['routes']
+
 def fixup_darts(d):
   # SPTM bootstraps every DART whose node still has a compatible, and expects
   # iBoot to have added a unique "dart-id" to each of them (it panics with
@@ -274,6 +287,7 @@ def fixup(d, nvram_file):
     ctrr.props['write-disable-reg-value'] = "u32:1"
 
   del_compat(d)
+  drop_exclave_routes(d)
   fixup_darts(d)
   fixup_aic(d['arm-io']['aic'])
   fixup_sptm(d)

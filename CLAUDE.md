@@ -94,11 +94,21 @@ name; the orchestrator merges.
 
 ## Where the DCP bring-up stands
 
-RTBuddy(DCP) completes the RTKit handshake and publishes `RTBuddyService`.
-Immediately after, XNU takes a PC-alignment panic branching through an
-out-of-bounds index into its `hwerr_type_*` hardware-error dispatch table,
-which points at an unhandled synchronous external abort. Confirming which MMIO
-block triggers it is the current front line.
+`dt_fixup.py -enable dcp` boots with no panic, reaches the shell, and gets the
+display chain to:
+
+```
+RTBuddy(DCP): start(...)
+IOMFB: service matched: AppleDCPExpert
+IOMFB AP: use_psd_dcp_power2: 0
+```
+
+No kernelcache patching is needed. Exactly one unmodelled MMIO access remains
+on this path even over a 240s boot (a single 4-byte write of 0x10 to
+`dcp0-expert` reg[1]), so the next obstacle is protocol, not missing MMIO:
+XNU never touches the DCP mailbox registers, meaning the coprocessor is never
+asked to start. Finding out what `AppleDCPExpert` is waiting on before it
+starts the IOP is the current front line.
 
 Endpoint map, from the kext IOKit personalities:
 
