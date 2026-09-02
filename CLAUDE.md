@@ -155,33 +155,58 @@ protocol facts, both derived from the guest rather than the M1-era references:
 Answering at all is what makes the AP proceed: with no reply it sends one
 `OPEN` and one command and stops; with one it opens every announced interface.
 
-### The pixel path (endpoint 0x37, IOMFB) — handshake done
+### The pixel path (endpoint 0x37, IOMFB) — AppleCLCD2 binds
 
-`DARWIN_DCP_IOMFB=1` advertises `0x37` (`AppleDCPLinkServiceSoC`). Merely
-advertising it starts the whole framebuffer stack — `AppleDCPLinkService`
-matches, `IOMFB: AP DRIVER START!`, `IOMobileFramebufferAP::start` on `disp0`.
+The display driver at the top of the stack now starts and registers:
 
-Its framing is **not** AFK's. Derived in `docs/re/iomfb-link.md` from
-`link_send_message` / `link_handle_message`: the low 16 bits are a structured
-header and bits[63:16] a 48-bit payload, masked by a literal
-`and x8, x2, 0xffffffffffff0000`.
+```
+Registering: ../arm-io@10F00000/AppleH17PPlatformIO/disp0@0/AppleCLCD2
+```
+
+Endpoint `0x37` lives in `darwin_iomfb.c`. Its framing is **not** AFK's; it is
+derived in `docs/re/iomfb-link.md` from `link_send_message` /
+`link_handle_message`, masked by a literal `and x8, x2, 0xffffffffffff0000`:
 
 ```
 [1:0] class   [7:6] subkind   [8] ack   [15:10] tag   [63:16] payload
 ```
 
-The AP's opening message `0x0100000000000040` is class 0, subkind 1, payload
-DVA `0x10000000000` — a shared-heap announce. It is **send-only**: echoing it
-panics at `AppleDCPLinkService.cpp:882` with `kIOReturnNoMemory`. Replying with
-the class-1 init-ack (`DARWIN_DCP_IOMFB=2`) is accepted and the link advances to
-firmware verification, which is the current wall:
+Four levels, each a superset of the last, all default-off:
 
-```
-IOMFB: Firmware hash checksum mismatched: local=0x15A5C96B, remote=0x00000000
-panic @AppleDCPLinkService.cpp:624
-```
+| `DARWIN_DCP_IOMFB` | what it does |
+|---|---|
+| `1` | advertise `0x37`; the stack starts, `IOMFB: AP DRIVER START!` |
+| `2` | + the class-1 init-ack carrying the CRC in `[47:16]` |
+| `3` | + answer the class-2 RPCs with status 0 and zeroed output |
+| `4` | + the measured answers in `iomfb_level4[]` |
 
-`AppleCLCD2` has never bound; it sits above IOMFB and needs this to complete.
+The gradient is the evidence, four boots differing only in that value, all
+with 0 panics and a shell: no `0x37` gives no `AppleCLCD2` line at all;
+handshake only stops at `AP DRIVER START!`; zeroed RPCs get
+`AppleCLCD2::start` to run for 596 ms and never register; answering `A401`
+with `01` registers it.
+
+Class 2 is a **shared-heap RPC**, from `rpc_caller_gated`
+(`fcn.fffffff00a0ce46c`): `bits[31:16]` heap offset, `bits[47:32]` size, and
+the request at `heap+off` is `u32 FourCC, u32 in_len, u32 out_len`. The
+completion is class 2 subkind 1 with status in `bits[47:16]`. `A401` (stub at
+`0xfffffff00a0c8a80`, returns `out[0] & 1`) gates `AppleCLCD2` from its only
+call site, `0xfffffff00a0b5fe4` inside `IOMobileFramebufferAP::start()`.
+
+`AppleCLCD2`'s personality matches the IODeviceTree nub for `/arm-io/disp0`
+(`IONameMatch = [disp0,t8140, dispext0,t8140]`), not `IOMobileFramebuffer`.
+Nothing was ever missing from the device tree; the driver was simply never
+allowed to finish `start()`.
+
+**What is still stubbed:** every RPC *method* returns status 0 with zeroed
+output except `A401`; class 0 subkind 0, class 3, and the entire `D`-series
+callback direction (DCP → AP) are not modelled. There are no pixels yet: the
+AP goes quiet after `A353`, has not powered the DCP on, and has not asked for
+a framebuffer. On real hardware the firmware drives that next phase, which is
+why the `D`-series is the next piece of work. `link_rpc_lookup`'s nested
+switch at `0xfffffff00a0d05ac`-`0xa0d0680` is the AP's dispatch table for
+those names and gives a handler per callback, so the next gate can be named
+before booting.
 
 ### Method that keeps working
 
@@ -190,6 +215,15 @@ message* names the gate after that — `882` to `624` in one iteration. Several
 confident hypotheses have been wrong (the flags byte, a "16 MB length" reading
 of the IOMFB header, `genter` as the HVF cost driver); in each case a
 measurement corrected them, not more reasoning. Reach for the experiment first.
+
+One more failure mode, learned the expensive way: `a63e509` claimed the
+firmware hash check passed. It did not. That commit rewrote the ack value and
+deleted the `darwin_asc_send()` beside it, so the model computed the hash,
+logged it, and dropped it — and the boot still showed 0 panics and a shell,
+because a silent no-op looks exactly like success on those two metrics.
+**Grepping for the absence of the failure is not evidence.** Check that the
+guest did the work: here, an `IOP -> AP ep 0x37` line, or the guest's own
+`check_firmware_hash_crc32()` log.
 
 ## Storage
 
