@@ -126,6 +126,42 @@ name; the orchestrator merges.
   (`/tmp/dvm/build/rootfs_sh.dmg`, 102 tools from the restore ramdisk, uid 0).
   `tools/serial.py` drives it over a socket.
 
+## The GPU may not be on the critical path
+
+**CoreAnimation has a CPU rasteriser and we are already in the state that selects
+it.** `docs/re/ca-software-path.md` has the full derivation. QuartzCore carries four
+render backends — `sw_new_context`, `metal_new_context`, `gles_new_context`,
+`new_null_context` — and `CA::OGL::SW` is a 972-symbol software rasteriser with
+`create_surface_from_iosurface` / `set_destination`.
+`CA::WindowServer::Server::render_update()` calls `sw_renderer()` and then
+`Display::render_display()`, and the concrete servers fall back to it when
+`renderer()` is NULL, which happens exactly when `_CAMetalContextCreate` (a bare
+`MTLCreateSystemDefaultDevice` wrapper) returns nil.
+
+**Nothing has to be enabled.** The trigger is the absence of any `IOAcceleratorES`
+service, which is our current state: `dt_fixup.py` deletes `/arm-io/sgx`, the only node
+`AGXAcceleratorG17P` matches (`IONameMatch gpu,t8140`). No boot-arg or device-tree
+property switches it — `CA_NO_ACCEL` / `CA_ACCEL_BACKING` govern only Metal-accelerated
+CoreGraphics backing stores.
+
+**Caveat, stated by the study itself:** this is verified in the iOS 27 Simulator and
+macOS builds of QuartzCore. The iPhone build is the one binary not yet read, so
+`AccelServer : IOMFBServer : Server` inheriting the fallback is *inference* until it is.
+
+**Do not splice the `sgx` node back in.** Measured: with the raw node restored the guest
+produces **zero** serial lines and parks in SPTM's self-branch at `0xfffffff0070f75a8`.
+SPTM brings up the GPU UAT IOMMU from iBoot-supplied properties (`gpu-iouat`, UAT
+handoff, `uat-enforce-gpu-carveout`) and `IOUnifiedAddressTranslator` would panic next on
+five missing `gfx-*` carveout properties. A bare node is strictly worse than no node.
+
+If this holds on the device build, the remaining cost for a rendered screen is the DCP
+pixel path we already owe — `surface_map_dcp`, `swap_submit`, scanout — plus
+TCG-speed compositing, rather than emulating a GPU.
+
+Two false positives recorded so nobody re-chases them: `CA_RENDER_SERVER` /
+`CA_CLIENT` in the kernelcache are `IOWorkloadConfig` scheduler names, and `.metallib`
+strings in boot logs are file copies during `mount-phase-2`.
+
 ## Where the DCP bring-up stands
 
 Two channels, and both are now talking. Everything below is behind an env
