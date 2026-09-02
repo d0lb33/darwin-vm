@@ -119,10 +119,9 @@ name; the orchestrator merges.
 - `darwin-sep`: enough SEP for `AppleSEPManager` to reach "control endpoints
   created" and answer `AppleCredentialManager`. That wait used to burn 890 of
   every 900 seconds; it is now zero. `-enable sep`.
-- `darwin-ans`: the ANS/NVMe storage controller. `IONVMeController`
-  initialises it, an `IOMedia` appears as "APPLE SSD (darwin-ans)", `disk0`
-  enumerates, and APFS finds a valid checkpoint on a real 21 GB image. Reads
-  are proven; writes and rooting off it are not. See **Storage**.
+- `darwin-ans`: the ANS/NVMe storage controller. **iOS roots off it** —
+  `BSD root: disk1s1`, `mount-phase-2` completes, `Early boot complete`,
+  0 panics. Reads and writes both proven. See **Storage**.
 - A root shell inside the booted system volume, for poking at it live
   (`/tmp/dvm/build/rootfs_sh.dmg`, 102 tools from the restore ramdisk, uid 0).
   `tools/serial.py` drives it over a socket.
@@ -227,58 +226,62 @@ guest did the work: here, an `IOP -> AP ep 0x37` line, or the guest's own
 
 ## Storage
 
-`darwin-ans` works: Apple's own `IONVMeController` initialises it and APFS
-mounts a real disk image off it. From probe run `ANSDISK`, with the 21 GB
-`rootfs.dmg` as the backing file, 0 panics:
+**iOS roots off the emulated controller.** `darwin-ans` is a working ANS/NVMe
+model, and XNU takes its root filesystem from it:
 
 ```
-IONVMeController::start():844: Successfully initialized NVMe drive 0x1000003EC
-AppleEmbeddedNVMeController::StartController():1461: Setting NAND status to Ready
-Registering: ../RTBuddy(ANS2)/RTBuddyService/AppleANS3CGv2Controller
-Registering: ../APPLE SSD (darwin-ans) Media/IOMediaBSDClient
-dev_init:299: disk0 device_handle block size 4096 block count 5593600
-nx_mount:1482: disk0 checkpoint search: largest xid 551, best xid 551 @ 109
+Got boot device = .../ans@79600000/AppleASCWrapV6/iop-...
+BSD root: disk1s1, major 1, minor 2
+(mount-phase-2) Doing boot task
+Early boot complete. Continuing system boot.
 ```
 
-APFS walking the checkpoint tree to a valid superblock is the load-bearing
-evidence: it cannot succeed unless the tag-indexed submission path, the NVMMU
-TCB handshake and the SART-filtered DMA all return the right bytes.
+42,001 serial lines, 0 panics. **`mount-phase-2` completes for the first
+time**: on the ramdisk path it died 2,493 files in with `ramstrategy: buf_map
+failed @memdev.c:299`, and with the filesystem on ANS the memory-disk driver
+is not in the path at all.
 
-**Working is not the same as rooting.** That run still booted `rd=md0`, and
-APFS only opened the *container* — there is not one `disk0s1` line in the log,
-and zero writes ever reached the model. Three things stand between here and
-retiring the ramdisk:
+Writes are proven separately — `newfs_apfs` on a scratch image issues 69 NVMe
+Writes and produces a real `NXSB` superblock that APFS then mounts and cleanly
+unmounts. iOS mounts its system volume **read-only**, so no write ever reaches
+`rootfs.dmg`; use the `rootfs-overlay.qcow2` overlay anyway.
 
-- mount a **volume**, not just the container, which exercises far more of the
-  read path than a checkpoint search does;
-- **writes**, which have never run. Put a qcow2 overlay over the 21 GB image
-  first: a bad boot writing through to it costs us the image.
-- the **sealed root snapshot**, which is not a storage bug. The same run shows
-  `apfs_vfsop_mount:2914: md0s1 failed to find named root snapshot: Need
-  authenticator (81)`. We sidestep it on the ramdisk path; rooting off `disk0`
-  brings it back, and it is an AMFI/trustcache problem.
+The recipe, and three things that each cost a boot (`docs/re/ans-nvme-references.md`
+§12):
 
-Why it is worth it: **228 of the 257 seconds to `Early boot complete` is
-`mount-phase-2` rebuilding `/private/var` from 41,557 files**, purely for want
-of a Data volume. Rooting off ANS also drops the guest from 40 GB to ~8 GB and
-retires `-ephemeral-data`.
+- `dt_fixup.py -enable ans`, plus `-drive if=none,id=ans,file=<image>`.
+- **The volume is `disk1s1`, not `disk0s1`.** `disk0` is the NVMe media; APFS
+  synthesises a container device and the system volume lands on `disk1s1`.
+  Waiting for a `disk0s1` line is waiting for something that will never print.
+- **The boot-arg is `rootdev=`, not `rd=`.** The `bsd_rooted_ramdisk` patch
+  only fires on the branch where `PE_parse_boot_argn("rd")` fails; otherwise
+  `panic: rootvp not authenticated after mounting @bsd_init.c:976`.
+- `-ephemeral-data` is **still needed**, because the image has no Data volume
+  (`mount: missing data volume`, `mount[8] exited ... status 66`).
 
-Background, still accurate: `docs/re/storage-path.md` on why **ANS** and not
-PCIe NVMe (all three `apcie` ports are taken by WLAN/BT/baseband) or virtio (no
-virtio kexts in this kernelcache); `docs/re/ans-nvme-references.md` for the
-register map, the 11-step bring-up, and the protocol divergences — the
-submission path is a **tag-indexed array, not a ring**, and our
-`nvme-secure-bar` generation needs extra IO-queue base writes at `0x1200`/
-`0x1208` that the Linux driver never does. We cannot wrap QEMU's stock
-`hw/nvme`: it is a PCI device, `CONFIG_NVME_PCI` is off, and this machine has
-no PCI bus.
+Known-bad, do not chase: `-enable sep` **plus** the ANS root path panics in
+`AppleSEPXART::getFullEpochs()` (`REQUIRE fail: expected_out_len == out_len
+@AppleSEPXART_embedded.cpp:1021`). `-enable sep` on the ramdisk is fine.
 
-Usage: `dt_fixup.py -enable ans`, plus `-drive if=none,id=ans,file=<image>`.
-`darwin.c` creates the device and claims the `ans` mailbox; with no drive it
-boots anyway and says so. `DARWIN_ANS_SELFWIRE=1` is the model's own bring-up
-scaffold, which predates the machine wiring and creates the NVMe half from a
-machine-init-done notifier instead — it stays until the wired path is
-boot-tested, then both it and its branch in `darwin.c` come out.
+Four model details worth knowing, each traced to a boot that failed without
+it: **MDTS is 8, not 5** (at 128 KiB the root mounts and then dyld dies, because
+APFS issues 256 KiB reads and `IONVMeFamily` sizes its PRP list from MDTS);
+`blk_set_perm()` is required or the first guest write aborts QEMU at
+`io.c:2016`; the SART log is rate-limited because it fires 411,000 times and
+can never succeed (the CoastGuard mapper programs the filter through
+`pmap_iommu_ioctl`, so the region table we can see stays empty); and the
+endpoint-nub name no longer underflows to `ANS2Endpoint4294967273`.
+
+Background: `docs/re/storage-path.md` on why **ANS** and not PCIe NVMe (all
+three `apcie` ports are taken by WLAN/BT/baseband) or virtio (no virtio kexts
+in this kernelcache). The submission path is a **tag-indexed array, not a
+ring**. We cannot wrap QEMU's stock `hw/nvme`: it is a PCI device,
+`CONFIG_NVME_PCI` is off, and this machine has no PCI bus.
+
+**Next:** `tools/rootfs/build_dual_volume.sh`. A real Data volume is the only
+thing left between this and a persistent system — `mount-phase-2` would mount
+instead of copying 41,557 files, which is the ~213 seconds of guest time this
+boot still spends, and `/private/var` would survive a reboot.
 
 ## Performance
 
