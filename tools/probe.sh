@@ -145,7 +145,7 @@ if [[ -n "$GREP_EXTRA" ]]; then
     grep -nE "$GREP_EXTRA" "$SERIAL" 2>/dev/null | head -25 | cut -c1-200
 fi
 
-TRACE=$(grep -cE '^(aic|asc|dart|unimp)[:(]' "$ERR" 2>/dev/null)
+TRACE=$(grep -cE '^(aic|asc|dart|unimp|afk|dcp)[:(]' "$ERR" 2>/dev/null)
 if [[ "${TRACE:-0}" -gt 0 ]]; then
     echo "--- device model trace: $TRACE lines (see $ERR) ---"
     grep -vE ': (read|write) ' "$ERR" 2>/dev/null | grep -v terminating | head -15

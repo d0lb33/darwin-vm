@@ -180,6 +180,42 @@ def fixup_darts(d):
       c.props['dart-id'] = f"u32:{dart_id}"
       dart_id += 1
 
+def fixup_iops(d):
+  # Getting an IOP's drivers to *match* is not the same as getting XNU to start
+  # it. Without these, RTBuddy binds the DCP and AppleDCPExpert matches, but the
+  # coprocessor is never brought up and no endpoint ever opens. Derived in
+  # docs/re/dcp-iop-start.md; the addresses for each check are there.
+  #
+  # ignore-gating, on the AppleA7IOP provider, makes powerOn/powerOff no-ops so
+  # the driver does not poll a PMGR power gate we do not model.
+  #
+  # On the nub, "pre-loaded" (presence is what is checked, not the value) tells
+  # RTBuddy the firmware is already resident, which is the path that suits us:
+  # we have no iBoot to load an IOP image. region-base/region-size describe
+  # where it was supposedly placed. /arm-io/smc/iop-smc-nub carries exactly this
+  # shape on real hardware, which is what confirms the pattern.
+  #
+  # no-firmware-service keeps the nub from waiting on AFKFirmwareService, which
+  # this kernelcache has no provider for.
+  #
+  # Only RTBuddy-style nubs get the nub properties. SEP's nub is "iop-nub,sep"
+  # and is driven by AppleSEPManager, which boots the coprocessor its own way;
+  # telling it the firmware is pre-loaded would be a claim we have not tested.
+  for c in d['arm-io'].children:
+    if 'compatible' not in c.props:
+      continue
+    c.props['ignore-gating'] = "<NULL>"
+    for nub in c.children:
+      compat = nub.props.get('compatible', '')
+      if isinstance(compat, bytes):
+        compat = compat.decode('utf8', 'replace')
+      if 'rtbuddy' not in compat:
+        continue
+      nub.props['pre-loaded'] = "u32:1"
+      nub.props['region-base'] = "u64:0x10010000000"
+      nub.props['region-size'] = "u64:0x100000"
+      nub.props['no-firmware-service'] = "<NULL>"
+
 def fixup_sep(d):
   # AppleSEPBooter::initForSEP asserts on a property iBoot normally adds and
   # that is in no shipped device tree:
@@ -373,6 +409,7 @@ def fixup(d, nvram_file):
   del_compat(d)
   drop_exclave_routes(d)
   fixup_darts(d)
+  fixup_iops(d)
   fixup_sep(d)
   fixup_aic(d['arm-io']['aic'])
   fixup_sptm(d)
