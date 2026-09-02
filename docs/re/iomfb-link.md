@@ -24,6 +24,8 @@ message after we echo its own opening message back. That result is folded in
 below and is the strongest single piece of evidence in this document: it rules
 out the one reply shape that's easiest to reach for.
 
+Update, same day: the class-1 ack this document derived was implemented and got the guest past that panic entirely; it now fails at a **firmware hash check** instead, fully explained in the "Addendum" section below (local is a reproducible `crc32`, remote is a field of the same class-1 message, and the fix is what byte value to put where).
+
 ## Summary
 
 Endpoint 0x37 is not AFK and not EPIC; the 64-bit RTKit mailbox field *is* the
@@ -362,6 +364,143 @@ mistaken for part of the init handshake.
   optional DART-backed crash-diagnostics buffer that `start()` logs and then
   continues without. Neither complaint needs a device-tree or DART fix before
   endpoint 0x37 can be answered correctly.
+
+## Addendum (2026-09-02): firmware hash check, after a correct class-1 ack
+
+The coordinator implemented the class-1 ack derived above (`0x0004000000000001`
+in reply to the AP's class-0/subkind-1 announce). The
+`"link_message_handler failed with 0xe00002bd"` panic is gone. The guest now
+gets one stage further and panics differently:
+
+```
+IOMFB: Firmware hash checksum mismatched: local=0x15A5C96B, remote=0x00000000
+panic(cpu 0 caller 0xfffffff02a0d0308):
+  "IOMFB: Firmware hash checksum mismatched: local=0x15A5C96B, remote=0x00000000"
+  @AppleDCPLinkService.cpp:624
+```
+(`/tmp/dvm/probe/IOMFB6.serial.log:174`, reproduced with `DARWIN_DCP_IOMFB=2`;
+stderr confirms only two ep-0x37 messages were ever exchanged before this —
+the AP's announce and our one ack, `/tmp/dvm/probe/IOMFB6.stderr.log:144-147`.
+So this check runs as part of processing that same class-1 ack, not a third
+message we failed to send.)
+
+**Runtime-to-static address relationship, confirmed exactly**: the reported
+`"Kernel text exec slide"` field is *not* the right value to subtract from a
+panic's `caller` address for this kext. The right one is the flat
+`+0x20000000` this project's own convention already documents for `bootkc`:
+`0xfffffff02a0d0308 (runtime, from the panic) − 0xfffffff00a0d0308 (static,
+found below) == 0x20000000` exactly, and `0xfffffff00a0d0308` is precisely the
+instruction after the `bl` that logs-and-panics (`0xa0d0304`, see below) — an
+exact, non-coincidental match, not an approximation.
+
+### Where this check lives, and where `local`/`remote` come from
+
+The whole check is inside `link_handle_message`'s **class-1** branch — the
+same branch that calls `fcn.ce0f0` (the ack-advance step from the section
+above). It runs unconditionally on every class-1 message, immediately after
+the class/subkind dispatch, *before* `fcn.ce0f0` is reached:
+
+```
+                                                       // x28 = the raw incoming 64-bit message
+x27 = &G                    // adrp x27,0xb880000; add x27,x27,0xc70   @ 0xa0cfaec-0xa0cfaf0
+x22 = &V                    // adrp x22,0x798e000; add x22,x22,0x8ca   @ 0xa0cfaf4-0xa0cfaf8
+x26 = crc32(0, x27, 4)                                 // @ 0xa0cfb60-0xa0cfb6c
+if (strlen(x22) != 0):                                 // @ 0xa0cfb74-0xa0cfb7c
+    x26 = crc32(x26, x22, min(strlen(x22), 0x28))       // @ 0xa0cfb8c-0xa0cfb94
+x23 = x28 >> 16                                         // @ 0xa0cfb9c  <- "remote"
+if ((uint32_t)x26 != (uint32_t)x23):                    // @ 0xa0cfba0, cmp w26, w23 (32-bit!)
+    log("IOMFB: Firmware hash checksum mismatched: local=0x%08X, remote=0x%08X\n",
+        x26, x23)                                       // @ 0xa0cfbd0, string 0x7992000+0xa13
+    if (w20 == 0 || w25 == 0): panic(...)                // @ 0xa0d02e8 -> 0xa0d0304 bl panic-helper
+                                                          //   (w20 defaults to 4, set @ 0xa0cfaf0;
+                                                          //   this branch is not normally taken)
+// falls through either way to phase/flag bookkeeping, then fcn.ce0f0
+```
+
+- **`local`** (`x26`) is `crc32(seed=0, data, len)`, standard zlib/IEEE CRC-32
+  calling convention (`x0`=seed, `x1`=buf, `x2`=len) — `fcn.fffffff00a0dcf70`
+  (file `0x30d8f70`) is an imported `__auth_stubs` trampoline (no name
+  resolved by `ipsw`/`r2`, both report 0 symbols for this stripped kext), but
+  the call shape and the neighbouring panic string's own name,
+  `"AppleDCPLinkService::check_firmware_hash_crc32() 0x%08X\n"` (`0x7992aa8`,
+  logged right after this comparison at `0xa0cfbf4`), both say what it is.
+  **Verified, not just plausible**: the seed data is 4 bytes read from
+  `0xfffffff00b880c70` inside this kext's own `__DATA.__data` (file offset
+  `0x487cc70` in `firmware/bootkc`, spot-checked directly: `d3 00 00 00 00 00
+  00 00`), and
+  ```
+  python3 -c "import zlib; print(hex(zlib.crc32(bytes([0xd3,0,0,0]))))"
+  -> 0x15a5c96b
+  ```
+  reproduces the panic's `local=0x15A5C96B` **exactly**, byte for byte, from
+  first principles. The second `crc32` call is a no-op in this build: `x22`
+  (`0xfffffff00798e8ca`, file `0x98a8ca`) points at an **empty string** (a
+  bare `\0`; the real, non-empty string `"%s: property %s not found in
+  EDT..."` starts one byte later at `0x798e8cb` — confirmed with `px`/`psz`
+  against the live bytes), so `strlen(x22) == 0` and the `cbz x0, 0xa0cfb9c`
+  branch (`0xa0cfb7c`) skips the second call entirely.
+- **`remote`** (`x23`) is simply `msg >> 16`, **truncated to 32 bits by the
+  comparison instruction itself** (`cmp w26, w23` uses the 32-bit registers,
+  `0xa0cfba0`) — i.e. it is `(msg >> 16) & 0xffffffff`, equivalently **bits
+  [47:16] of the incoming message**, not the full 48-bit "payload" field this
+  document earlier described for the class-0 announce. The class-1 wire shape
+  therefore further subdivides that region:
+
+  | Bits | Field | Evidence |
+  |---|---|---|
+  | [15:0] | header (class=1, subkind, tag, ack) — as already documented | unchanged from the base header table |
+  | [47:16] | **remote firmware CRC-32**, compared against `local` by 32-bit equality | `lsr x23,x28,0x10` @ `0xa0cfb9c`; `cmp w26,w23` (32-bit) @ `0xa0cfba0` |
+  | [63:48] | a small "phase/count" value; `max(this, 4)` is stored at `chan+0x48` | `lsr x25,x28,0x30` @ `0xa0cfbe4`; `cmp w25,4; csel w8,w25,w20,hi; str w8,[x19,0x48]` @ `0xa0cfbf8`-`0xa0cfc00` |
+
+  Our ack `0x0004000000000001` puts its `4` in bits [63:48] (via
+  `movk x2,4,lsl 48`, exactly matching the disassembly above), leaving bits
+  [47:16] all zero — which is **exactly** why the panic reports
+  `remote=0x00000000`: not a missing message, but our own ack literally
+  encoding zero in the field this check reads.
+
+### Answering the coordinator's three questions
+
+1. **Where `remote` comes from**: bits [47:16] of the very ack we already
+   send (class 1), not a separate message. See table above.
+2. **Is echoing `local` sufficient?** Yes, structurally: the comparison is a
+   plain 32-bit equality (`cmp w26,w23; b.eq`, `0xa0cfba0`-`0xa0cfba4`) against
+   a value computed *before* the incoming message's payload is even read for
+   this purpose — `local` has no dependency on anything the DCP model sends,
+   ever. It also should not need to be recomputed at runtime by the model:
+   the seed byte (`0xd3`) lives in this kernelcache's own `__DATA` and is a
+   plain scalar (shape `d3 00 00 00 00 00 00 00`, not a `0xfffffff0...`-shaped
+   pointer), which is not what a chained-fixup-rebased slot looks like, so
+   `local` should reproduce as `0x15A5C96B` on every boot of this exact
+   `firmware/bootkc` regardless of KASLR seed — this inference was not tested
+   against a second, independent boot (only nested-panic reprints of the same
+   boot were available, `IOMFB6.serial.log:174,227,292,369`, all identical by
+   construction). **Practical answer: build the reply as
+   `(uint64_t)0x15A5C96B << 16 | header`**, e.g.
+   `0x000015A5C96B0001` for a bare ack (class 1, subkind 0, tag 0, ack-bit
+   patched by `link_send_message` as before, phase left at the default 4 by
+   omitting bits[63:48] — or set bits[63:48] to `4` explicitly, i.e.
+   `0x00040000000000` `| (0x15A5C96B << 16) | 1` = `0x000415A5C96B0001`, to
+   also satisfy the phase/count field documented above without relying on the
+   `w20` default).
+3. **What comes after**: assuming the hash matches, the same class-1 handler
+   falls through (`0xa0cfc00`-`0xa0cfc1c`) to set `chan+0x5c2 = 1`, then gates
+   on two more per-channel flag bytes already used elsewhere in this document
+   (`chan+0x5c3` must be set, `chan+0x23c` must be clear — the same offsets
+   the class-0/subkind-0 "resend" path and `cdfe0`'s own tail checked) before
+   calling **`fcn.ce0f0` again** (`bl` @ `0xa0cfc1c`) — the same ack-advance
+   function documented above. Not independently verified here whether those
+   two flags are already in the right state by the time this runs (they are
+   plausibly set earlier, locally, by `AppleDCPLinkService::start()`'s own
+   `link_state_init()`, which runs before any message traffic per the boot
+   log ordering already established) — but if they are, `fcn.ce0f0` will, per
+   its already-documented body, either send **another outbound class-1
+   message** (if `chan+0x260 == 1`) or locally wake a waiter that most likely
+   unblocks `IOMobileFramebufferAP::start()`'s stall. **Next experiment**:
+   send the corrected class-1 ack above and watch `/tmp/dvm/probe/*.stderr.log`
+   for a *second* `AP -> IOP ep 0x37` line — if one appears, its low byte will
+   again be `0x01`-shaped (class 1) per `fcn.ce0f0`'s own send call
+   (`0x0004000000000001`, `0xa0ce108`-`0xa0ce118`), and answering it the same
+   way is the fastest path toward whatever unblocks `AppleCLCD2`.
 
 ## Open questions
 
