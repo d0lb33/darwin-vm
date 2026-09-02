@@ -108,6 +108,12 @@ EMULATED_FEATURES = {
   # RTBuddy brings it up itself rather than waiting for a client to request
   # power. Its DMA goes through the SART address filter, not a DART.
   'ans': ['arm-io/ans', 'arm-io/sart-ans'],
+  # SMC. Worth enabling even though we do not need its sensors: both
+  # IONVMeFamily and AppleFirmwareKit declare com.apple.driver.AppleSMC as a
+  # dependency, and a kext whose dependency never starts does not register its
+  # own OSMetaClasses (which is what produces 'Couldn't alloc class
+  # "AFKFirmwareService"'). Its firmware-name is t8140smc.
+  'smc': ['arm-io/smc'],
 }
 KEEP_COMPAT_PATHS = set()
 
