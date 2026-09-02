@@ -364,6 +364,39 @@ def fixup_sep(d):
   # (-1, -1), same as fixup_sptm() uses for the others.
   d['chosen']['memory-map'].props['SEPFW'] = struct.pack("<QQ", 0xffffffffffffffff, 0xffffffffffffffff)
 
+  # Having said the firmware is preloaded, also say the AP does not have to go
+  # and fetch it from the filesystem at boot, because on our image it is not
+  # there. /usr/libexec/seputil (run by launchd's "data-protection" boot task,
+  # RequireSuccess) reads /chosen/sepfw-load-at-boot at 0x100002fec, and when
+  # it is set it ends up at 0x100003314 doing
+  #
+  #   lookupPathForPersonalizedData(5, buf, 0x400)   -- 0x1000043bc
+  #
+  # which resolves to /private/preboot/<boot-manifest-hash>/usr/standalone/
+  # firmware/sep-firmware.img4. That file lives on the Preboot volume, which
+  # the IPSW system-volume payload does not contain and our image therefore
+  # does not have (checked: /usr/standalone/firmware holds only Rose, SLAM,
+  # SmartIOFirmwareT7000.bin and nfrestore). seputil then exits 5:
+  #
+  #   init_data_protection: can't open '/private/preboot/000...000/usr/
+  #     standalone/firmware/sep-firmware.img4', errno: No such file or
+  #     directory(2)
+  #   panic(cpu 0 ...): seputil[4] exited ... (signal 0, exit status 5 )
+  #
+  # With the property cleared it takes the branch at 0x100002ff0 instead,
+  # prints "Skipping SEP firmware load" (cstring 0x10001bc82) and exits 0.
+  # That is the honest description of this machine: darwin-sep's ROM accepts
+  # the zero-filled preload region as its IMG4 and reports sepOS alive, so
+  # there is nothing for a second, filesystem-sourced firmware load to do.
+  #
+  # Measured, not assumed: with this cleared the SEP still completes its whole
+  # boot conversation (ROM status 1 -> TZ0 -> status 2 -> IMG4 accepted), the
+  # TXM secure channel page is still published, and all five endpoints are
+  # still advertised -- AppleSEPManager's own use of the property
+  # (0xfffffff0095a0500, alongside protected-data-access) is in its xART fetch
+  # path, not in the firmware fetch.
+  d['chosen'].props['sepfw-load-at-boot'] = "u32:0x0"
+
   # The same constructor then wants a non-zero chip id:
   #
   #   REQUIRE fail: _chip_id = *(uint32_t *)entry->getBytesNoCopy()
@@ -376,6 +409,56 @@ def fixup_sep(d):
   platform = get_platform_name(d)
   if platform.startswith('t') and all(c in '0123456789abcdefABCDEF' for c in platform[1:]):
     d['chosen'].props['chip-id'] = f"u32:{hex(int(platform[1:], 16))}"
+
+  # Drop the marker node that claims this SEP has xART storage. We emulate the
+  # SEP's mailbox, not its anti-replay store, and the userspace that trusts the
+  # marker takes launchd down with it:
+  #
+  #   init_data_protection: Gigalocker file (/private/xarts/<uuid>.gl)
+  #                         doesn't exist: No such file or directory
+  #   init_data_protection: Failed to initialize gigalocker: 2
+  #   panic(cpu 0 ...): seputil[4] exited ... (signal 0, exit status 2 )
+  #
+  # /usr/libexec/init_data_protection is a symlink to /usr/libexec/seputil, run
+  # by launchd's "data-protection" boot task with RequireSuccess=true (the task
+  # table is embedded in /sbin/launchd as a plist; Program is
+  # /usr/libexec/init_data_protection, CSIdentityOverride com.apple.seputil).
+  # In seputil (iOS 27.0 24A5430a, /usr/libexec/seputil, __TEXT at 0x100000000):
+  #
+  #   0x1000051d8  gigalocker_init() first calls a helper (0x100014820) whose
+  #                whole body is
+  #                  *out = IORegistryEntryFromPath(kIOMainPortDefault,
+  #                           "IODeviceTree:/arm-io/sep/iop-sep-nub/xART") != 0
+  #                (the literal path is the cstring at 0x10001bd63), and
+  #   0x1000051e4  when that byte is clear it prints
+  #                  "xART is not supported on platform, skipping
+  #                   initialization"   (cstring 0x10001b326, printed by
+  #                   0x100014598) and returns 0 -- success.
+  #   0x10000527c  when the byte is set, it stats /private/xarts/<uuid>.gl and,
+  #                if the file is missing, branches on its own argument: the
+  #                caller at 0x1000032d8 passes 0, so it returns errno (2)
+  #                rather than creating anything. The only caller that passes 1
+  #                is 0x100002ecc, reached solely from the --gigalocker-init
+  #                long option (getopt_long table at 0x100024180). So a
+  #                writable /private/xarts does *not* help: this invocation
+  #                never creates the file, it only looks for one a restore
+  #                would have left there.
+  #   The gated call site itself is guarded by /chosen/protected-data-access
+  #                being a nonzero 4-byte value (0x100008f80 searches
+  #                IODeviceTree:/chosen for it), which our tree ships as 1.
+  #
+  # This is why the panic only appears with -enable sep: with SEP disabled the
+  # whole /arm-io/sep subtree is removed above, the path lookup fails, and
+  # seputil takes the same "not supported" exit.
+  #
+  # Two kernel consumers read the same node, and both have a no-xART path:
+  # AMFI's LocalSigning.cpp ("AMFI: calling %s without xART storage support")
+  # and AppleLockdownMode's LDMShouldEnforceParity -- both string pairs sit
+  # immediately after the path literal in firmware/bootkc. AppleSEPManager
+  # does not look the node up at all; its ART decision is the nub's
+  # "self-power-gate" property (docs/re/sep-protocol.md).
+  if 'xART' in d['arm-io']['sep']['iop-sep-nub']:
+    d['arm-io']['sep']['iop-sep-nub'].remove_child('xART')
 
 def fixup_aic(aic):
   if 'compatible' not in aic.props:
