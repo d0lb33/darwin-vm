@@ -267,9 +267,13 @@ The recipe, and three things that each cost a boot (`docs/re/ans-nvme-references
 - `-ephemeral-data` is **still needed**, because the image has no Data volume
   (`mount: missing data volume`, `mount[8] exited ... status 66`).
 
-Known-bad, do not chase: `-enable sep` **plus** the ANS root path panics in
-`AppleSEPXART::getFullEpochs()` (`REQUIRE fail: expected_out_len == out_len
-@AppleSEPXART_embedded.cpp:1021`). `-enable sep` on the ramdisk is fine.
+`AppleSEPXART::getFullEpochs()` panics with `REQUIRE fail: expected_out_len ==
+out_len` (`AppleSEPXART_embedded.cpp:1021`). This was recorded as specific to
+`-enable sep` plus the ANS root path; that is **too narrow**. It also fires on
+the plain ramdisk path once the boot gets far enough — six lines after
+`Early boot complete`, right after `SEP EP 16 enabled`. It is our SEP model
+returning the wrong output length for the xART epoch call (`sep_handle_xart`,
+`darwin_sep.c:702`), not a property of the storage path.
 
 Four model details worth knowing, each traced to a boot that failed without
 it: **MDTS is 8, not 5** (at 128 KiB the root mounts and then dyld dies, because
@@ -333,8 +337,17 @@ launch record showing the shared cache and executable mapped and dyld reaching
 `main`. `temporary-sandbox` dies on the identical string; `lockdownd` dies on
 `/usr/lib/libramrod.dylib`.
 
-**The cause is that the image we boot lost its cryptex merge in the `/tmp`
-wipe.** `libobjc-trampolines.dylib` deliberately is not in the shared cache; it
+**Fixed on 2026-09-02: `~/dvm-artifacts/build/rootfs_cx.dmg` is the merged
+image** (2,111 files / 127,134,982 bytes rsync'd from the cryptex at
+`~/dvm-artifacts/aea/out/094-13150-145.dmg`, excluding its own dyld cache under
+`/System/Library/Caches/com.apple.dyld/`, which is byte-identical to the staged
+one). A boot of it reaches `Early boot complete` with **no**
+`libobjc-trampolines` complaint anywhere. Rebuild it with
+`tools/rootfs/build_data_volume.sh`-style safe attaches; the cryptex files are
+APFS-compressed, so the copy must go through a mounted volume.
+
+**The original cause was that the image we booted lost its cryptex merge in the
+`/tmp` wipe.** `libobjc-trampolines.dylib` deliberately is not in the shared cache; it
 ships in the OS cryptex. **2,105 of the cryptex's 2,113 loose files are missing
 from `rootfs.dmg`** — the surviving artifact is the pre-merge one, and every
 boot since has run without it. `docs/re/userspace-boot-state.md` documents the
@@ -385,6 +398,17 @@ A refuted idea worth not re-having: making `/private/xarts` writable cannot
 help. seputil's boot-task path passes 0 for "may I create the file" — only
 `--gigalocker-init` passes 1 — so it returns `errno` 2 without ever attempting
 a create.
+
+The `sks` keystore is **feasible, not a hard no** — see
+`docs/re/sks-feasibility.md`. The crux is that keystore replies are *opaque*:
+the only check `AppleSEPKeyStore` runs is a transport digest the reply itself
+carries, which we would be generating on both sides, so we need key material
+that is **stable across reboots, not secret**. Roughly 10-12 opcodes, estimated
+3-6 agent-days. The find that changes the calculus: Apple ships a degraded mode
+for exactly this situation — a check for the device-tree property
+`no-effaceable-storage` (which our tree already has) that branches to code
+logging *"disabling use of effaceable storage, using fake key"*. Not yet
+observed firing at runtime, since `sks` is still not advertised.
 
 Still open: **personas.** `usermanagerd` dies with "Daemon failed to load
 persona manifest" and 248 `kpersona_find_by_type(type 6)` failures follow.
