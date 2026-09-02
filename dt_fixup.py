@@ -115,6 +115,23 @@ EMULATED_FEATURES = {
   # own OSMetaClasses (which is what produces 'Couldn't alloc class
   # "AFKFirmwareService"'). Its firmware-name is t8140smc.
   'smc': ['arm-io/smc'],
+  # SEP, the security processor. We do not want its cryptography — we want
+  # AppleSEPManager to exist at all. AMFI's trust manager blocks on it during
+  # every spawn ("AMFI: trying to get developer mode status from ACM"), and
+  # with no SEP node that wait fails the slow way:
+  #
+  #   ACMTRM: waitForSEPEndpoint: timed out waiting for AppleSEPManager
+  #                               (timeoutMs=5000).
+  #
+  # 177 of those in one 900-second boot is 885 seconds spent blocked, and app
+  # binaries (SpringBoard among them) never finish posix_spawn.
+  #
+  # /arm-io/sep is "iop-sep,ascwrap-v6" — the same ASC wrapper family as the
+  # DCP's "iop,ascwrap-v6", so darwin-asc already backs its mailbox, and
+  # dart-sep is a t8110 we already model. Its nub is "iop-nub,sep" rather than
+  # rtbuddy-v2, so AppleSEPManager drives it instead of RTBuddy; SEP speaks its
+  # own protocol above the mailbox, not RTKit, and we do not emulate that.
+  'sep': ['arm-io/sep', 'arm-io/dart-sep'],
 }
 KEEP_COMPAT_PATHS = set()
 
