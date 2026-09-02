@@ -267,13 +267,12 @@ The recipe, and three things that each cost a boot (`docs/re/ans-nvme-references
 - `-ephemeral-data` is **still needed**, because the image has no Data volume
   (`mount: missing data volume`, `mount[8] exited ... status 66`).
 
-`AppleSEPXART::getFullEpochs()` panics with `REQUIRE fail: expected_out_len ==
-out_len` (`AppleSEPXART_embedded.cpp:1021`). This was recorded as specific to
-`-enable sep` plus the ANS root path; that is **too narrow**. It also fires on
-the plain ramdisk path once the boot gets far enough — six lines after
-`Early boot complete`, right after `SEP EP 16 enabled`. It is our SEP model
-returning the wrong output length for the xART epoch call (`sep_handle_xart`,
-`darwin_sep.c:702`), not a property of the storage path.
+**Fixed.** `AppleSEPXART::getFullEpochs()` used to panic with `REQUIRE fail:
+expected_out_len == out_len`. It was recorded as specific to `-enable sep` plus
+the ANS root path; that was wrong — it fired on the plain ramdisk path too,
+with no `-enable ans` anywhere. xART replies now carry `{status, u16 length}`
+with the data written through the DART into the OOL out-buffer. See
+`docs/re/sep-xart-epochs.md`.
 
 Four model details worth knowing, each traced to a boot that failed without
 it: **MDTS is 8, not 5** (at 128 KiB the root mounts and then dyld dies, because
@@ -311,7 +310,7 @@ describes six CPUs, so MTTCG headroom is unused.
 
 ## Where the userspace boot stands
 
-**SpringBoard launches, and we know why it dies.** The system volume boots to
+**SpringBoard launches and no longer crashes.** The system volume boots to
 `Early boot complete` with 0 panics, and with `-skip-keybag` launchd starts
 SpringBoard, which crashes:
 
