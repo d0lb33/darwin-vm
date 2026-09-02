@@ -82,3 +82,46 @@ directories).
 - **Mount with owners on** when inspecting. `diskutil` defaults to `noowners`
   for disk images, and then every file misleadingly reads as uid 501.
 - Never force-detach unrelated disks; the user has other volumes mounted.
+
+## It panicked the Mac twice — read this before touching a disk image
+
+On 2026-09-02 this work took macOS down with a kernel panic, twice, identically:
+
+```
+panic(cpu N, caller 0x...): "Data ObjId overflow" @jobj.c:1152
+Panicked task: pid 109: fseventsd
+macOS 27.0 (26A5421a), xnu-13432.1.9~3
+```
+
+`jobj.c` is APFS's object-ID allocator; `fseventsd` is the filesystem-events
+daemon. Not memory, not QEMU — neither appears in either panic, and the machine
+has 128 GB.
+
+**Mechanism.** Each image here is an APFS container holding a ~500,000-file iOS
+filesystem. Mounting one exposes all of that to the host, where Spotlight
+indexes it (`mdutil -sa` showed indexing enabled on `/System/Volumes/Data`, and
+there was no `.metadata_never_index` anywhere in the work area) and fseventsd
+tracks every change. Add mass create/delete churn inside the container and APFS
+runs out of data object IDs and panics.
+
+The strongest correlate for the trigger is the Data-volume **restructure**:
+`mv`-ing all 20,788 `/private/var` entries to a mounted volume's root and then
+deleting everything else. That step ran shortly before both panics. Evidence for
+the Spotlight/fseventsd involvement is solid; the restructure link is timing
+only, so treat it as strong suspicion rather than proof.
+
+A filesystem should return an error, not panic the kernel, so this is an APFS
+bug on a beta OS. We trigger it; we can avoid it.
+
+**Rules.**
+
+- Attach through `tools/rootfs/safe_attach.sh`, which forces `-nobrowse`, drops
+  `.metadata_never_index` at the volume root, and refuses a second concurrent
+  attachment of the same image.
+- Detach as soon as you are done. Never blanket force-detach — the user has
+  other volumes mounted, including Xcode Simulator runtimes, and we clobbered
+  one of those once.
+- Do not build a volume by moving everything to its root and deleting the rest.
+  Prefer copying the wanted subtree into a fresh volume.
+- Keep at most one 21 GB clone alive at a time, and watch free space: the host
+  Data volume was at 93% during both panics, which is where APFS gets fragile.

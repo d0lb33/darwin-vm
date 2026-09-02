@@ -84,6 +84,13 @@ name; the orchestrator merges.
   booting.** An agent that starts a boot while the binary is being relinked gets
   garbage results — this produced a convincing but entirely false "critical
   regression" report. Build in your own worktree's build directory.
+- **Attach disk images only through `tools/rootfs/safe_attach.sh`.** Mounting a
+  21 GB image full of iOS exposes ~500k files to Spotlight and fseventsd, and on
+  2026-09-02 that plus mass create/delete churn kernel-panicked the host twice
+  with `"Data ObjId overflow" @jobj.c:1152` in APFS. The wrapper forces
+  `-nobrowse`, excludes the volume from Spotlight, and refuses concurrent
+  attachments. Never blanket force-detach — other people's volumes are mounted.
+  Details in `tools/rootfs/README.md`.
 
 ## What is already working
 

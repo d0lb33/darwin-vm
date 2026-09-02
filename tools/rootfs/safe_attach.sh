@@ -1,0 +1,87 @@
+#!/bin/bash
+# safe_attach.sh - attach and detach disk images without taking the Mac down.
+#
+# On 2026-09-02 this project kernel-panicked macOS twice, identically:
+#
+#   panic(cpu N, caller 0x...): "Data ObjId overflow" @jobj.c:1152
+#   Panicked task: pid 109: fseventsd
+#
+# jobj.c is APFS's object-ID allocator and fseventsd is the filesystem-events
+# daemon. The images we work with are APFS containers holding ~500,000-file iOS
+# filesystems; mounting them exposes that to the host, where Spotlight indexes
+# it and fseventsd tracks every change. Combined with mass create/delete churn
+# inside the container, APFS exhausted its object-ID space and panicked.
+#
+# A filesystem should return an error rather than panic, so this is an APFS bug
+# (macOS 27.0 beta, 26A5421a) - but we trigger it, and we can avoid it.
+#
+# This wrapper enforces the rules we learned the hard way:
+#   - always -nobrowse, so Finder and friends leave it alone
+#   - drop .metadata_never_index at the volume root, so Spotlight skips it
+#   - refuse a second attachment of an image that is already attached; five
+#     concurrent read-write attachments once silently corrupted an image
+#   - detach by mount point, never a blanket force-detach: the user has other
+#     volumes mounted, including Xcode Simulator runtimes, and we clobbered one
+#
+# usage:
+#   safe_attach.sh attach <image> [--readonly] [--owners on|off]
+#   safe_attach.sh detach <mountpoint>
+#   safe_attach.sh list
+set -uo pipefail
+
+die() { echo "safe_attach: $*" >&2; exit 1; }
+
+cmd="${1:-}"; shift 2>/dev/null
+
+case "$cmd" in
+attach)
+    img="${1:-}"; shift 2>/dev/null
+    [ -n "$img" ] || die "usage: safe_attach.sh attach <image> [--readonly] [--owners on|off]"
+    [ -e "$img" ] || die "no such image: $img"
+
+    ro=""; owners="on"
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --readonly) ro="-readonly"; shift ;;
+            --owners)   owners="$2"; shift 2 ;;
+            *) die "unknown option: $1" ;;
+        esac
+    done
+
+    # One attachment per image. hdiutil resolves symlinks, so compare real paths.
+    real=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$img")
+    if hdiutil info 2>/dev/null | grep -q "^image-path.*: ${real}$"; then
+        die "already attached: $real  (detach it first; concurrent rw attachments corrupt images)"
+    fi
+
+    out=$(hdiutil attach -nobrowse -owners "$owners" $ro "$img" 2>&1) || {
+        echo "$out" >&2; die "attach failed"
+    }
+    mnt=$(printf '%s\n' "$out" | grep -oE '/Volumes/.*$' | tail -1 | sed 's/[[:space:]]*$//')
+    [ -n "$mnt" ] || { printf '%s\n' "$out"; die "attached but no mount point (nomount image?)"; }
+
+    # Keep Spotlight and fseventsd off it. Best effort: a read-only mount cannot
+    # take the marker, which is fine because nothing changes on it either.
+    if [ -z "$ro" ]; then
+        touch "$mnt/.metadata_never_index" 2>/dev/null \
+            && echo "safe_attach: Spotlight excluded via .metadata_never_index" >&2
+    fi
+
+    echo "$mnt"
+    ;;
+
+detach)
+    mnt="${1:-}"
+    [ -n "$mnt" ] || die "usage: safe_attach.sh detach <mountpoint>"
+    hdiutil detach "$mnt" || die "detach failed for $mnt (do NOT force-detach; find what is holding it)"
+    ;;
+
+list)
+    hdiutil info 2>/dev/null | grep -E "^image-path|^/dev/disk.*Volumes" | sed 's/^/  /'
+    ;;
+
+*)
+    sed -n '2,32p' "$0"
+    exit 2
+    ;;
+esac
