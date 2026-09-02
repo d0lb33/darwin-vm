@@ -6,6 +6,7 @@ import argparse
 SUPPORTED_DRIVERS=[b'AppleARM', b'aic', b'arm-io', b'uart-1,samsung']
 FREQUENCY = "u32:0x100000"
 IBOOT_NAME="qemu-sptm"
+DRAM_SIZE=0x200000000   # 8G; override with -dram
 
 AMCC_BANK_STRIDE = 0x100
 AMCC_LOWER_LIMIT_REG = 0x10
@@ -228,10 +229,12 @@ def fixup(d, nvram_file):
 
   if soc_gen <= 14:
     d['chosen'].props['dram-base'] = "u64:0x800000000"
-    d['chosen'].props['dram-size'] = "u64:0x200000000"
   else:
     d['chosen'].props['dram-base'] = "u64:0x10000000000"
-    d['chosen'].props['dram-size'] = "u64:0x200000000"
+  # XNU takes the DRAM size from the device tree, not from qemu's -m, so the
+  # two have to be raised together. Booting a full OS filesystem from a ramdisk
+  # needs far more than the 8G default.
+  d['chosen'].props['dram-size'] = f"u64:{DRAM_SIZE}"
 
   d['chosen'].props['firmware-version'] = IBOOT_NAME
   d['chosen'].props['system-firmware-version'] = IBOOT_NAME
@@ -372,7 +375,14 @@ def main():
   p.add_argument('-nvram', required=True, type=argparse.FileType('rb', 0))
   p.add_argument('-enable', action='append', default=[], choices=sorted(EMULATED_FEATURES.keys()),
                  help='keep the device tree nodes for an emulated feature so its XNU drivers bind (eg. -enable dcp)')
+  p.add_argument('-dram', default=None,
+                 help='DRAM size for the guest, eg. 24G. Must be matched by qemu -m. Default 8G.')
   args = p.parse_args()
+  if args.dram:
+    global DRAM_SIZE
+    v = args.dram.strip().upper()
+    mult = {'G': 1 << 30, 'M': 1 << 20, 'K': 1 << 10}.get(v[-1])
+    DRAM_SIZE = int(v[:-1], 0) * mult if mult else int(v, 0)
   for f in args.enable:
     KEEP_COMPAT_PATHS.update(EMULATED_FEATURES[f])
 

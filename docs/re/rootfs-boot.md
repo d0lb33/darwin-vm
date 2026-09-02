@@ -458,3 +458,60 @@ That removes the largest unknown from the ramdisk route.
 3. Boot with `rd=md0` pointing at the assembled image and see how far launchd
    gets. Expect a long tail of missing hardware (SEP, storage, baseband), but
    the UI path is what matters.
+
+## HARD LIMIT FOUND: ramdisks cannot exceed 4GiB
+
+Booting the decrypted 10GB system volume as `rd=md0` gets remarkably far and
+then fails on size. XNU finds the device, APFS reads the superblock, and the
+only complaint is arithmetic:
+
+```
+BSD root: md0, major 3, minor 0
+container_rootmount:2638: boot from ramdisk /dev/md0
+dev_init:299: md0 device_handle block size 512 block count 2805760 features 0 internal
+nx_dev_init:740: md0 superblock container size 10026483712 greater than device size 1436549120
+nx_dev_init:746: md0 superblock failed sanity checks: 92
+apfs_vfsop_mount:2650: unable to root from devvp <ptr> (root_device): 92
+```
+
+The cause is one line, `bsd/dev/memdev.c:540`:
+
+```c
+dev = mdevadd(devid, base >> 12, (unsigned)size >> 12, phys);
+```
+
+`size` is cast to 32 bits **before** the shift to pages, so any ramdisk over
+4GiB wraps. The arithmetic matches exactly:
+
+| | |
+|---|---|
+| image size | 10,026,483,712 (0x255a00000) |
+| cast to `unsigned` | 1,436,549,120 (0x55a00000) |
+| `>> 12` → pages | 350,720 |
+| → 512-byte blocks | 2,805,760 |
+| XNU reported | 2,805,760 ✓ |
+
+So the memory-disk root path has a hard 4GiB ceiling. The system volume needs
+~10GB and its dyld shared cache alone is 5.3GB, so shrinking under the limit is
+not realistic.
+
+### Three ways past it
+
+1. **Patch the cast.** In ARM64 this is a 32-bit shift where a 64-bit one is
+   wanted, i.e. the `sf` bit of a single instruction. `mdevadd` already takes
+   the page count as `unsigned int`, which caps at 4G pages = 16TB, so nothing
+   else needs to change. This project already carries exactly one kernel patch
+   and states the rule for adding one: only when it substantially reduces the
+   effort required to emulate hardware. Avoiding an entire storage controller
+   qualifies. Cheapest by a wide margin.
+
+2. **Apple PCIe plus a stock NVMe device.** `IONVMeFamily` ships a
+   `GenericNVMeSSD` personality (IOClass `IONVMeController`, IOProviderClass
+   `IOPCIDevice`, IOPCIClassMatch 0x01080200) that binds to any spec-compliant
+   NVMe controller. QEMU already has one. The missing piece is Apple's `apcie`
+   host controller, not NVMe itself.
+
+3. **Emulate ANS.** The authentic route, specified in
+   `docs/re/ans-nvme-references.md`, but it is an RTKit coprocessor plus a
+   non-standard NVMe plus SART, and it is currently blocked behind the same
+   RTBuddy firmware gate that blocks the DCP.

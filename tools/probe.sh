@@ -16,6 +16,9 @@
 #   --bootargs STR    XNU boot-args (default: rd=md0 serial=3 -v wdt=-1 wlan-olyhal-abort)
 #   --out DIR         where logs go (default: /tmp/dvm/probe)
 #   --tag NAME        name for this run; lets several probes run in parallel
+#   --ramdisk FILE    ramdisk image (default: firmware/ramdisk.dmg)
+#   --mem SIZE        guest RAM, eg. 24G (default: 8G). Must match the device
+#                     tree's dram-size, which dt_fixup sets with -dram.
 #   --grep PATTERN    extra egrep pattern to pull out of the serial log
 #   --keep            leave the VM running (frozen) instead of killing it
 #   --                everything after this is passed straight to qemu
@@ -39,6 +42,8 @@ SECS=60
 BOOTARGS="rd=md0 serial=3 -v wdt=-1 wlan-olyhal-abort"
 OUT=/tmp/dvm/probe
 TAG=probe
+RAMDISK=""
+MEM=8G
 GREP_EXTRA=""
 KEEP=0
 EXTRA_QEMU=()
@@ -51,6 +56,8 @@ while [[ $# -gt 0 ]]; do
         --bootargs) BOOTARGS="$2"; shift 2 ;;
         --out)      OUT="$2"; shift 2 ;;
         --tag)      TAG="$2"; shift 2 ;;
+        --ramdisk)  RAMDISK="$2"; shift 2 ;;
+        --mem)      MEM="$2"; shift 2 ;;
         --grep)     GREP_EXTRA="$2"; shift 2 ;;
         --keep)     KEEP=1; shift ;;
         --)         shift; EXTRA_QEMU=("$@"); break ;;
@@ -59,7 +66,9 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-for f in "$QEMU" "$DTREE" "$BOOTKC"; do
+[[ -z "$RAMDISK" ]] && RAMDISK="$REPO/firmware/ramdisk.dmg"
+
+for f in "$QEMU" "$DTREE" "$BOOTKC" "$RAMDISK"; do
     [[ -e "$f" ]] || { echo "probe: missing $f" >&2; exit 1; }
 done
 
@@ -76,12 +85,12 @@ ARGS=(
     -bootkc "$BOOTKC"
     -dtree "$DTREE"
     -tc "$REPO/firmware/ramdisk.tc"
-    -ramdisk "$REPO/firmware/ramdisk.dmg"
+    -ramdisk "$RAMDISK"
     -args "$BOOTARGS"
     -display none
     -monitor "unix:$SOCK,server,nowait"
     -serial "file:$SERIAL"
-    -m 8G
+    -m "$MEM"
 )
 [[ -f "$REPO/firmware/sptm" ]] && ARGS+=(-sptm "$REPO/firmware/sptm" -txm "$REPO/firmware/txm")
 [[ ${#EXTRA_QEMU[@]} -gt 0 ]] && ARGS+=("${EXTRA_QEMU[@]}")
