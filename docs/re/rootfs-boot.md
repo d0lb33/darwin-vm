@@ -474,20 +474,35 @@ nx_dev_init:746: md0 superblock failed sanity checks: 92
 apfs_vfsop_mount:2650: unable to root from devvp <ptr> (root_device): 92
 ```
 
-The cause is one line, `bsd/dev/memdev.c:540`:
+### Where the truncation actually is (corrected)
 
-```c
-dev = mdevadd(devid, base >> 12, (unsigned)size >> 12, phys);
+A first reading blamed `bsd/dev/memdev.c:540`, which casts to 32 bits before
+shifting. That call site is not the one used: disassembling the shipping
+kernelcache shows `mdevadd` has exactly one caller, in `IOFindBSDRoot`, and it
+computes the page count correctly with a 64-bit shift:
+
+```
+0xfffffff00b2be4c8  ldr x8, [x28, 8]     ; ramdParms[1] = 10,026,483,712
+0xfffffff00b2be4cc  lsr x2, x8, 0xc      ; 64-bit shift -> 2,447,872 pages, correct
+0xfffffff00b2be4d8  bl  mdevadd
 ```
 
-`size` is cast to 32 bits **before** the shift to pages, so any ramdisk over
-4GiB wraps. The arithmetic matches exactly:
+The real problem is the `mdSize` field, declared `uint32_t` and holding a
+**page** count, combined with eight expressions in memdev.c of the form
+`mdev[devid].mdSize << 12`. That shift is evaluated in 32-bit arithmetic, so any
+device larger than 4GiB overflows when converted back to bytes. The block-count
+ioctl at line 437 is what APFS reads:
+
+```c
+*o = ((mdev[devid].mdSize << 12) + mdev[devid].mdSecsize - 1) / mdev[devid].mdSecsize;
+```
+
+The arithmetic matches exactly:
 
 | | |
 |---|---|
-| image size | 10,026,483,712 (0x255a00000) |
-| cast to `unsigned` | 1,436,549,120 (0x55a00000) |
-| `>> 12` → pages | 350,720 |
+| pages passed to `mdevadd` | 2,447,872 (0x255a00) — correct |
+| `mdSize << 12` in 32 bits | 1,436,549,120 (0x55a00000) — overflowed |
 | → 512-byte blocks | 2,805,760 |
 | XNU reported | 2,805,760 ✓ |
 
@@ -497,13 +512,11 @@ not realistic.
 
 ### Three ways past it
 
-1. **Patch the cast.** In ARM64 this is a 32-bit shift where a 64-bit one is
-   wanted, i.e. the `sf` bit of a single instruction. `mdevadd` already takes
-   the page count as `unsigned int`, which caps at 4G pages = 16TB, so nothing
-   else needs to change. This project already carries exactly one kernel patch
-   and states the rule for adding one: only when it substantially reduces the
-   effort required to emulate hardware. Avoiding an entire storage controller
-   qualifies. Cheapest by a wide margin.
+1. **Patch memdev.** Not the one-instruction change first estimated. Eight
+   expressions compute `mdSize << 12` in 32-bit arithmetic, and each must be
+   widened along with the arithmetic consuming it. Mechanical but fiddly, and a
+   mistake gives silent I/O corruption rather than a clean failure. Worth
+   revisiting only if the storage routes stall.
 
 2. **Apple PCIe plus a stock NVMe device.** `IONVMeFamily` ships a
    `GenericNVMeSSD` personality (IOClass `IONVMeController`, IOProviderClass
