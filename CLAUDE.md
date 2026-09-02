@@ -75,6 +75,15 @@ name; the orchestrator merges.
 - **Comment the why.** These models are read by people who do not have the
   firmware open. Write the register map in a header comment, with its source.
 - Do not commit anything under `firmware/`, `ipsw_db/`, or `/tmp/dvm`.
+- **Scripts go in the repo; only outputs go in `/tmp/dvm`.** `/tmp` gets wiped on
+  restart, and on 2026-09-02 it took every build script with it — the images
+  were rebuildable, the scripts were not. Anything you would mind losing belongs
+  under `tools/`. Large binaries still stay out of git. See
+  `tools/rootfs/README.md` for what survives a wipe and how to recover.
+- **Do not rebuild `qemu-sptm/build/qemu-system-aarch64` while someone else is
+  booting.** An agent that starts a boot while the binary is being relinked gets
+  garbage results — this produced a convincing but entirely false "critical
+  regression" report. Build in your own worktree's build directory.
 
 ## What is already working
 
