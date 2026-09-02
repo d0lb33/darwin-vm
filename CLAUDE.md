@@ -91,86 +91,48 @@ name; the orchestrator merges.
   address.
 - `dt_fixup.py -enable dcp` re-exposes the DCP/DART/display nodes and assigns
   `dart-id` (SPTM panics with "error -1 getting dart-id" otherwise).
+- `darwin-afk`: the AFK ring transport on top of RTKit. All eleven DCP
+  endpoints `0x20`–`0x2a` complete INIT / GETBUF / INIT_TX / INIT_RX / START,
+  with their rings translated through the DART.
+- **Real iOS userspace.** The actual system volume boots as the ramdisk: dyld
+  maps the shared cache, launchd runs, hundreds of services start, backboardd
+  reaches `running`. See `docs/re/userspace-boot-state.md`.
+- **The normal boot path.** `rootdev=md0` plus a kernel patch gets iOS off its
+  restore path onto the `local` boot spec, so `mount-phase-1`/`-2` run and
+  `/private/var` is mounted writable as a tmpfs (`-ephemeral-data`).
+- A root shell inside the booted system volume, for poking at it live
+  (`/tmp/dvm/build/rootfs_sh.dmg`, 102 tools from the restore ramdisk, uid 0).
+  `tools/serial.py` drives it over a socket.
 
 ## Where the DCP bring-up stands
 
-The coprocessor start blocker is understood. `RTBuddy::start()` always returns
-true; the real work is a conditional tail call to `_attemptFirmwareLoad()`
-(`fcn 0xa7bbefc`, unslid). Which branch it takes is decided by device tree
-properties on the IOP nub:
-
-| Property | Effect |
-|---|---|
-| `no-firmware-service` | do not wait for a firmware service (which this kernelcache has no provider for) |
-| `pre-loaded` | take the "firmware already resident" path; **presence only**, value is ignored |
-| `region-base` + `region-size` | both required and both non-zero, else the segment list is NULL |
-| `quiesced` | **makes RTBuddy skip the CPU_CONTROL.RUN write entirely**, because it assumes the IOP is already running. Ours is cold, so this must be removed. |
-| `ignore-gating` (on the ASC node, not the nub) | turns `AppleA7IOP::powerOn` into a no-op, avoiding a poll on the unmodelled PMGR power gate |
-
-Nothing is validated at `region-base` on the pre-loaded path, so staging real
-firmware there is not required to make progress.
-
-With those set (see `/tmp/dvm/mkdcp.py`) the DCP now gets past the silent stall
-and fails inside SPTM instead:
+The transport is up. A plain `dt_fixup.py -enable dcp` tree now brings all
+eleven endpoints through the full AFK handshake, with zero unhandled opcodes and
+zero unmapped DVAs:
 
 ```
-t8110dart_init_instance: dart-dcp:0: DART instance 0: Invalid VM page limits [0x4000000,0x10000000)
+RTBuddy(DCP): start(...)
+IOMFB: service matched: AppleDCPExpert
+afk(DCP): ep 0x20 started (rings at dva 0x10000000000)
+...  through  ...
+afk(DCP): ep 0x2a started (rings at dva 0x10000050000)
 ```
 
-Ruled out for that check: the advertised VA width (SPTM reads only PARAMS1-4
-and nothing else before panicking; raising VA width from 42 to 43 changed
-nothing), and the range magnitude (narrowing vm-size gives proportionally
-smaller limits and the same panic). Under investigation.
+What makes the coprocessor actually *start*, as opposed to merely matching
+drivers, is `fixup_iops()`: `ignore-gating` on the IOP node so `AppleA7IOP`
+does not poll an unmodelled PMGR gate, and `pre-loaded` + `region-base` +
+`region-size` + `no-firmware-service` on its nub. Full derivation with
+addresses in `docs/re/dcp-iop-start.md`. Note `quiesced` must NOT be set: it
+makes RTBuddy assume the IOP is already running and skip the `CPU_CONTROL.RUN`
+write, and ours is cold.
 
-Enabling ANS as well hits a separate SPTM gate,
-`sart_sanity_check_throttles: Sart invalid throttle cfg [0] = 0x0`, because
-nothing models the SART address filter yet.
-
-The RTBuddy power-state to RTKit `SET_IOP_PWR_STATE` payload table lives at
-`0x7b28e30`: `{state0: 0x201, state1: 0x220, state2: 0x202, state3: 0x0}`.
-Mirror it in `darwin_asc.c` when the mailbox finally sees traffic.
-
-## Where the rootfs work stands
-
-**The real iOS system volume now boots as a ramdisk.** APFS mounts it,
-libignition runs, and the kernel execs the real /sbin/launchd off it:
-
-```
-md0 device_handle block size 512 block count 19582976
-md0s1 mount-complete volume RaveSeed24A5430a.D47DeveloperOS
-libignition: 1:   program : launchd
-```
-
-This needed the memdev patch (qemu-sptm/hw/arm/xnu_patch.c) to lift XNU's 4GiB
-ramdisk cap, plus `dt_fixup.py -dram` and `probe.sh --mem` to raise guest DRAM,
-plus an assembled image with the dyld shared cache copied to
-System/Library/Caches/com.apple.dyld (dyld skips cryptex mounting when it finds
-one there). See docs/re/rootfs-assembly.md for how the image is built without
-sudo, and for the merged v2 trustcache.
-
-The current blocker is dyld failing to map that cache:
-
-```
-dyld[1]: dyld cache '(null)' not loaded: syscall to map cache into shared region failed
-dyld[1]: Library not loaded: /usr/lib/libSystem.B.dylib
-```
-
-Ruled out: memory pressure (identical at 32G and 40G, which leaves 20GB free),
-shared region capacity (4.97 GiB of mappable subcaches against a 6.00 GiB
-SHARED_REGION_SIZE_ARM64), and code signing (amfi_get_out_of_my_way=1 changes
-nothing; cs_enforcement_disable is refused outright). Leading theory is that
-`rd=md0` makes libignition classify this as a "ramdisk" (restore) boot, which on
-real hardware has no shared cache at all.
-
-### Historical
-
-The real iOS filesystem is decrypted and mounted locally (see
-`docs/re/rootfs-boot.md`). `ipsw fw aea --fcs-key` issues decryption keys with
-no credentials. The system volume is unsealed, so authenticated-root is not a
-barrier. It boots as a ramdisk right up to a size check: XNU's `mdSize` is a
-uint32_t page count and eight `mdSize << 12` expressions evaluate in 32-bit
-arithmetic, capping memory-backed root disks at 4GiB. The system volume needs
-~10GB and its dyld shared cache alone is 5.3GB.
+**Next step: EPIC on top of AFK.** Announce one service on endpoint `0x20` and
+see whether XNU binds a sub-driver. `darwin_afk_send_qe()` is the entry point
+and has no caller yet; `docs/re/dcp-firmware-services.md` has the service map
+and `docs/re/afk-epic-references.md` §2.2 the ANNOUNCE payload shape. That
+document is wrong on one load-bearing point: the ring granule is `0x80` on iOS
+27, not `0x40`, making the header `0x180`. With `0x40` the guest panics in
+`afk_messenger_common.c:126`.
 
 Endpoint map, from the kext IOKit personalities:
 
@@ -179,3 +141,58 @@ Endpoint map, from the kext IOKit personalities:
 | 0x20–0x2a | `DCPEndpoint1`..`23` | `DCPEndpointV2` (AFK/EPIC framing) |
 | 0x37 | `DCPEndpoint24` | `AppleDCPLinkServiceSoC` (IOMFB link) |
 | — | `disp0,t8140` | `AppleCLCD2`, the display driver |
+
+## Where the userspace boot stands
+
+The real iOS system volume boots, and as of tonight it boots down iOS's
+**normal** path rather than the restore path:
+
+```
+tools/probe.sh --dtree <tree built with -ephemeral-data> \
+  --ramdisk /tmp/dvm/build/rootfs_sh.dmg \
+  --tc /tmp/dvm/tc/merged_sysvol_cryptex_ramdisk_tc.bin --mem 40G --secs 420 \
+  --bootargs 'rootdev=md0 ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort'
+```
+
+reaches `libignition ... boot spec name : local` with seven stages and no
+"Restore environment", runs `mount-phase-1` and `-2` for the first time, and
+mounts `/private/var` as a tmpfs seeded from the on-volume template. It
+currently dies 2,493 files into that copy with
+
+```
+panic(cpu 0 ...): ramstrategy: buf_map failed @memdev.c:299
+```
+
+Booting with plain `rd=md0` still works and still reaches a shell; that path
+just cannot reach SpringBoard, for the reasons in
+`docs/re/userspace-boot-state.md`.
+
+Two further things are known to stand between here and SpringBoard:
+
+- **SEP.** AMFI asks ACM for developer-mode status on every spawn; ACM waits on
+  `AppleSEPManager`; that wait burns 890 seconds of every 900. `-enable sep`
+  plus three device tree values gets the driver to `control endpoints created`,
+  but ACM then waits for `sep-endpoint,scrd` — a name `AppleSEPManager` builds
+  at runtime from what the coprocessor reports over the mailbox, so no device
+  tree property can close it. `docs/re/sep-bringup.md`.
+- **Personas.** `usermanagerd` dies with "Daemon failed to load persona
+  manifest" and 248 `kpersona_find_by_type(type 6)` failures follow. Expected to
+  clear once `/private/var` is genuinely writable.
+
+## Reading the logs
+
+One line, `TXM [Error]: selector: 38 | 42`, is roughly 99% of all serial output
+(1.6M of 1.63M lines in a 300-second boot). Strip it first or nothing is
+legible:
+
+```
+grep -av 'TXM \[Error\]' probe/X.serial.log > probe/X.clean.log
+```
+
+It comes from the kernelcache, not from TXM, and is the generic fallback of five
+`TXM [Error]` formats — see `docs/re/txm-selectors.md`. It is noise, not a
+failure we have had to fix.
+
+`probe.sh` reports `reached shell: no` for system-volume boots. That is correct
+and not a regression: it greps for `can't access tty`, which the restore ramdisk
+emits. The system volume runs launchd instead.
