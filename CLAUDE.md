@@ -119,9 +119,10 @@ name; the orchestrator merges.
 - `darwin-sep`: enough SEP for `AppleSEPManager` to reach "control endpoints
   created" and answer `AppleCredentialManager`. That wait used to burn 890 of
   every 900 seconds; it is now zero. `-enable sep`.
-- `darwin-ans` prerequisites: SART works, `-enable ans -enable smc` boots
-  clean, and Apple's own storage drivers probe (`AppleANS3CGv2Controller`,
-  score 500000). The controller behind them is being written.
+- `darwin-ans`: the ANS/NVMe storage controller. `IONVMeController`
+  initialises it, an `IOMedia` appears as "APPLE SSD (darwin-ans)", `disk0`
+  enumerates, and APFS finds a valid checkpoint on a real 21 GB image. Reads
+  are proven; writes and rooting off it are not. See **Storage**.
 - A root shell inside the booted system volume, for poking at it live
   (`/tmp/dvm/build/rootfs_sh.dmg`, 102 tools from the restore ramdisk, uid 0).
   `tools/serial.py` drives it over a socket.
@@ -192,21 +193,58 @@ measurement corrected them, not more reasoning. Reach for the experiment first.
 
 ## Storage
 
-Decided and specified, not yet implemented. `docs/re/storage-path.md`: **ANS**,
-not PCIe NVMe (all three `apcie` ports are taken by WLAN/BT/baseband) and not
-virtio (no virtio kexts in this kernelcache). `docs/re/ans-nvme-references.md`
-has the register map, the 11-step bring-up and the protocol divergences — the
+`darwin-ans` works: Apple's own `IONVMeController` initialises it and APFS
+mounts a real disk image off it. From probe run `ANSDISK`, with the 21 GB
+`rootfs.dmg` as the backing file, 0 panics:
+
+```
+IONVMeController::start():844: Successfully initialized NVMe drive 0x1000003EC
+AppleEmbeddedNVMeController::StartController():1461: Setting NAND status to Ready
+Registering: ../RTBuddy(ANS2)/RTBuddyService/AppleANS3CGv2Controller
+Registering: ../APPLE SSD (darwin-ans) Media/IOMediaBSDClient
+dev_init:299: disk0 device_handle block size 4096 block count 5593600
+nx_mount:1482: disk0 checkpoint search: largest xid 551, best xid 551 @ 109
+```
+
+APFS walking the checkpoint tree to a valid superblock is the load-bearing
+evidence: it cannot succeed unless the tag-indexed submission path, the NVMMU
+TCB handshake and the SART-filtered DMA all return the right bytes.
+
+**Working is not the same as rooting.** That run still booted `rd=md0`, and
+APFS only opened the *container* — there is not one `disk0s1` line in the log,
+and zero writes ever reached the model. Three things stand between here and
+retiring the ramdisk:
+
+- mount a **volume**, not just the container, which exercises far more of the
+  read path than a checkpoint search does;
+- **writes**, which have never run. Put a qcow2 overlay over the 21 GB image
+  first: a bad boot writing through to it costs us the image.
+- the **sealed root snapshot**, which is not a storage bug. The same run shows
+  `apfs_vfsop_mount:2914: md0s1 failed to find named root snapshot: Need
+  authenticator (81)`. We sidestep it on the ramdisk path; rooting off `disk0`
+  brings it back, and it is an AMFI/trustcache problem.
+
+Why it is worth it: **228 of the 257 seconds to `Early boot complete` is
+`mount-phase-2` rebuilding `/private/var` from 41,557 files**, purely for want
+of a Data volume. Rooting off ANS also drops the guest from 40 GB to ~8 GB and
+retires `-ephemeral-data`.
+
+Background, still accurate: `docs/re/storage-path.md` on why **ANS** and not
+PCIe NVMe (all three `apcie` ports are taken by WLAN/BT/baseband) or virtio (no
+virtio kexts in this kernelcache); `docs/re/ans-nvme-references.md` for the
+register map, the 11-step bring-up, and the protocol divergences — the
 submission path is a **tag-indexed array, not a ring**, and our
 `nvme-secure-bar` generation needs extra IO-queue base writes at `0x1200`/
-`0x1208` that the Linux driver never does.
+`0x1208` that the Linux driver never does. We cannot wrap QEMU's stock
+`hw/nvme`: it is a PCI device, `CONFIG_NVME_PCI` is off, and this machine has
+no PCI bus.
 
-Note we cannot wrap QEMU's stock `hw/nvme`: it is a PCI device, `CONFIG_NVME_PCI`
-is off, and this machine has no PCI bus.
-
-Worth it because **228 of the 257 seconds to `Early boot complete` is
-`mount-phase-2` rebuilding `/private/var` from 41,557 files**, purely for want
-of a Data volume. It also drops the guest from 40 GB to ~8 GB and retires
-`-ephemeral-data`.
+Usage: `dt_fixup.py -enable ans`, plus `-drive if=none,id=ans,file=<image>`.
+`darwin.c` creates the device and claims the `ans` mailbox; with no drive it
+boots anyway and says so. `DARWIN_ANS_SELFWIRE=1` is the model's own bring-up
+scaffold, which predates the machine wiring and creates the NVMe half from a
+machine-init-done notifier instead — it stays until the wired path is
+boot-tested, then both it and its branch in `darwin.c` come out.
 
 ## Performance
 
