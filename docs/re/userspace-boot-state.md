@@ -142,3 +142,70 @@ python3 dt_fixup.py /tmp/dvm/dtree_raw /tmp/dvm/dt_dcp_40g.bin \
   offers the serial root shell the restore ramdisk does.
 - Guest time tracks wall-clock roughly 1:1 despite the log flood.
 - Boot-arg `io=0x1f` makes IOKit log every driver match and start.
+
+## The spawn blocker: AMFI waits on a SEP that is not there
+
+`posix_spawn` never returns for SpringBoard — it never gets a pid. The split is
+clean: every service that spawns through `xpcproxy` reaches `running`, and the
+only two that spawn directly (`com.apple.SpringBoard`, `com.apple.systemstatusd`,
+both `.app` bundles rather than daemons) hang in `spawning`.
+
+AMFI consults the SEP-backed credential manager on that path:
+
+```
+AMFI: trying to get developer mode status from ACM
+AppleCredentialManager: startImpl: will join SEPManager's PM tree in getSEPEndpoint().
+AppleCredentialManager: waitForSEPEndpointOutsideACMCommandGate: waiting (cmd=25).
+ACMTRM: waitForSEPEndpoint: timed out waiting for AppleSEPManager (timeoutMs=5000).
+```
+
+That last line appears **178 times in a 900-second boot — 890 seconds of a 900
+second boot spent blocked**, continuously, from kernel driver start (clean-log
+line 124) to the last line of the run at guest time 00:14:50. `dt_fixup.py` was
+stripping the SEP node, so `AppleSEPManager` never existed and every wait ran its
+full timeout.
+
+### Enabling the node gets the driver to start
+
+`-enable sep` keeps `/arm-io/sep` (`iop-sep,ascwrap-v6` — the same ASC wrapper
+family as the DCP's `iop,ascwrap-v6`) and `/arm-io/dart-sep` (`dart,t8110`).
+Both are already modelled. `AppleSEPManager` then matches and starts:
+
+```
+virtual bool AppleSEPManager::start(IOService *): Setting custom allocator for SEP MPM mapper
+virtual bool AppleSEPManager::start(IOService *): SEP memory IS coherent
+panic(cpu 0 caller 0xfffffff0295bcd2c): "REQUIRE fail: panicBytesData != nullptr
+    @ bool AppleSEPBooter::initForSEP(AppleSEPManager *):58"
+```
+
+So the remaining gap is one buffer the booter requires. Node shape, from
+`/tmp/dvm/dtree_raw`:
+
+| Node | compatible | reg | interrupts |
+|---|---|---|---|
+| `/arm-io/sep` | `iop-sep,ascwrap-v6` | `0x2_7260_0000`, `0x8_0000` | 344, 343, 346, 345 |
+| `/arm-io/sep/iop-sep-nub` | `iop-nub,sep` | — | — |
+| `/arm-io/dart-sep` | `dart,t8110` | `0x2_38B7_0000`, `0x2_0000` | — |
+
+The nub is `iop-nub,sep`, not `rtbuddy-v2`, so `AppleSEPManager` drives it rather
+than `RTBuddy`, and SEP speaks its own protocol above the mailbox — not RTKit.
+
+### Two cheap bypasses, both tested, both dead
+
+Recorded so nobody spends the time again:
+
+- **`ramrod_disable_sep_load=1`** (a real boot-arg in this kernelcache) does not
+  help: `AppleSEPBooter::initForSEP` still panics, 4 panics in a 90s boot.
+  Log: `/tmp/dvm/probe/SEPNOLOAD.serial.log`.
+- **`trm_enabled=0`** does not help either. `ACMTRM` does read it
+  (`initU32FromBootArg: trm_enabled`, overriding `/defaults/trm-enabled = 0x1`),
+  but the wait is issued by `AppleCredentialManager`
+  (`waitForSEPEndpointOutsideACMCommandGate`), not by TRM, so disabling TRM
+  leaves the loop running. Log: `/tmp/dvm/probe/TRM0.serial.log`.
+
+The goal is not working SEP cryptography. It is `AppleSEPManager` publishing the
+endpoint so `ACM` stops blocking. `AMFI` has fallback paths that are worth
+knowing about — the kernelcache carries `AMFI: developer mode is force enabled`,
+`AMFI: Enabling developer mode since protected data is not available` and
+`AMFI: Enabling developer mode since we are restoring....` — but reaching them
+still requires ACM to answer rather than block.
