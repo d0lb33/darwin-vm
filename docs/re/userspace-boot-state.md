@@ -290,3 +290,37 @@ VM keeps running. `/private/var/keybags` is **absent from the system-volume
 template**; creating it (mode 700) in the image changes nothing, so the
 directory is not the problem. What creates `systembag.kb` without a SEP is the
 open question.
+
+### Enabling SEP is not a way around the keybag
+
+Tested directly (`/tmp/dvm/probe/NSEP.clean.log`), because
+`AppleSEPManager::start` now succeeds and it was reasonable to hope `seputil`
+would too. It does not:
+
+```
+(data-protection) <Notice>: Doing boot task
+init_data_protection: Waiting 60 seconds for AppleSEPManager...
+init_data_protection: Timeout trying to connect to the SEP
+init_data_protection: Failed to connect to sep
+panic(cpu 0 ...): seputil[4] exited ... (signal 0, exit status 60)
+```
+
+even though, in the same boot, the driver gets further than it ever has:
+
+```
+AppleSEPManager::start: control endpoints created
+"AppleSEPKeyStore": starting (BUILT: Aug 13 2026 22:21:06) ("normal" variant, 2383.2.1)
+```
+
+`seputil` wants a live SEP *connection*, not merely a matched driver — 18
+`waitForSEPEndpoint` timeouts in that boot, waiting on the runtime-named
+`sep-endpoint,scrd` endpoint that only the coprocessor can announce over the
+mailbox. So the choice is currently:
+
+| SEP node | `seputil` | keybag |
+|---|---|---|
+| removed | passes (`No SEP present on this device`) | cannot create `systembag.kb` |
+| kept | panics launchd at 60s | not reached |
+
+Both branches need either real SEP mailbox emulation, or a way to make the
+keybag work with no SEP at all.
