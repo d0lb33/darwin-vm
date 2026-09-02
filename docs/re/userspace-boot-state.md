@@ -324,3 +324,81 @@ mailbox. So the choice is currently:
 
 Both branches need either real SEP mailbox emulation, or a way to make the
 keybag work with no SEP at all.
+
+## Early boot completes
+
+Both blockers above are now cleared, and the boot reaches:
+
+```
+(boot) <Notice>: Early boot complete. Continuing system boot.
+```
+
+with **zero panics**, all **11,979** template files copied (it used to die at
+2,493), and **zero** `kpersona_find_by_type` failures.
+
+### `buf_map` was kernel VA exhaustion, not our patch
+
+The memdev widening was verified innocent, instruction by instruction, in
+`mdevstrategy` at `0xfffffff00ac9561c`. Every consumer of the widened `x9` is
+either 64-bit (`cmp x19, x9` at `…95694`, `cmp x8, x9` at `…956a0`) or the
+32-bit clamp at `…956a8`, which is only reached when
+`blkoff < size < blkoff+count` and is therefore exact. `blkoff` never narrows
+(`mul x19, x9, x10` at `…95688`), and `mdBase` is a `uint64_t` in this XNU with
+a 64-bit shift (`add x19, x19, x8, lsl #12` at `…956c4`) — so the
+`memdev.c:301` worry above is unfounded on this build, no silent corruption.
+`buf_unmap` is called at `…95894`.
+
+`buf_map` returns ENOMEM only when `vm_upl_map` fails to map the I/O's UPL into
+`kernel_map` (`0xfffffff00aca23fc`). The copier reads with `F_NOCACHE`, so
+`cluster_read_direct` builds an IO-wire UPL over the *user* buffer and maps it
+into the kernel-map DATA range — a path real NVMe never takes, because it DMAs
+from the page list instead. That range is squeezed by reservations that scale
+with DRAM: the compressor pool is `max_mem`, so **40 GiB of our 40 GB guest**,
+against 8 GiB on the real phone.
+
+The fix is a boot-arg, no patch:
+
+```
+vm_compression_limit=524288        # 8 GiB at 16 KiB pages
+```
+
+which caps the compressor as if this were an 8 GB phone and returns ~32 GiB of
+kernel VA. With it, the copy completes.
+
+Also explains an old mystery: `arm_vm_init.c:1846` panics
+"Unsupported memory configuration" at `mem_size >= 56 GiB`, before serial is up.
+That is why a 56 GB guest produced no output at all.
+
+### The keybag hang, and the lever
+
+`keybagd` finding no `systembag.kb` is normal first-boot behaviour — the `-7` is
+a hardcoded literal its own caller swallows into a NULL. It then calls
+`aks_get_system()`, which lands in `com.apple.driver.AppleSEPKeyStore`. That is
+the **only** keystore kext in this kernelcache: `__PRELINK_INFO` has no software
+`AppleKeyStore` to fall back to, and its personality matches `IOResources`
+unconditionally, so it registers whether or not a SEP node exists and then
+routes the call into a mailbox with nothing behind it. The block is
+uninterruptible — the single vCPU sits in the SPTM WFI trap at the same PC
+across repeated HMP samples, with nothing runnable.
+
+`keybagd --init` checks `/product` for `boot-ios-diagnostics` first and exits 0
+when it is present, which is what `dt_fixup.py -skip-keybag` sets. Presence is
+checked, not value. **This is a skip, not a fix**: nothing gets a real keybag,
+so anything that truly needs one will fail later.
+
+Ruled out, so nobody repeats them: pre-creating `systembag.kb` (does not avoid
+the `aks_get_system` call, and the payload is SEP-wrapped material we cannot
+produce), creating `/private/var/keybags` (tested, no change at all), and
+keeping the SEP node (`seputil` panics launchd first).
+
+### The recipe
+
+```
+python3 dt_fixup.py /tmp/dvm/dtree_raw /tmp/dvm/dt_full.bin -nvram nvram.bin \
+    -dram 40G -ephemeral-data -skip-keybag [-enable dcp]
+
+tools/probe.sh --dtree /tmp/dvm/dt_full.bin \
+  --ramdisk /tmp/dvm/build/rootfs_sh.dmg \
+  --tc /tmp/dvm/tc/merged_sysvol_cryptex_ramdisk_tc.bin --mem 40G --secs 1800 \
+  --bootargs 'rootdev=md0 ignition_level=1 launchd_unsecure_cache=1 vm_compression_limit=524288 serial=3 -v wdt=-1 wlan-olyhal-abort'
+```
