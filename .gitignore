@@ -5,3 +5,5 @@ sysroot
 sysroot.tar.gz
 mnt
 *.dmg
+__pycache__/
+.claude/worktrees/
