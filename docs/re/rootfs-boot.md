@@ -386,3 +386,75 @@ it — but this needs an actual boot to confirm, not more static analysis.
   mechanism precisely.
 - Whether a separate `Data`-role volume/firmlink split is required for a
   functional SpringBoard first-boot (action 7) — not investigated.
+
+---
+
+## Empirical verification (orchestrator, after the analysis above)
+
+The analysis above was written from manifests and headers. This section records
+what actually happened when the images were fetched, decrypted and mounted, and
+corrects the analysis in one important place.
+
+### The decryption pipeline works, unmodified
+
+Confirmed end to end on both a small image and the 8.7GB system volume:
+
+```
+ipsw fw aea --fcs-key <image>.aea     # key issued by wkms-public.apple.com, no credentials
+ipsw fw aea <image>.aea -o out/       # -> raw APFS image
+hdiutil attach -readonly -nobrowse    # mounts
+```
+
+`094-13182-141.dmg.aea` (8,724,152,320 bytes) decrypts to a 10,026,483,712 byte
+APFS image that mounts cleanly.
+
+### What is on the system volume
+
+Present: `System/Library/CoreServices/SpringBoard.app/SpringBoard`,
+`usr/libexec/backboardd`, `usr/lib/dyld`, `sbin/launchd`, and 661 LaunchDaemons
+including `com.apple.SpringBoard.plist` and `com.apple.backboardd.plist`. The
+restore ramdisk we boot today has 10 daemons and none of these.
+
+### CORRECTION: the cryptex is required after all
+
+The analysis concluded the cryptex was probably unnecessary because SpringBoard
+and friends live in the OS volume. The app bundles do. **The framework binaries
+do not.**
+
+- `System/Library/Caches` on the system volume is 0 bytes. There is no
+  `dyld_shared_cache_*` anywhere on the volume (`find` returns nothing).
+- `System/Library/PrivateFrameworks/UIKitCore.framework/` exists but contains
+  only resources: `.lproj` directories and `.caf` files, no `UIKitCore` binary.
+- `System/Cryptexes/App` and `System/Cryptexes/ExclaveOS` are symlinks into
+  `../../private/preboot/Cryptexes/`, and `/private/preboot` is empty on this
+  image.
+
+Every framework binary lives in the dyld shared cache, which ships in
+`094-13150-145.dmg.aea` (`Cryptex1,SystemOS`, 2.3GB). Nothing that links against
+UIKit can launch without it. A bootable filesystem therefore needs the system
+volume **plus** the cryptex staged where the runtime expects it, which on real
+hardware is done at restore time into `/private/preboot/Cryptexes`.
+
+### GOOD NEWS: the volume is not sealed
+
+The document flagged APFS authenticated-root sealing as the main risk. It does
+not apply to this image:
+
+```
+Name:    RaveSeed24A5430a.D47DeveloperOS (Case-sensitive)
+Sealed:  No
+```
+
+This is an unsealed *DeveloperOS* volume. So the `allow-root-hash-mismatch`
+boot-arg and the RELEASE-kernelcache snapshot panic may not be needed at all.
+That removes the largest unknown from the ramdisk route.
+
+### Remaining work for a rootfs boot
+
+1. Stage the cryptex's dyld shared cache into `/private/preboot/Cryptexes` on a
+   writable copy of the system volume.
+2. Raise the guest RAM well past the current 8G, since the ramdisk must hold a
+   ~10GB image plus the kernel's own memory. The host has 128GB.
+3. Boot with `rd=md0` pointing at the assembled image and see how far launchd
+   gets. Expect a long tail of missing hardware (SEP, storage, baseband), but
+   the UI path is what matters.
