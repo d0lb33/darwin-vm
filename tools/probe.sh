@@ -22,6 +22,9 @@
 #                     tree's dram-size, which dt_fixup sets with -dram.
 #   --grep PATTERN    extra egrep pattern to pull out of the serial log
 #   --keep            leave the VM running (frozen) instead of killing it
+#   NO_WATCHDOG=1     wait the full --secs even if the guest is visibly dead
+#   STALL_AFTER_PANIC seconds of silence after a panic before giving up (20)
+#   STALL_SECS        seconds of total silence before calling it hung (180)
 #   --                everything after this is passed straight to qemu
 #
 # environment:
@@ -101,8 +104,48 @@ ARGS=(
 
 ( "$QEMU" "${ARGS[@]}" 2> "$ERR" & )
 
-# wait without using sleep (blocked in some harnesses)
-perl -e "sleep $SECS"
+# Wait, but stop early once the guest can no longer make progress. Without this
+# every dead guest costs the full --secs: on 2026-09-02 three separate agents
+# (and the orchestrator, three times) sat watching a spinning VM to its timeout,
+# because a panicked guest looks exactly like a working one from outside -- the
+# process stays at ~100% CPU and only the serial log going quiet gives it away.
+#
+# Terminal conditions, each measured on this machine:
+#   * "Nested panic count exceeds limit" -- the guest says outright it will
+#     "reset or spin", and this machine has no reset path, so it spins forever.
+#   * "Halt/Restart Timed Out @IOPlatformExpert.cpp:900" -- a launchd reboot
+#     with nowhere to go. Always a consequence, never the cause.
+#   * any panic(cpu, once the log has also stopped growing -- the panic printer
+#     itself emits a few hundred lines, so allow it to finish first.
+#   * no output at all for STALL_SECS, panic or not -- a hang.
+#
+# --no-watchdog restores the old blind wait.
+STOP_REASON=""
+if [[ -n "${NO_WATCHDOG:-}" ]]; then
+    perl -e "sleep $SECS"
+else
+    STALL_AFTER_PANIC=${STALL_AFTER_PANIC:-20}
+    STALL_SECS=${STALL_SECS:-180}
+    _elapsed=0; _last_size=0; _quiet=0
+    while (( _elapsed < SECS )); do
+        perl -e 'sleep 3'; _elapsed=$((_elapsed+3))
+        _size=$(stat -f%z "$SERIAL" 2>/dev/null || echo 0)
+        if [[ "$_size" == "$_last_size" ]]; then _quiet=$((_quiet+3)); else _quiet=0; _last_size=$_size; fi
+        if grep -qa 'Nested panic count exceeds limit' "$SERIAL" 2>/dev/null; then
+            STOP_REASON="nested panic limit -- the guest will spin forever"; break
+        fi
+        if grep -qa 'Halt/Restart Timed Out' "$SERIAL" 2>/dev/null; then
+            STOP_REASON="Halt/Restart Timed Out -- guest asked to reboot; no reset path"; break
+        fi
+        if (( _quiet >= STALL_AFTER_PANIC )) && grep -qa 'panic(cpu' "$SERIAL" 2>/dev/null; then
+            STOP_REASON="panicked and quiet for ${_quiet}s"; break
+        fi
+        if (( _quiet >= STALL_SECS )); then
+            STOP_REASON="no serial output for ${_quiet}s -- hung"; break
+        fi
+    done
+    (( _elapsed >= SECS )) && STOP_REASON=""
+fi
 
 python3 "$HMP" "$SOCK" stop >/dev/null 2>&1
 REGS=$(python3 "$HMP" "$SOCK" info registers 2>/dev/null)
@@ -114,6 +157,12 @@ PANICS=$(grep -c 'panic(cpu' "$SERIAL" 2>/dev/null)
 SHELL_UP=$(grep -c "can't access tty" "$SERIAL" 2>/dev/null)
 
 echo "=== probe: $TAG ==="
+if [[ -n "$STOP_REASON" ]]; then
+    echo "STOPPED EARLY : $STOP_REASON"
+    echo "               (the guest is dead; do not wait on it. Find the FIRST"
+    echo "                panic(cpu line -- the nested-panic register dump is the"
+    echo "                panic printer faulting, not your bug.)"
+fi
 echo "serial lines : ${LINES:-0}"
 echo "xnu panics   : ${PANICS:-0}"
 echo "reached shell: $([[ "${SHELL_UP:-0}" -gt 0 ]] && echo yes || echo no)"
