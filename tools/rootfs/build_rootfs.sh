@@ -68,6 +68,10 @@ echo "    container $CONT volume $VOL"
 echo "==> mount source cryptex and target"
 hdiutil attach -readonly -nobrowse -mountpoint "$SRCMNT" "$CRYPTEX" >/dev/null
 diskutil mount -mountPoint "$TGTMNT" -mountOptions noowners "$VOL" >/dev/null
+# Keep Spotlight and fseventsd off a volume holding ~500k iOS files. Indexing
+# one of these, plus heavy create/delete churn, kernel-panicked the host twice
+# with "Data ObjId overflow" @jobj.c:1152 in APFS. See tools/rootfs/README.md.
+touch "$TGTMNT/.metadata_never_index" 2>/dev/null || true
 
 SRC="$SRCMNT/System/Library/Caches/com.apple.dyld"
 DST="$TGTMNT/System/Library/Caches/com.apple.dyld"
