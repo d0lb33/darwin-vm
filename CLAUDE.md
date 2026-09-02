@@ -94,21 +94,51 @@ name; the orchestrator merges.
 
 ## Where the DCP bring-up stands
 
-`dt_fixup.py -enable dcp` boots with no panic, reaches the shell, and gets the
-display chain to:
+The coprocessor start blocker is understood. `RTBuddy::start()` always returns
+true; the real work is a conditional tail call to `_attemptFirmwareLoad()`
+(`fcn 0xa7bbefc`, unslid). Which branch it takes is decided by device tree
+properties on the IOP nub:
+
+| Property | Effect |
+|---|---|
+| `no-firmware-service` | do not wait for a firmware service (which this kernelcache has no provider for) |
+| `pre-loaded` | take the "firmware already resident" path; **presence only**, value is ignored |
+| `region-base` + `region-size` | both required and both non-zero, else the segment list is NULL |
+| `quiesced` | **makes RTBuddy skip the CPU_CONTROL.RUN write entirely**, because it assumes the IOP is already running. Ours is cold, so this must be removed. |
+| `ignore-gating` (on the ASC node, not the nub) | turns `AppleA7IOP::powerOn` into a no-op, avoiding a poll on the unmodelled PMGR power gate |
+
+Nothing is validated at `region-base` on the pre-loaded path, so staging real
+firmware there is not required to make progress.
+
+With those set (see `/tmp/dvm/mkdcp.py`) the DCP now gets past the silent stall
+and fails inside SPTM instead:
 
 ```
-RTBuddy(DCP): start(...)
-IOMFB: service matched: AppleDCPExpert
-IOMFB AP: use_psd_dcp_power2: 0
+t8110dart_init_instance: dart-dcp:0: DART instance 0: Invalid VM page limits [0x4000000,0x10000000)
 ```
 
-No kernelcache patching is needed. Exactly one unmodelled MMIO access remains
-on this path even over a 240s boot (a single 4-byte write of 0x10 to
-`dcp0-expert` reg[1]), so the next obstacle is protocol, not missing MMIO:
-XNU never touches the DCP mailbox registers, meaning the coprocessor is never
-asked to start. Finding out what `AppleDCPExpert` is waiting on before it
-starts the IOP is the current front line.
+Ruled out for that check: the advertised VA width (SPTM reads only PARAMS1-4
+and nothing else before panicking; raising VA width from 42 to 43 changed
+nothing), and the range magnitude (narrowing vm-size gives proportionally
+smaller limits and the same panic). Under investigation.
+
+Enabling ANS as well hits a separate SPTM gate,
+`sart_sanity_check_throttles: Sart invalid throttle cfg [0] = 0x0`, because
+nothing models the SART address filter yet.
+
+The RTBuddy power-state to RTKit `SET_IOP_PWR_STATE` payload table lives at
+`0x7b28e30`: `{state0: 0x201, state1: 0x220, state2: 0x202, state3: 0x0}`.
+Mirror it in `darwin_asc.c` when the mailbox finally sees traffic.
+
+## Where the rootfs work stands
+
+The real iOS filesystem is decrypted and mounted locally (see
+`docs/re/rootfs-boot.md`). `ipsw fw aea --fcs-key` issues decryption keys with
+no credentials. The system volume is unsealed, so authenticated-root is not a
+barrier. It boots as a ramdisk right up to a size check: XNU's `mdSize` is a
+uint32_t page count and eight `mdSize << 12` expressions evaluate in 32-bit
+arithmetic, capping memory-backed root disks at 4GiB. The system volume needs
+~10GB and its dyld shared cache alone is 5.3GB.
 
 Endpoint map, from the kext IOKit personalities:
 
