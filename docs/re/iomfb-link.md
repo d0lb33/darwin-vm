@@ -530,3 +530,186 @@ if ((uint32_t)x26 != (uint32_t)x23):                    // @ 0xa0cfba0, cmp w26,
 - **Class 3** is only inferred to exist from the 2-bit width of the class
   field and an unreached "b.ne 0xd0310"-style error branch; no message of
   this class was observed on either side.
+
+## Addendum 2 (2026-09-02, later): the class-2 RPC layer, and AppleCLCD2 binds
+
+Three things happened in this pass. The first is a bug in our own model, the
+second is the protocol layer above the handshake, the third is the payoff.
+
+### 0. The class-1 ack was never actually sent
+
+`a63e509` ("pass the IOMFB firmware hash check; the link handshake completes")
+rewrote the ack construction and, in the same hunk, deleted the
+`darwin_asc_send(d->asc, ep, ack_msg)` line beside it. The model computed the
+corrected ack, logged it, and dropped it on the floor. That is visible in the
+very boot the commit cited as evidence:
+
+```
+/tmp/dvm/probe/IOMFB7.stderr.log:689  asc(DCP): AP -> IOP ep 0x37 0x0100000000000040
+/tmp/dvm/probe/IOMFB7.stderr.log:690  dcp: IOMFB ep 0x37 msg ... class 0 subkind 1 ...
+/tmp/dvm/probe/IOMFB7.stderr.log:691  dcp: IOMFB PROBE class-1 init-ack -> 0x000015a5c96b0001
+                                      (and no "IOP -> AP" line ever follows)
+```
+
+So "0 panics, reaches the shell" was true but for the wrong reason: the model
+had silently reverted to `DARWIN_DCP_IOMFB=1` behaviour. **A boot that gets
+further is the test; a boot that stops panicking is not.** With the send
+restored the hash check genuinely runs and genuinely passes -- the guest now
+prints the success-side log, not the mismatch one:
+
+```
+/tmp/dvm/iomfb/probe/M1.serial.log:171
+  AppleDCPLinkService::check_firmware_hash_crc32() 0x15A5C96B
+```
+
+(`0xfffffff007992aa8`, logged at `0xa0cfbf4`, i.e. after the `b.eq` at
+`0xa0cfba4` was taken.) And the AP immediately sends a message it had never
+sent before.
+
+### 1. Class 2 is a shared-heap RPC, and here is its whole shape
+
+```
+asc(DCP): AP -> IOP ep 0x37 0x0000001000000202
+```
+
+Decoded with the header table above: class 2, subkind 0, tag 0, ack 0, bit 9
+set. The rest is `rpc_caller_gated` (`fcn.fffffff00a0ce46c`; the name is its
+own `%s` argument, the string `rpc_caller_gated` at `0xfffffff0079923ee`,
+passed to every one of its five error format strings).
+
+**Message split** (`0xa0ce65c`-`0xa0ce688`):
+
+```
+mov x24, x28              ; x28 = byte offset into the shared heap
+bfi w24, w25, 0x10, 0x10  ; w25 = total size
+mov w25, 2                ; class 2
+bfi x25, x23, 9, 1        ; bit 9 = a caller flag
+orr x2, x25, x24, lsl 16  ; -> bits[31:16] offset, bits[47:32] size
+bl  link_send_message
+```
+
+**Request layout in the heap**, written at `heap + offset` by
+`0xa0ce608`-`0xa0ce654`:
+
+| Offset | Size | Field | Evidence |
+|---|---|---|---|
+| +0x00 | u32 | method name, a FourCC | `stp w24, w26, [x9]` @ `0xa0ce610`; the same `w24` is unpacked byte-by-byte big-endian into a 4-char string at `0xa0ce4a8`-`0xa0ce4c4` for the trace call at `0xa0ce4d4` |
+| +0x04 | u32 | `in_len` | same `stp`, second register |
+| +0x08 | u32 | `out_len` | `str w22, [x9, 8]` @ `0xa0ce614` |
+| +0x0c | in_len | input | `memcpy(base+off+0xc, x27, w26)` @ `0xa0ce644`-`0xa0ce654` |
+| +0x0c+in_len | out_len | output, filled by the IOP | read back at `0xa0ce794`-`0xa0ce7dc` |
+
+and `size == 0xc + in_len + out_len` (`add w11, w26, 0xc; adds w25, w22, w11`
+@ `0xa0ce4d8`-`0xa0ce4dc`). Every observed message matches.
+
+**The completion the IOP must send** (`0xa0ce750`-`0xa0ce7dc`):
+
+```
+ldrh w9, [x19, 0x48]   ; the reply's low 16 bits, stashed by link_handle_message
+and  w9, w9, w23       ; w23 = 0xc3  (mov w23, 0xc3 @ 0xa0ce6bc)
+cmp  w9, 0x42          ; class 2 + subkind 1
+b.eq <success>
+...
+ldr  w8, [x26, 0x4a]!  ; status = (u32)(reply >> 16); non-zero -> fail
+cbnz w8, <error>
+memcpy(caller_out, heap + off + 0xc + in_len, out_len)
+```
+
+`0xc3` masks exactly class (`[1:0]`) and subkind (`[7:6]`); `0x42` is class 2,
+subkind 1. That is also the one combination `link_send_message` REQUIREs you
+not to send directly (`0xa0ced2c`-`0xa0ced38`) -- reply-only, which
+corroborates it. `link_handle_message` routes the reply back to the blocked
+caller by a key built as `(ack_bit << 32) | tag` (`0xa0cfc44`-`0xa0cfc4c`), so
+**the completion must echo the request's tag and ack bit**.
+
+Implemented in `qemu-sptm/hw/arm/darwin_iomfb.c`. Live:
+
+```
+iomfb: ep 0x37 RPC #1 'A401' (0x41343031) in 0 out 4 at heap+0x0 size 0x10
+iomfb: IOP -> AP ep 0x37 0x0000000000000042  (class-2 completion for 'A401')
+```
+
+### 2. The method namespace, and how to enumerate it
+
+The FourCCs are `u32` immediates built by `MOVZ`/`MOVK` pairs in generated
+stubs, not strings -- searching `bootkc` for `"A401"` finds nothing. Scanning
+for `MOVZ Wd,#lo` followed within six instructions by `MOVK Wd,#hi,LSL 16`
+where `hi` decodes to `A0`-`A9`/`D0`-`D9` finds **258** distinct names:
+`A000`-`A041`, `A100`-`A137`, `A200`-`A206`, `A350`-`A399`, `A400`-`A492`,
+`A500`-`A501`, and the `D`-series the AP dispatches on the way back
+(`D130`-`D133`, `D210`-`D211`, `D300`, `D420`-`D424`, `D570`-`D579`,
+`D600`-`D603`, `D700`). The scanner is 25 lines and is worth rerunning on any
+new kernelcache. `A`-names are AP->DCP calls; the `D` block at
+`0xa0d05ac`-`0xa0d0680` is a nested switch inside `link_rpc_lookup` mapping
+incoming names to PAC-signed handlers, i.e. the callbacks the AP will accept
+from the firmware.
+
+Stub shapes read directly:
+
+- `A401` @ `0xfffffff00a0c8a80`: `in_len 0, out_len 4`, returns `out[0] & 1`
+  (`ldurb w8,[x29,-4]; and w0,w8,1` @ `0xa0c8ad4`). A **bool**. Note
+  `movi v0.16b, 0xaa; stur s0, [x29,-4]` @ `0xa0c8a90`: the AP poisons its own
+  out buffer with `0xaa` before the call, so an IOP that writes nothing hands
+  the driver `0xaaaaaaaa`.
+- `A465` @ `0xfffffff00a0cb980`: `void A465(u32, u32)`, `in_len 8`, no output.
+  Observed input `00 08 00 00 20 00 00 00` = (0x800, 0x20).
+- `A353` @ `0xfffffff00917d610`: `u64 A353(void)`, `out_len 8`. Its only caller
+  (`bl` @ `0xfffffff0091889f0`) feeds the result to
+  `0xfffffff00919e814` and logs `"IOMFB: reported 0x%llx (ns) as Time period
+  to exclaves_display_healthcheck_rate"` (`0xfffffff007620b86`) -- a
+  healthcheck period in nanoseconds. Returning 0 skips the block
+  (`cbz x0` @ `0x91889f4`), which is why zero is a safe answer here.
+
+The same 0xaa poison shows up in *inputs* too: `A500`'s stub
+(`0xfffffff00a0d41f0`) writes two bytes and leaves `0xaaaa` behind them, which
+is exactly the `00 01 aa aa` our trace printed.
+
+### 3. What A401's return value gates, and AppleCLCD2
+
+`A401`'s vtable slot is `+0x970`; the only call site is `0xfffffff00a0b5fe4`,
+inside `IOMobileFramebufferAP::start()`, immediately after the log line our
+boot log used to end on:
+
+```
+0xa0b5fa4  adrp x0, ...+0x21   ; "%s: fRackDebugSwapWaitTimeoutSec = %d"  (0x798f021)
+0xa0b5fac  bl   <log>
+0xa0b5fd4  ldr  x9, [x16, 0x970]
+0xa0b5fe4  blraa x9, x17       ; <- A401()
+0xa0b5fec  tbz  w0, 0, 0xa0b6154
+   true :  build an OSSerializer and setProperty("IOMFB Debug Info")  (0x798f047)
+   false:  str wzr, [x19, 0x260]   @ 0xa0b6154, then rejoin at 0xa0b58a0
+```
+
+(The call site was found by decoding the chained fixup at
+`0xfffffff00808c378`, whose low 32 bits rebase to `0xa0c8a80`, taking its
+16-bit PAC diversity `0x9516`, and searching for the single
+`movk x17, 0x9516, lsl 48` in the image.)
+
+The *meaning* of true/false is not in the disassembly, but the effect is
+measured. Four otherwise identical boots, `-enable dcp`, `io=0x1f`,
+`/tmp/dvm/iomfb/probe/`:
+
+| tag | ep 0x37 | class-1 ack | class-2 answered | A401 | result |
+|---|---|---|---|---|---|
+| `C0` | not advertised | – | – | – | no `AppleCLCD2` line at all |
+| `C2` | advertised | yes | no | – | `IOMFB: AP DRIVER START!`, nothing further |
+| `M3` | advertised | yes | yes, all-zero | `00` | `AppleCLCD2[0x1000003bb]::start took 596 ms`, **no** `Registering:` line; driver then runs `IOMFB_POWER_DART: set_power_state powerState=0` |
+| `M4`/`L4` | advertised | yes | yes | `01` | `Registering: ../disp0@0/AppleCLCD2` **and** `AppleCLCD2[0x100000397]::start took 657 ms`; two further RPCs (`A465`, `A353`) |
+
+All four reach the shell with 0 XNU panics and 11/11 AFK endpoints.
+
+`AppleCLCD2`'s personality, from `__PRELINK_INFO` at `0xfffffff00b434400`, is
+`IOProviderClass = AppleARMIODevice`, `IONameMatch = [disp0,t8140,
+dispext0,t8140]` -- it matches the IODeviceTree nub for `/arm-io/disp0`
+(`compatible = disp0,t8140` in our tree), not `IOMobileFramebuffer`. So
+nothing in the device tree was missing; the driver was simply never allowed to
+finish `start()`.
+
+### 4. Where this leaves the pixel path
+
+The AP has finished bringing the link up and goes quiet after `A353`. It has
+not powered the DCP on and has not asked for a framebuffer: on this `rd=md0`
+restore-ramdisk boot there is no `IOMobileFramebuffer` client to trigger a
+first-client-open, and the `D`-series callbacks (which the firmware would
+originate) are not modelled at all. Those two -- a client, and the callback
+direction -- are what stands between here and a swap.
