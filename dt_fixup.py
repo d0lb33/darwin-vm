@@ -98,9 +98,22 @@ def decode_node(dt,node):
 
   return our_size
 
-def del_compat(d):
+# Node paths (relative to the root) whose "compatible" property we keep so the
+# matching XNU drivers bind to hardware that qemu-sptm emulates. Selected with
+# -enable <feature>. Children of a listed node are kept too.
+EMULATED_FEATURES = {
+  # DCP display coprocessor: ASC mailbox + RTKit, its DART, and the display pipe nodes
+  'dcp': ['arm-io/dcp', 'arm-io/dart-dcp', 'arm-io/disp0', 'arm-io/dcp0-expert', 'arm-io/dart-disp0', 'arm-io/dart-dispgrt'],
+}
+KEEP_COMPAT_PATHS = set()
+
+def del_compat(d, path=''):
   for c in d.children:
-    del_compat(c)
+    del_compat(c, path + '/' + c.props['name'] if path or d.props.get('name') != 'device-tree' else c.props['name'])
+
+  rel = path.lstrip('/')
+  if any(rel == k or rel.startswith(k + '/') for k in KEEP_COMPAT_PATHS):
+    return
 
   if 'compatible' in d.props:
     # Device tree compatible fields will be str or bytes (if the underlying
@@ -115,6 +128,16 @@ def del_compat(d):
 
     if not any(x in compat for x in SUPPORTED_DRIVERS):
       del d.props['compatible']
+
+def fixup_darts(d):
+  # SPTM bootstraps every DART whose node still has a compatible, and expects
+  # iBoot to have added a unique "dart-id" to each of them (it panics with
+  # "error -1 getting dart-id" otherwise). Number the kept DARTs.
+  dart_id = 0
+  for c in d['arm-io'].children:
+    if c.props.get('device_type') == 'dart' and 'compatible' in c.props:
+      c.props['dart-id'] = f"u32:{dart_id}"
+      dart_id += 1
 
 def fixup_aic(aic):
   if 'compatible' not in aic.props:
@@ -251,6 +274,7 @@ def fixup(d, nvram_file):
     ctrr.props['write-disable-reg-value'] = "u32:1"
 
   del_compat(d)
+  fixup_darts(d)
   fixup_aic(d['arm-io']['aic'])
   fixup_sptm(d)
   del d.props['secure-root-prefix']
@@ -312,7 +336,11 @@ def main():
   p.add_argument('dtree', type=argparse.FileType('rb', 0))
   p.add_argument('out', type=argparse.FileType('wb', 0))
   p.add_argument('-nvram', required=True, type=argparse.FileType('rb', 0))
+  p.add_argument('-enable', action='append', default=[], choices=sorted(EMULATED_FEATURES.keys()),
+                 help='keep the device tree nodes for an emulated feature so its XNU drivers bind (eg. -enable dcp)')
   args = p.parse_args()
+  for f in args.enable:
+    KEEP_COMPAT_PATHS.update(EMULATED_FEATURES[f])
 
   dt_root = ADTNode()
   decode_node(args.dtree.read(),dt_root)

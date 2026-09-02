@@ -286,6 +286,45 @@ takes no arguments:
 
 Use `ctrl+A` followed by `x` in the terminal to quit Qemu.
 
+## 4b. Display output (framebuffer)
+
+`run.sh` now gives the VM a screen. `qemu-sptm` carves a boot framebuffer out of
+the top of guest DRAM (exactly what iBoot does on real hardware), describes it
+to XNU through `boot_args.Video` and the `/vram` device tree node, and exposes
+that memory to QEMU's normal display backends. XNU's verbose-boot text console
+renders straight into it, so you get the classic on-screen verbose boot and a
+root shell you can type into from the QEMU window:
+
+```
+./run.sh                 # cocoa window on macOS (sdl elsewhere)
+./run.sh --vnc :0        # headless, screen exposed over VNC (open vnc://localhost:5900)
+./run.sh --nographic     # classic serial-only root shell
+./run.sh --fb 1170x2532@2   # pick a framebuffer size / font scale
+```
+
+How it fits together:
+
+- `-fb WxH[@scale]` (qemu) / `FB=` (run.sh) sets the framebuffer size. Scale
+  doubles/ triples XNU's 8x16 console font. Defaults: `828x1792@2` for iPhones,
+  `1440x900@1` for Macs. `-fb off` disables it.
+- `-fbmode text|graphics`: `text` (default) gives the verbose console;
+  `graphics` leaves the screen to the boot progress UI (add `-progress` to the
+  boot-args to make XNU draw its spinner).
+- XNU sends its console to *either* the UART *or* the screen. `serial=3` (the
+  classic mode) keeps it on the UART, so with a display `run.sh` boots with
+  `serial=2`: keyboard input still comes from the UART, but console output goes
+  to the screen. Keys typed into the QEMU window are forwarded into the UART by
+  the `darwin-fb` device, so both the window and the terminal act as the
+  keyboard. Override with `BOOT_ARGS=...` if you want something else.
+- Any QEMU display backend works (`-display cocoa`, `-display sdl`, `-vnc`),
+  which is what makes this usable from Windows/ Linux hosts too. QEMU's monitor
+  `screendump file -f png` grabs the screen headlessly.
+
+This is the kernel's boot framebuffer, not a display controller: iOS/ macOS
+userspace (backboardd/ WindowServer) talks to the display through the DCP
+coprocessor on every chip this project supports, which is not emulated, so GUI
+apps don't draw yet. See "Where this is going" below.
+
 ## 5. Add custom programs to the VM
 
 > [!IMPORTANT]
@@ -644,6 +683,25 @@ address by underflowing the virtual address base. This has the effect of
 putting SPTM and TXM at really strange virtual addresses, and is known to cause
 instability, but was helpful for me in debugging early XNU boot. Uncomment that
 line and recompile qemu if you want to try it.
+
+# Where this is going (display / apps)
+
+State as of the framebuffer work:
+
+- ✅ Screen: XNU boot framebuffer shown through QEMU (cocoa/ sdl/ vnc), keyboard
+  from the window into the guest console.
+- ❌ GUI userspace: on A14+/ M1+ the display is driven by the DCP coprocessor
+  (`/arm-io/dcp`, `disp0`) via RTKit mailboxes; `IOMobileFramebuffer` needs it.
+  Emulating the DCP's AP-side protocol (the part Asahi Linux reverse engineered)
+  is the big missing piece for `backboardd`/ `WindowServer`. You'd also need the
+  full OS root filesystem rather than the restore ramdisk, SEP for keybags, and
+  a software renderer path for CoreAnimation (no AGX).
+- 🟡 macOS route: the UniversalMac IPSW also ships `DeviceTree.vmapple2` and
+  `kernelcache.release.vmapple`, i.e. the Virtualization.framework guest kexts
+  (virtio, `AppleVirtualPlatform`). Booting that under `-M darwin` with virtio
+  devices, then enabling Screen Sharing inside the guest, is the most realistic
+  path to a full macOS desktop over VNC without emulating the DCP. QEMU's own
+  `vmapple` machine (`hw/vmapple/`) is the reference for the device set.
 
 # FAQ
 

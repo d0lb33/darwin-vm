@@ -1,3 +1,4 @@
 [submodule "qemu-sptm"]
 	path = qemu-sptm
-	url = https://github.com/jprx/qemu-sptm.git
+	url = https://github.com/d0lb33/qemu-sptm.git
+	branch = darwin-vm-display
