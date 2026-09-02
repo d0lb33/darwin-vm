@@ -1,4 +1,12 @@
 #!/bin/bash
+# SUPERSEDED -- DO NOT RUN. See tools/rootfs/build_data_volume.sh.
+#
+# This script clones the 21 GB system volume and deletes ~500k files to keep
+# the 697 MB /private/var template. That mass delete kernel-panicked this host
+# three times on 2026-09-02 with "Data ObjId overflow" @jobj.c:1152, panicking
+# task fseventsd. It is kept only because its RE notes about volume roles and
+# ownership are still accurate and hard-won.
+
 # Stage 3: turn the single-volume root filesystem image into a multi-volume
 # APFS container a real storage controller can boot from -- a System volume
 # (role 0x1) and a *persistent* Data volume (role 0x40) pre-populated with the
@@ -115,7 +123,8 @@ stage() {
     # noowners: the tree is root-owned and we are not root, so the kernel has to
     # stop enforcing it. rename(2) never touches an inode's uid, so how the
     # volume is mounted has no effect on the ownership recorded on disk.
-    diskutil mount -mountPoint "$STAGEMNT" -mountOptions noowners "$vol" >/dev/null
+    diskutil mount -mountPoint "$STAGEMNT" -mountOptions noowners,nobrowse "$vol" >/dev/null
+    touch "$STAGEMNT"/.metadata_never_index 2>/dev/null || true
     [ -d "$STAGEMNT/private/var" ] || die "no private/var in the staged volume"
     echo "    template: $(find "$STAGEMNT/private/var" | wc -l | tr -d ' ') entries, $(du -sh "$STAGEMNT/private/var" | awk '{print $1}')"
 
@@ -128,13 +137,16 @@ stage() {
         }
     done
     local leftover
-    leftover=$(ls -A "$STAGEMNT" | grep -vx private || true)
+    # .metadata_never_index is ours: we drop it at every mount so Spotlight does
+    # not walk ~500k iOS files. It is not a leftover from the image.
+    leftover=$(ls -A "$STAGEMNT" | grep -vx private | grep -vx .metadata_never_index || true)
     [ -z "$leftover" ] || die "unexpected leftovers at the volume root: $leftover"
     for p in $(ls -A "$STAGEMNT/private" | grep -vx var || true); do rm -rf "$STAGEMNT/private/$p"; done
 
     echo "==> [stage] lift private/var to the volume root (rename, inodes preserved)"
     local n=0
     while IFS= read -r e; do
+        [ "$e" = .metadata_never_index ] && continue
         mv "$STAGEMNT/private/var/$e" "$STAGEMNT/$e" || die "mv $e"
         n=$((n+1))
     done < <(cd "$STAGEMNT/private/var" && ls -A)
@@ -178,7 +190,8 @@ assemble() {
     echo "==> [assemble] asr-restore the staged template into $datavol"
     scont=$(hdiutil attach -nomount "$STAGE" 2>/dev/null | awk '/EF57347C/{print $1; exit}')
     svol=$(diskutil list "$scont" | awk '/APFS Volume/{print "/dev/"$NF; exit}')
-    diskutil mount -mountPoint "$STAGEMNT" -mountOptions owners "$svol" >/dev/null
+    diskutil mount -mountPoint "$STAGEMNT" -mountOptions owners,nobrowse "$svol" >/dev/null
+    touch "$STAGEMNT"/.metadata_never_index 2>/dev/null || true
     asr restore --source "$STAGEMNT" --target "$datavol" --erase --noprompt 2>&1 | tail -4
     diskutil unmount "$STAGEMNT" >/dev/null
     detach_ours "$scont"
@@ -186,7 +199,8 @@ assemble() {
     # apfs_restore recreates the target volume, so re-resolve it and re-assert
     # name and role rather than trusting what asr left behind.
     datavol=$(diskutil apfs list "$cont" | awk '/APFS Volume Disk \(Role\)/ && !index($0,"(System)"){print "/dev/"$5; exit}')
-    diskutil mount -mountPoint "$DATAMNT" -mountOptions noowners "$datavol" >/dev/null
+    diskutil mount -mountPoint "$DATAMNT" -mountOptions noowners,nobrowse "$datavol" >/dev/null
+    touch "$DATAMNT"/.metadata_never_index 2>/dev/null || true
     diskutil rename "$datavol" Data >/dev/null 2>&1 || true
     setrole "$datavol" D
     diskutil unmount "$DATAMNT" >/dev/null
@@ -224,7 +238,8 @@ verify() {
     datavol=$(volof "$cont" Data)
     [ -n "$datavol" ] || die "no volume with role Data after re-attach"
     echo "==> [verify] Data volume $datavol mounted with owners ON"
-    diskutil mount -mountPoint "$DATAMNT" -mountOptions owners "$datavol" >/dev/null
+    diskutil mount -mountPoint "$DATAMNT" -mountOptions owners,nobrowse "$datavol" >/dev/null
+    touch "$DATAMNT"/.metadata_never_index 2>/dev/null || true
     ls -aln "$DATAMNT" | head -40
     echo "==> [verify] uid:gid histogram over the whole Data volume"
     find "$DATAMNT" -mindepth 1 -exec stat -f '%u:%g' {} + | sort | uniq -c | sort -rn

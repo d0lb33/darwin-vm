@@ -18,6 +18,9 @@
 # This wrapper enforces the rules we learned the hard way:
 #   - always -nobrowse, so Finder and friends leave it alone
 #   - drop .metadata_never_index at the volume root, so Spotlight skips it
+#   - drop .fseventsd/no_log, so fseventsd stops logging events for it; this
+#     is the daemon actually named in every host panic, and it ignores both
+#     -nobrowse and .metadata_never_index
 #   - refuse a second attachment of an image that is already attached; five
 #     concurrent read-write attachments once silently corrupted an image
 #   - detach by mount point, never a blanket force-detach: the user has other
@@ -65,6 +68,14 @@ attach)
     if [ -z "$ro" ]; then
         touch "$mnt/.metadata_never_index" 2>/dev/null \
             && echo "safe_attach: Spotlight excluded via .metadata_never_index" >&2
+        # .metadata_never_index stops Spotlight (mds) but NOT fseventsd, which
+        # honours neither it nor -nobrowse. fseventsd is the task named in all
+        # three "Data ObjId overflow" @jobj.c:1152 panics on this host
+        # (2026-09-02, pids 109/109/564), so it is the one that actually has to
+        # be silenced. /.fseventsd/no_log is the documented way to do it.
+        mkdir -p "$mnt/.fseventsd" 2>/dev/null \
+            && touch "$mnt/.fseventsd/no_log" 2>/dev/null \
+            && echo "safe_attach: fseventsd disabled via .fseventsd/no_log" >&2
     fi
 
     echo "$mnt"
