@@ -398,6 +398,27 @@ help. seputil's boot-task path passes 0 for "may I create the file" — only
 `--gigalocker-init` passes 1 — so it returns `errno` 2 without ever attempting
 a create.
 
+**The keystore works, but read the scope carefully.** `sks` is implemented and
+advertised by default. What is *proven*: iOS's own `newfs_apfs` creates an encrypted
+APFS volume, the volume persists across reboots, and it re-mounts with the `protect`
+flag (data protection live), with 0 timeout strikes, 0 `Missing key` and 0
+unencrypted-volume panics. `enhanced apfs is enabled` and the `disk1s3 keybag
+notification handler` both start.
+
+What is **not** proven, and was briefly claimed in commit `6432ffc`: every proof run so
+far (`SKS_LIVEKEY_V9`, `SKS_REMOUNT_V10`, `SKS_FINAL_DEFAULT`) is a **restore-ramdisk**
+boot — `BSD root: md0` — where the volume is mounted by an explicit `/sbin/mount` from a
+guest shell on the last line of the log. The system volume has **not** been shown to
+adopt it as `/private/var` during its own boot: on that path `mount-phase-2` logs
+`Skipping boot-task`, so nothing seeds the volume, and `-ephemeral-data` is **not**
+retired. The ~213 s file copy is therefore not yet eliminated.
+
+The remaining gap is populating the volume. The `/private/var` template files carry
+protection classes an empty keybag cannot unlock — `cp` panics reading `MobileAsset`
+even with `--reflink=never` — so a host- or shell-side copy is not the route. Getting
+iOS's own `mount-phase-2` to run the seeding, with the keybag it already has, probably
+is.
+
 The `sks` keystore is **feasible, not a hard no** — see
 `docs/re/sks-feasibility.md`. The crux is that keystore replies are *opaque*:
 the only check `AppleSEPKeyStore` runs is a transport digest the reply itself
