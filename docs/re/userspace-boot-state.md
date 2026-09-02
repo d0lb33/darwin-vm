@@ -209,3 +209,84 @@ knowing about — the kernelcache carries `AMFI: developer mode is force enabled
 `AMFI: Enabling developer mode since protected data is not available` and
 `AMFI: Enabling developer mode since we are restoring....` — but reaching them
 still requires ACM to answer rather than block.
+
+## The normal boot path works
+
+`rootdev=md0` plus a one-instruction kernel patch and a device tree change gets
+iOS off the restore path. See the commit "boot iOS down its normal path instead
+of the restore ramdisk" for the derivation; the short version:
+
+- `rd=md0` is matched by launchd (`strstr(kern.bootargs, "rd=md0")`) and by
+  libignition (exact token). `rootdev=` is an XNU alias for the same memory disk
+  that neither of them recognises.
+- Only `bsd_rooted_ramdisk()` still reads `"rd"` alone, so with `rootdev=` it
+  returns false and `bsd_init` panics "rootvp not authenticated after mounting".
+  `xnu_patch.c` forces it true.
+- `/private/var` comes from Apple's own ephemeral-recovery fstab, promoted by
+  `dt_fixup.py -ephemeral-data`, which mounts a tmpfs seeded from the on-volume
+  template. No storage controller needed.
+- `/arm-io/sep` must be **removed**, not merely stripped of `compatible`:
+  `seputil` keys off node presence.
+
+Result:
+
+```
+libignition: 1:   name              : local
+libignition: 1:   stage count       : 0x7
+(mount-phase-1) <Notice>: Doing boot task          [was: Skipping boot-task]
+mount: data volume missing, but not required in env: 2
+Mounting tmpfs volume at tmp location /.b/8/
+Executing command: /sbin/mount_tmpfs -s 4294967296 /.b/8/
+UMLCreatePrimaryUserLayout passed without error
+(fixup-mobile-tmp) <Notice>: Finished boot task
+```
+
+with **zero** "Read-only file system" errors (twelve daemons used to die on
+that), **zero** `kpersona_find_by_type` failures, and **zero**
+`ACMTRM: waitForSEPEndpoint` timeouts — removing the SEP node eliminated that
+890-seconds-per-900 stall outright, and `seputil` now reports
+`init_data_protection: No SEP present on this device` and passes.
+
+The boot-task chain that used to be skipped now runs: `fsck`, `mount-phase-1`,
+`data-protection`, `finish-obliteration`, `detect-installed-roots`,
+`select-boot-mode`, `commit-boot-mode`, `restore-datapartition`,
+`mount-phase-2`, `init-with-data-volume`, `fixup-mobile-tmp`, `fips`.
+
+### Two blockers on this path
+
+**1. `ramstrategy: buf_map failed @memdev.c:299`** during the template copy,
+with the full template. It is **exactly reproducible**: two identical boots both
+copied 2,493 files and died on the same file,
+`staged_system_apps/FindMy.app/.../assets/iPhone Wallpaper.png`. That file is
+unremarkable (420,765 bytes, and larger files copied fine before it), and its
+data lives at ~7.93 GiB in the image — above 4 GiB but not on a boundary, and
+many earlier files are above 4 GiB too. A fixed *count* rather than a fixed
+offset points at something consumed per-operation and not returned.
+`bsd/dev/memdev.c` has one `buf_map` (line 298) and one `buf_unmap` (line 357),
+so the source has no leak; whether the compiled, patched function does is open.
+
+Workaround that avoids it entirely: delete `/private/var/staged_system_apps`
+from the image. It is 697 MB of the template's 5,992 files, leaving 50, and the
+copy then completes. `/tmp/dvm/build/rootfs_slim.dmg` is that image.
+
+Note `memdev.c:301` has another unpatched 32-bit shift,
+`fvaddr = (mdev[devid].mdBase << 12) + blkoff`, in the same family as the three
+`mdSize << 12` sites we do patch. It cannot cause this panic (it runs after
+`buf_map`), but if it wraps it is silent data corruption.
+
+**2. The `keybag` boot task hangs.** With the copy out of the way the boot
+reaches:
+
+```
+(keybag) <Notice>: Doing boot task
+****** IN MKB_INIT ****
+MKB_INIT: Could not open /private/var/keybags/systembag.kb: No such file or directory
+MKB_INIT: Could not open /private/var/keybags/systembag.kb.writing: No such file or directory
+MKB_INIT: Unable to load keybag with No Crypto: -7
+```
+
+and stops there — no panic, no "Finished boot task", guest time frozen while the
+VM keeps running. `/private/var/keybags` is **absent from the system-volume
+template**; creating it (mode 700) in the image changes nothing, so the
+directory is not the problem. What creates `systembag.kb` without a SEP is the
+open question.
