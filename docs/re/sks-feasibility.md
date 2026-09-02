@@ -26,9 +26,55 @@ receives from us, not a cryptographic proof against a secret we don't have.
 Better than that, a **second, independent finding** answers question 4 at the
 same time: `AppleSEPKeyStore` already contains a shipped, non-cryptographic
 fallback for platforms with no effaceable storage — triggered by the exact
-device-tree property this VM already sets — that a live boot has not yet been
-observed to reach, but that static analysis traces cleanly to our current
-tree state.
+device-tree property this VM already sets.  The implementation results below
+replace the original study's static-only qualification.
+
+## Implementation result (2026-09-02)
+
+The `sks` endpoint is sufficient for the encrypted APFS media-key path.  The
+implementation is in `qemu-sptm/hw/arm/darwin_sep.c`: IPC v1 framing and the
+truncated SHA-256 transport digest are at `sep_sks_hash_response()`, op31
+creates a deterministic 64-byte live CPX key plus a 40-byte opaque wrapped
+record, and op32 maps that record back to the same live key.  These lengths
+come from the consumers, not a guess: APFS copies op31's first blob into the
+CPX object at `0xfffffff00a8720e8..0xa872190`, and AppleNVMeRequest accepts
+the wrapped/composite form only at length `0x40` at
+`0xfffffff00a139230..0xa13925c`.  The rejected 32-byte intermediate is visible
+as `Invalid key length for unwrapped key 32` in
+`/tmp/dvm/probe/SKS_LIVEKEY_V8A.serial.log:497`.
+
+The fake-key fallback is now confirmed dynamically, with an important scope
+qualification.  Merely starting AppleSEPKeyStore does not invoke it: the
+endpoint negotiates and reaches a guest shell in
+`/tmp/dvm/probe/SKS_V3.stderr.log:81,375..407` and
+`/tmp/dvm/probe/SKS_V3.serial.log:363`, while that 388-line serial log has no
+`using fake key` entry.  A real guest `newfs_apfs -E -W` key operation does
+invoke it at `/tmp/dvm/probe/SKS_LIVEKEY_V9.serial.log:481`; the same run logs
+three successful `fs_new_media_key` calls at lines 482, 490 and 497, writes
+the media/container keybags at lines 494, 495 and 499, and returns
+`GUEST_KEYOP_RC=0` at line 508.
+
+Persistence does not require a second ANS namespace in this machine's
+first-party degraded mode.  The requested `DARWIN_ANS_DEBUG=1` diagnostic
+shows only Identify (`opcode 0x06`) for `nsid 1` at
+`/tmp/dvm/probe/SKS_ANS_DIAG.stderr.log:640,678`; that log has zero instances
+of the inactive-namespace message from `darwin_ans.c:720` and zero
+`UNMODELLED admin opcode` messages from `darwin_ans.c:897`.  The key-operation
+writes are likewise to namespace 1, for example
+`/tmp/dvm/probe/SKS_ANS_DIAG.stderr.log:5513`.  Consequently no speculative
+effaceable-storage namespace was added to `darwin_ans.c`.
+
+The end-to-end proof uses the guest-created image on a second boot.  op32
+restores the key three times in
+`/tmp/dvm/probe/SKS_REMOUNT_V10.stderr.log:1585..1597,1687..1699,1769..1781`;
+the guest reports successful tags 1, 2 and 13 at serial lines 477..483, obtains
+the primary and secondary keys at lines 481 and 484, identifies the volume as
+`encrypted` at line 489, and completes the mount at line 491.  The command
+returns zero at line 496 and `mount` shows
+`/dev/disk1s3 on /private/var (... protect)` at line 500.  No inline-crypto
+model was added: this run reaches the requested encrypted-volume outcome
+without an ANS error that demands one; the existing omission remains recorded
+at `qemu-sptm/hw/arm/darwin_ans.c:134`.
 
 ## Question 1 (the crux): opaque or verified?
 
@@ -127,13 +173,11 @@ This is not a speculative match: `docs/re/data-volume.md` already documents
 that `no-effaceable-storage` sits on our tree "alongside `cpx-encryption-mode`",
 and this study is the first to trace what `AppleSEPKeyStore` *does* with it.
 
-**Caveat, stated precisely so it isn't overclaimed:** this is a static trace,
-not an observed runtime hit — `sks` is not currently advertised
-(`darwin_sep.c`'s `sep_default_eps`), so this function has never actually run
-in a boot we've captured. The claim is "the code path exists and our tree
-already satisfies its trigger condition," not "we have watched it fire."
-Confirming that is the cheapest first experiment for whoever picks this up
-(see Effort estimate).
+**Runtime qualification:** startup alone does not call the fallback
+(`/tmp/dvm/probe/SKS_V3.serial.log`, 388 lines, has no `using fake key`), but
+the first real guest key operation does
+(`/tmp/dvm/probe/SKS_LIVEKEY_V9.serial.log:481`).  This resolves the original
+static-only caveat without claiming the fallback runs before it is needed.
 
 ### 1c. What the public reference actually answers with, and what it admits it doesn't know
 
@@ -198,7 +242,7 @@ the same order of magnitude as `scrd` (2 commands captured) and `xars`/`xarm`
 
 ## Question 3: what does effaceable storage have to be?
 
-**Possibly moot for this path.** Finding 1b traces a code path in which
+**Moot for the path exercised here.** Finding 1b traces a code path in which
 `AppleSEPKeyStore` never touches `AppleEffaceableStorage` at all when
 `no-effaceable-storage` is present — which our tree already guarantees. Two
 supporting facts:
@@ -215,11 +259,11 @@ supporting facts:
   chased further within the timebox. **Open question**, flagged rather than
   guessed at.
 
-If 1b turns out not to fire at runtime (the open caveat above), the fallback
-position is exactly what `docs/re/data-volume.md` already scoped: back a
-small NAND-sized region behind `AppleEffaceableStorage`'s reg range. That
-remains a bounded, previously-scoped task and is not blocked by anything
-found here.
+The runtime trace closes the namespace hypothesis: Identify Namespace only
+targets nsid 1 at `/tmp/dvm/probe/SKS_ANS_DIAG.stderr.log:640,678`, while the
+inactive-namespace branch in `darwin_ans.c:720` and the unmodelled-admin branch
+at `darwin_ans.c:897` are absent from the log.  Backing a speculative second
+namespace would therefore not model any request made by this key operation.
 
 ## Question 4: is there a cheaper legitimate path?
 
@@ -244,63 +288,28 @@ re-examined here; `docs/re/data-volume.md` already established the volume
 mounts and is refused purely for lacking encryption, which is a kernel-side
 runtime check, not something `newfs_apfs` controls.
 
-## Effort estimate
+## Result versus the original estimate
 
-**3-6 agent-days**, in this shape:
-
-1. (0.5 day) Confirm 1b actually fires: advertise `sks`, let
-   `AppleSEPKeyStore` reach the point where it would call
-   `fcn.fffffff00954a858` (needs at minimum the version-negotiation reply and
-   Create Keybag to succeed first, or it may never reach a class-D-key
-   operation at all), and grep the serial log for
-   `"disabling use of effaceable storage, using fake key"`. This is the
-   single highest-value confirming experiment and should run before anything
-   else here.
-2. (1-2 days) Nail the header layout and digest algorithm for iOS 27
-   specifically: reconcile the 92-byte-vs-84-byte discrepancy, identify the
-   corecrypto digest the vtable in 1a resolves to (try SHA-256/16 first,
-   since that's the reference's choice and the field width matches; iterate
-   against the guest's own `"ipc digest failed"` log line as the pass/fail
-   oracle exactly like the `A401`/`bootCompleteGated()` gradient described in
-   `CLAUDE.md`'s DCP section).
-3. (1-2 days) Implement the ~10-12 opcodes deterministically in
-   `darwin_sep.c`, following the pattern already proven for `scrd`/`xars` —
-   build outward from Create Keybag / Load Keybag / Unload Keybag, since
-   those are the three with the cleanest string match to our own kernelcache.
-4. (0.5-1 day) Iterate `tools/probe.sh` boots to `apfs_vfsops.c:2399` and past
-   it; expect at least one more gate beyond encryption (per-file `cprotect`,
-   Keychain) that this study did not scope.
-
-**Riskiest unknown:** whether the digest in 1a is a plain hash (as the
-reference assumes and this study's static trace is consistent with) or
-something keyed that the SEP alone could compute — the disassembly shows a
-vtable-dispatched digest object, not an inline HMAC construction, which
-argues for "plain hash," but the exact corecrypto function was not resolved
-by symbol name and this was not empirically confirmed against a real device
-capture (only requests were captured in `docs/re/sep-protocol.md`, never a
-reply). If it turns out to be keyed with something we cannot reproduce, step
-2 above is where that would surface, at low cost (a boot that keeps logging
-"ipc digest failed" no matter what's tried), not at the end of the project.
+The original 3–6 day estimate was conservative.  Live acceptance identifies
+the transport digest as SHA-256 truncated to 16 bytes: replies generated by
+`sep_sks_hash_response()` are accepted at
+`/tmp/dvm/probe/SKS_V3.stderr.log:382..407`, with no `ipc digest failed` in
+the 388-line serial log.  The encrypted-volume path needs op31 and op32 plus
+the already-observed negotiation and set-environment messages, rather than
+all historical operations listed in Question 2; unrecognized messages remain
+explicit status-only no-ops in `sep_handle_sks()` and are logged by code and
+request ID.
 
 ## Open questions
 
-- **Does 1b actually fire at runtime?** Static trace only; needs the
-  confirming experiment in step 1 of the effort estimate.
-- **Exact digest algorithm and byte ranges for the `payload_hash` check**
-  (1a) — corecrypto symbol not resolved from the stub calls; needs either
-  more vtable tracing or the iterative-boot approach.
-- **Header layout for iOS 27**: our captured 92-byte request vs. the
-  reference's 84-byte struct do not numerically agree; the `ipc_version`
-  negotiation log (`0xfffffff00954cd10`) confirms the format is versioned,
-  so this is a "re-derive for this iOS," not "the reference is wrong."
-- **Exact byte-level `msg_code` numbering for iOS 27** — the opcode *names*
-  cross-validate against our kernelcache's own log strings, but the specific
-  case values (0x01, 0x02, ...) were taken from the reference, targeting an
-  older iOS/device, and not independently re-derived from our binary's own
-  switch table within this timebox.
 - **What `EffaceableStorage(1.0)` in the boot log actually is**, and whether
   it is on the `sks` path at all (Question 3) — not chased.
-- **What happens after encryption succeeds** — per-file `cprotect` and
-  Keychain both lean on data protection per `docs/re/data-volume.md`; this
-  study only scoped getting past the one panic at `apfs_vfsops.c:2399`, not
-  the full data-protection surface.
+- **The remaining status-only messages:** the successful mount still logs two
+  `AKS check_class failed with unexpected error = e00002bc` warnings at
+  `/tmp/dvm/probe/SKS_REMOUNT_V10.serial.log:486..487`.  They do not block the
+  encrypted mount at lines 489..500, but their reply schemas remain unknown
+  and `sep_handle_sks()` therefore identifies them as logged no-ops.
+- **Inline confidentiality:** `darwin_ans.c:134` records that the controller
+  does not implement inline AES.  The guest's APFS encryption state and key
+  lifecycle are working (`SKS_REMOUNT_V10.serial.log:477..500`), but the QEMU
+  block backend itself does not transform sectors cryptographically.

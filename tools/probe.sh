@@ -21,6 +21,7 @@
 #   --mem SIZE        guest RAM, eg. 24G (default: 8G). Must match the device
 #                     tree's dram-size, which dt_fixup sets with -dram.
 #   --grep PATTERN    extra egrep pattern to pull out of the serial log
+#   --uart-socket FILE expose the logged UART on a UNIX socket for guest input
 #   --keep            leave the VM running (frozen) instead of killing it
 #   NO_WATCHDOG=1     wait the full --secs even if the guest is visibly dead
 #   STALL_AFTER_PANIC seconds of silence after a panic before giving up (20)
@@ -51,6 +52,7 @@ TC=""
 MEM=8G
 GREP_EXTRA=""
 KEEP=0
+UART_SOCKET=""
 EXTRA_QEMU=()
 
 while [[ $# -gt 0 ]]; do
@@ -65,6 +67,7 @@ while [[ $# -gt 0 ]]; do
         --tc)       TC="$2"; shift 2 ;;
         --mem)      MEM="$2"; shift 2 ;;
         --grep)     GREP_EXTRA="$2"; shift 2 ;;
+        --uart-socket) UART_SOCKET="$2"; shift 2 ;;
         --keep)     KEEP=1; shift ;;
         --)         shift; EXTRA_QEMU=("$@"); break ;;
         -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
@@ -86,6 +89,7 @@ SOCK="/tmp/dvm/$TAG.sock"
 SERIAL="$OUT/$TAG.serial.log"
 ERR="$OUT/$TAG.stderr.log"
 rm -f "$SOCK" "$SERIAL" "$ERR"
+[[ -n "$UART_SOCKET" ]] && rm -f "$UART_SOCKET"
 
 ARGS=(
     -M darwin
@@ -96,9 +100,16 @@ ARGS=(
     -args "$BOOTARGS"
     -display none
     -monitor "unix:$SOCK,server,nowait"
-    -serial "file:$SERIAL"
     -m "$MEM"
 )
+if [[ -n "$UART_SOCKET" ]]; then
+    ARGS+=(
+        -chardev "socket,id=probe_uart,path=$UART_SOCKET,server=on,wait=off,logfile=$SERIAL"
+        -serial chardev:probe_uart
+    )
+else
+    ARGS+=(-serial "file:$SERIAL")
+fi
 [[ -f "$REPO/firmware/sptm" ]] && ARGS+=(-sptm "$REPO/firmware/sptm" -txm "$REPO/firmware/txm")
 [[ ${#EXTRA_QEMU[@]} -gt 0 ]] && ARGS+=("${EXTRA_QEMU[@]}")
 
