@@ -180,6 +180,50 @@ def fixup_darts(d):
       c.props['dart-id'] = f"u32:{dart_id}"
       dart_id += 1
 
+def fixup_sep(d):
+  # AppleSEPBooter::initForSEP asserts on a property iBoot normally adds and
+  # that is in no shipped device tree:
+  #
+  #   REQUIRE fail: panicBytesData != nullptr
+  #                 @ bool AppleSEPBooter::initForSEP(AppleSEPManager *):58
+  #
+  # The kernelcache names it, and states its size, in the two adjacent asserts
+  # from SEPROMPanicBuffer.cpp:
+  #
+  #   rom-panic-bytes
+  #   panicBytesData != nullptr
+  #   panicBytesData->getLength() == sizeof(uint32_t)
+  #
+  # so it is a 4-byte property, and its *value* is a length: setting it to zero
+  # clears the first assert and lands on the next one,
+  #
+  #   REQUIRE fail: length > 0 @ SEPROMPanicBuffer::SEPROMPanicBuffer(size_t):19
+  #
+  # so it sizes the buffer the SEP ROM would write its panic text into. The
+  # asserts bound it (4-byte property, non-zero value) but do not pin the size
+  # Apple uses; 0x100 is ours and nothing has yet read it back.
+  #
+  # It goes on the nub, not on the wrapper. These IOP nodes are a pair: the
+  # "ascwrap-v6" node is claimed by AppleASCWrapV6 and the nub below it by the
+  # coprocessor's own driver — RTBuddy on the DCP's iop-dcp-nub, AppleSEPManager
+  # on iop-sep-nub. Setting it on /arm-io/sep alone leaves the assert firing.
+  if 'arm-io/sep' not in KEEP_COMPAT_PATHS:
+    return
+  d['arm-io']['sep']['iop-sep-nub'].props['rom-panic-bytes'] = "u32:0x100"
+
+  # The same constructor then wants a non-zero chip id:
+  #
+  #   REQUIRE fail: _chip_id = *(uint32_t *)entry->getBytesNoCopy()
+  #                 @ SEPROMPanicBuffer::SEPROMPanicBuffer(size_t):32
+  #
+  # /chosen/chip-id ships as 0 in the IPSW device tree — it is one of the fields
+  # iBoot fills in at boot and we do not. Derive it from the SoC name rather
+  # than hardcoding, so this keeps working on other targets: 't8140' -> 0x8140.
+  # Only done when SEP is enabled, to keep boots that worked before unchanged.
+  platform = get_platform_name(d)
+  if platform.startswith('t') and all(c in '0123456789abcdefABCDEF' for c in platform[1:]):
+    d['chosen'].props['chip-id'] = f"u32:{hex(int(platform[1:], 16))}"
+
 def fixup_aic(aic):
   if 'compatible' not in aic.props:
     raise ValueError("aic doesn't have a 'compatible' field")
@@ -329,6 +373,7 @@ def fixup(d, nvram_file):
   del_compat(d)
   drop_exclave_routes(d)
   fixup_darts(d)
+  fixup_sep(d)
   fixup_aic(d['arm-io']['aic'])
   fixup_sptm(d)
   del d.props['secure-root-prefix']
