@@ -104,6 +104,10 @@ def decode_node(dt,node):
 EMULATED_FEATURES = {
   # DCP display coprocessor: ASC mailbox + RTKit, its DART, and the display pipe nodes
   'dcp': ['arm-io/dcp', 'arm-io/dart-dcp', 'arm-io/disp0', 'arm-io/dcp0-expert', 'arm-io/dart-disp0', 'arm-io/dart-dispgrt'],
+  # ANS storage coprocessor. Unlike the DCP its nub is "power-managed", so
+  # RTBuddy brings it up itself rather than waiting for a client to request
+  # power. Its DMA goes through the SART address filter, not a DART.
+  'ans': ['arm-io/ans', 'arm-io/sart-ans'],
 }
 KEEP_COMPAT_PATHS = set()
 
