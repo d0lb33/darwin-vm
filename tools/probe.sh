@@ -17,6 +17,7 @@
 #   --out DIR         where logs go (default: /tmp/dvm/probe)
 #   --tag NAME        name for this run; lets several probes run in parallel
 #   --ramdisk FILE    ramdisk image (default: firmware/ramdisk.dmg)
+#   --tc FILE         trustcache (default: firmware/ramdisk.tc)
 #   --mem SIZE        guest RAM, eg. 24G (default: 8G). Must match the device
 #                     tree's dram-size, which dt_fixup sets with -dram.
 #   --grep PATTERN    extra egrep pattern to pull out of the serial log
@@ -43,6 +44,7 @@ BOOTARGS="rd=md0 serial=3 -v wdt=-1 wlan-olyhal-abort"
 OUT=/tmp/dvm/probe
 TAG=probe
 RAMDISK=""
+TC=""
 MEM=8G
 GREP_EXTRA=""
 KEEP=0
@@ -57,6 +59,7 @@ while [[ $# -gt 0 ]]; do
         --out)      OUT="$2"; shift 2 ;;
         --tag)      TAG="$2"; shift 2 ;;
         --ramdisk)  RAMDISK="$2"; shift 2 ;;
+        --tc)       TC="$2"; shift 2 ;;
         --mem)      MEM="$2"; shift 2 ;;
         --grep)     GREP_EXTRA="$2"; shift 2 ;;
         --keep)     KEEP=1; shift ;;
@@ -67,8 +70,9 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -z "$RAMDISK" ]] && RAMDISK="$REPO/firmware/ramdisk.dmg"
+[[ -z "$TC" ]] && TC="$REPO/firmware/ramdisk.tc"
 
-for f in "$QEMU" "$DTREE" "$BOOTKC" "$RAMDISK"; do
+for f in "$QEMU" "$DTREE" "$BOOTKC" "$RAMDISK" "$TC"; do
     [[ -e "$f" ]] || { echo "probe: missing $f" >&2; exit 1; }
 done
 
@@ -84,7 +88,7 @@ ARGS=(
     -M darwin
     -bootkc "$BOOTKC"
     -dtree "$DTREE"
-    -tc "$REPO/firmware/ramdisk.tc"
+    -tc "$TC"
     -ramdisk "$RAMDISK"
     -args "$BOOTARGS"
     -display none
