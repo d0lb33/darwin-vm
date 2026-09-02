@@ -575,3 +575,49 @@ firmware roughly 3-4 years and several major versions older:
   specifically but a reminder that "AFK" is a shared library, not a
   DCP-only protocol, and other coprocessors' variations shouldn't be
   assumed to apply here.
+
+## iOS 27 corrections, derived live (2026-09-02)
+
+Two fields this document and `darwin_epic.c` had wrong, both established by
+instrumenting a boot rather than from the M1-era references.
+
+### The message header's byte 0 is a sequence counter, not flags
+
+`darwin_epic.c` documents it as flags, "bit 0 means a 0x18-byte extra block
+follows". Across one boot the AP sent `0x0, 0x1, 0x2 ... 0xf` on successive
+frames — a clean monotonic counter. Whatever the flag reading was based on, the
+AP is using this byte as a sequence/tag. Echoing it in replies is harmless and
+probably right; it is not on its own what makes a reply acceptable (tested).
+
+### The command body's u32 at +4 is a length inbound and a return code outbound
+
+The standard-service (`0xc0`) body starts with an 8-byte header. Byte 1 is the
+command id the AP matches replies against (`0xfffffff008b8eca8`,
+`ubfx w1, w26, #8, #8`). The u32 at +4 is **not** a symmetric field:
+
+- **Inbound** it is the payload length. Across three commands in one boot it
+  was always `body_len - 8`: `0x60`/`0x68`, `0x50`/`0x58`, `0x90`/`0x98`.
+- **Outbound** the AP reads the same offset as a return code.
+
+Echoing it back made `DCPAVRemoteSACControllerProxy` — interface 8, whose
+command carried `arg 0x50` — report exactly:
+
+```
+IOReturn DCPAVRemoteSACControllerProxy::bootCompleteGated() error: ret = 0x50 (UNDEFINED)
+```
+
+The value matching the request length, on the one interface whose request
+carried that length, is what identified the field. Zeroing it clears the error.
+
+### Sequence, once replies are answered at all
+
+With no reply the AP sends one `REPORT OPEN` and one command and stops. With a
+reply it opens every announced interface and keeps going:
+
+```
+REPORT OPEN   iface 1..10
+REPORT CLOSE  iface 6          (dcpav-audio-interface-epic, declined)
+COMMAND 0xc0  iface 1 (body 0x68), 8 (0x58), 10 (0x98)
+```
+
+13 OPEN reports and 1 CLOSE in a 150-second boot.
