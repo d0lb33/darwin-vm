@@ -1,0 +1,457 @@
+hvf_probe: standalone Hypervisor.framework probe
+hv_vm_config_get_el2_supported: HV_SUCCESS -> YES (EL2 / nested virtualization available)
+IPA size: default 36 bits, max 40 bits; default IPA granule enum=1
+SME max SVL: 64 bytes
+Guest-visible feature registers (hv_vcpu_config_get_feature_reg):
+  ID_AA64PFR0_EL1    0x1101000010110011
+  ID_AA64PFR1_EL1    0x0000000202000001
+  ID_AA64PFR2_EL1    0x0000000000000000
+  ID_AA64DFR0_EL1    0x0000000010305006
+  ID_AA64ISAR0_EL1   0x0221100110212120
+  ID_AA64ISAR1_EL1   0x0010221110211502
+  ID_AA64ISAR2_EL1   0x0000000000000010
+  ID_AA64MMFR0_EL1   0x000010000f100022
+  ID_AA64MMFR1_EL1   0x0000100011312000
+  ID_AA64MMFR2_EL1   0x1001001102001011
+  ID_AA64MMFR3_EL1   0x0000000000000000
+  ID_AA64SMFR0_EL1   0x02f15cff00000000
+  decoded: PFR0.EL2=0 EL3=0 SVE=0 SEL2=0 | PFR1.BT=1 MTE=0 MTE_frac=0 MTEX=0 SME=2 | MMFR1.VH=0 PAN=3 HAFDBS=0
+  decoded: ISAR1.APA=0 API=5 GPA=0 GPI=1 | ISAR2.APA3=0 GPA3=0 | DFR0.PMUVer=0 DebugVer=6
+
+=================== MODE: EL1 in a plain VM (no EL2) ===================
+
+--- architectural sanity + trapping instructions ---
+  CurrentEL              S3_0_C4_C2_2     read             NATIVE         value=0x0000000000000004
+  MIDR_EL1               S3_0_C0_C0_0     read             NATIVE         value=0x00000000610f0000
+  ID_AA64PFR0_EL1        S3_0_C0_C4_0     read             NATIVE         value=0x1101000010110011
+  ID_AA64PFR1_EL1        S3_0_C0_C4_1     read             NATIVE         value=0x0000000202000001
+  ID_AA64MMFR1_EL1       S3_0_C0_C7_1     read             NATIVE         value=0x0000100011312000
+  ID_AA64ISAR1_EL1       S3_0_C0_C6_1     read             NATIVE         value=0x0010221110211502
+  SCTLR_EL1              S3_0_C1_C0_0     read             NATIVE         value=0x0000000030d00980
+  UDF (.long 0)                           exec             GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SVC #0                                  exec             GUEST-EXC@EL1  ESR=0x56000000 EC=0x15 SVC64
+  HVC #0                                  exec             EXIT->VMM      ESR=0x5a000000 EC=0x16 HVC64
+  SMC #0                                  exec             EXIT->VMM      ESR=0x5e000000 EC=0x17 SMC64
+  BRK #0                                  exec             GUEST-EXC@EL1  ESR=0xf2000000 EC=0x3c BRK
+  WFI                                     exec             EXIT->VMM      ESR=0x07e00000 EC=0x01 WFx
+
+--- MTE: ID field, SCTLR.ATA, GCR, IRG/ADDG (MMU on, Tagged Normal memory), STG/LDG round trip ---
+  host set SCTLR_EL1=0xc0030d01805 (M|C|I|ATA|ATA0): rc=HV_SUCCESS, read back 0xc0030d01805 -> ATA bits retained
+  ID_AA64PFR1_EL1        S3_0_C0_C4_1     read             NATIVE         value=0x0000000202000001
+  SCTLR_EL1              S3_0_C1_C0_0     read             NATIVE         value=0x00000c0030d01985
+  GCR_EL1                S3_0_C1_C0_6     write 0xFFFD     TRAP->VMM      ESR=0x623c0420 EC=0x18 MSR/MRS/SYS trap S3_0_C1_C0_6 write <- x1
+  GCR_EL1                S3_0_C1_C0_6     read-back        TRAP->VMM      ESR=0x623c0441 EC=0x18 MSR/MRS/SYS trap S3_0_C1_C0_6 read -> x2
+  IRG x0, x1, xzr                         exec             NATIVE         value=0x0000000010020000
+  ADDG x2, x1, #16, #3                    exec             NATIVE         value=0x0000000010020100
+  STG x2, [x2]                            exec             NATIVE         (no trap, no guest exception)
+  LDG x3, [x3]                            exec             NATIVE         value=0x0000000010020010
+
+--- Apple IMPLEMENTATION DEFINED sysregs (the darwin-vm fork emulates all of these) ---
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    read             TRAP->VMM      ESR=0x6231bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 read -> x0
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    write(old|bits)  TRAP->VMM      ESR=0x6231bc22 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 write <- x1
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    read-back        TRAP->VMM      ESR=0x6231bc43 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 read -> x2
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    write(restore)   TRAP->VMM      ESR=0x6231bc02 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 write <- x0
+  SPRR_PPERM_EL1         S3_6_C15_C1_6    read             TRAP->VMM      ESR=0x623dbc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_6 read -> x0
+  SPRR_PPERM_EL1         S3_6_C15_C1_6    write(same)      TRAP->VMM      ESR=0x623dbc22 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_6 write <- x1
+  SPRR_PPERM_EL1         S3_6_C15_C1_6    read-back        TRAP->VMM      ESR=0x623dbc43 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_6 read -> x2
+  SPRR_PPERM_EL1         S3_6_C15_C1_6    write(restore)   TRAP->VMM      ESR=0x623dbc02 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_6 write <- x0
+  SPRR_UPERM_EL0         S3_6_C15_C1_5    read             TRAP->VMM      ESR=0x623bbc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_5 read -> x0
+  SPRR_AMRANGE_EL1       S3_6_C15_C1_3    read             TRAP->VMM      ESR=0x6237bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_3 read -> x0
+  SPRR_PMPRR_EL1         S3_6_C15_C3_1    read             TRAP->VMM      ESR=0x6233bc07 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C3_1 read -> x0
+  SPRR_UMPRR_EL1         S3_6_C15_C3_0    read             TRAP->VMM      ESR=0x6231bc07 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C3_0 read -> x0
+  GXF_CONFIG_EL1         S3_6_C15_C1_2    read             TRAP->VMM      ESR=0x6235bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 read -> x0
+  GXF_ENTRY_EL1          S3_6_C15_C8_1    read             TRAP->VMM      ESR=0x6233bc11 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_1 read -> x0
+  GXF_PABENTRY_EL1       S3_6_C15_C8_2    read             TRAP->VMM      ESR=0x6235bc11 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_2 read -> x0
+  CURRENTG               S3_6_C15_C8_0    read             TRAP->VMM      ESR=0x6231bc11 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_0 read -> x0
+  ASPSR_GL1              S3_6_C15_C10_4   read             TRAP->VMM      ESR=0x6239bc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_4 read -> x0
+  SP_GL1                 S3_6_C15_C10_0   read             TRAP->VMM      ESR=0x6231bc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_0 read -> x0
+  ESR_GL1                S3_6_C15_C10_5   read             TRAP->VMM      ESR=0x623bbc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_5 read -> x0
+  ELR_GL1                S3_6_C15_C10_6   read             TRAP->VMM      ESR=0x623dbc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_6 read -> x0
+  VBAR_GL1               S3_6_C15_C10_2   read             TRAP->VMM      ESR=0x6235bc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_2 read -> x0
+  APCTL_EL1              S3_4_C15_C0_4    read             TRAP->VMM      ESR=0x62393c01 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 read -> x0
+  APCTL_EL1              S3_4_C15_C0_4    write(same)      TRAP->VMM      ESR=0x62393c20 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 write <- x1
+  APCTL_EL1              S3_4_C15_C0_4    read-back        TRAP->VMM      ESR=0x62393c41 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 read -> x2
+  APCTL_EL1              S3_4_C15_C0_4    write(restore)   TRAP->VMM      ESR=0x62393c00 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 write <- x0
+  APSTS_EL1              S3_6_C15_C12_4   read             TRAP->VMM      ESR=0x6239bc19 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C12_4 read -> x0
+  KERNKEYLO_EL1          S3_4_C15_C1_0    read             TRAP->VMM      ESR=0x62313c03 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_0 read -> x0
+  KERNKEYLO_EL1          S3_4_C15_C1_0    write(same)      TRAP->VMM      ESR=0x62313c22 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_0 write <- x1
+  KERNKEYLO_EL1          S3_4_C15_C1_0    read-back        TRAP->VMM      ESR=0x62313c43 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_0 read -> x2
+  KERNKEYLO_EL1          S3_4_C15_C1_0    write(restore)   TRAP->VMM      ESR=0x62313c02 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_0 write <- x0
+  AMXIDR_EL1             S3_6_C15_C2_7    read             TRAP->VMM      ESR=0x623fbc05 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C2_7 read -> x0
+  AMX_CONFIG_EL1         S3_4_C15_C1_4    read             TRAP->VMM      ESR=0x62393c03 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_4 read -> x0
+  AMX_STATE_T_EL1        S3_4_C15_C1_3    read             TRAP->VMM      ESR=0x62373c03 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_3 read -> x0
+  VMSA_LOCK_EL1          S3_4_C15_C1_2    read             TRAP->VMM      ESR=0x62353c03 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_2 read -> x0
+  VMSA_LOCK_EL1          S3_4_C15_C1_2    write(same)      TRAP->VMM      ESR=0x62353c22 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_2 write <- x1
+  VMSA_LOCK_EL1          S3_4_C15_C1_2    read-back        TRAP->VMM      ESR=0x62353c43 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_2 read -> x2
+  VMSA_LOCK_EL1          S3_4_C15_C1_2    write(restore)   TRAP->VMM      ESR=0x62353c02 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_2 write <- x0
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    read             TRAP->VMM      ESR=0x62373c05 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 read -> x0
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    write(same)      TRAP->VMM      ESR=0x62373c24 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 write <- x1
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    read-back        TRAP->VMM      ESR=0x62373c45 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 read -> x2
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    write(restore)   TRAP->VMM      ESR=0x62373c04 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 write <- x0
+  CTRR_A_UPR_EL1         S3_4_C15_C2_4    read             TRAP->VMM      ESR=0x62393c05 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_4 read -> x0
+  CTRR_A_CTL_EL1         S3_4_C15_C2_5    read             TRAP->VMM      ESR=0x623b3c05 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_5 read -> x0
+  HID0                   S3_0_C15_C0_0    read             TRAP->VMM      ESR=0x62303c01 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C0_0 read -> x0
+  HID4                   S3_0_C15_C4_0    read             TRAP->VMM      ESR=0x62303c09 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C4_0 read -> x0
+  HID11                  S3_0_C15_C11_0   read             TRAP->VMM      ESR=0x62303c17 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C11_0 read -> x0
+  EHID0                  S3_0_C15_C0_1    read             TRAP->VMM      ESR=0x62323c01 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C0_1 read -> x0
+  PMCR0_EL1              S3_1_C15_C0_0    read             TRAP->VMM      ESR=0x62307c01 EC=0x18 MSR/MRS/SYS trap S3_1_C15_C0_0 read -> x0
+  PMCR0_EL1              S3_1_C15_C0_0    write(same)      TRAP->VMM      ESR=0x62307c20 EC=0x18 MSR/MRS/SYS trap S3_1_C15_C0_0 write <- x1
+  PMCR0_EL1              S3_1_C15_C0_0    read-back        TRAP->VMM      ESR=0x62307c41 EC=0x18 MSR/MRS/SYS trap S3_1_C15_C0_0 read -> x2
+  PMCR0_EL1              S3_1_C15_C0_0    write(restore)   TRAP->VMM      ESR=0x62307c00 EC=0x18 MSR/MRS/SYS trap S3_1_C15_C0_0 write <- x0
+  PMC0                   S3_2_C15_C0_0    read             TRAP->VMM      ESR=0x6230bc01 EC=0x18 MSR/MRS/SYS trap S3_2_C15_C0_0 read -> x0
+  CYC_OVRD               S3_5_C15_C5_0    read             TRAP->VMM      ESR=0x62317c0b EC=0x18 MSR/MRS/SYS trap S3_5_C15_C5_0 read -> x0
+  ACC_CFG                S3_5_C15_C4_0    read             TRAP->VMM      ESR=0x62317c09 EC=0x18 MSR/MRS/SYS trap S3_5_C15_C4_0 read -> x0
+  IPI_SR                 S3_5_C15_C1_1    read             TRAP->VMM      ESR=0x62337c03 EC=0x18 MSR/MRS/SYS trap S3_5_C15_C1_1 read -> x0
+  IMP_MSR_RO_CTRL0_EL1   S3_4_C15_C0_5    read             TRAP->VMM      ESR=0x623b3c01 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_5 read -> x0
+  ACNTPCT_EL0            S3_4_C15_C10_5   read             TRAP->VMM      ESR=0x623b3c15 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C10_5 read -> x0
+  ACNTVCT_EL0            S3_4_C15_C10_6   read             TRAP->VMM      ESR=0x623d3c15 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C10_6 read -> x0
+
+--- GXF: enable GXF_CONFIG, set GXF_ENTRY to a stub, execute genter / gexit ---
+  GXF_CONFIG_EL1         S3_6_C15_C1_2    read             TRAP->VMM      ESR=0x6235bca3 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 read -> x5
+  GXF_CONFIG_EL1         S3_6_C15_C1_2    write(old|1)     TRAP->VMM      ESR=0x6235bc22 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 write <- x1
+  GXF_CONFIG_EL1         S3_6_C15_C1_2    read-back        TRAP->VMM      ESR=0x6235bc43 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 read -> x2
+  GXF_ENTRY_EL1          S3_6_C15_C8_1    write stub addr  TRAP->VMM      ESR=0x6233bc30 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_1 write <- x1
+  GXF_ENTRY_EL1          S3_6_C15_C8_1    read-back        TRAP->VMM      ESR=0x6233bc51 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_1 read -> x2
+  genter                                  exec             GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CURRENTG               S3_6_C15_C8_0    read             TRAP->VMM      ESR=0x6231bc11 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_0 read -> x0
+  gexit (not in GL)                       exec             GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_CONFIG_EL1         S3_6_C15_C1_2    write(restore)   TRAP->VMM      ESR=0x6235bca2 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 write <- x5
+
+=================== MODE: EL2 in an EL2-enabled (nested-virt) VM ===================
+
+--- architectural sanity + trapping instructions ---
+  CurrentEL              S3_0_C4_C2_2     read             NATIVE         value=0x0000000000000008
+  MIDR_EL1               S3_0_C0_C0_0     read             NATIVE         value=0x00000000610f0000
+  ID_AA64PFR0_EL1        S3_0_C0_C4_0     read             NATIVE         value=0x1101000010110011
+  ID_AA64PFR1_EL1        S3_0_C0_C4_1     read             NATIVE         value=0x0000000202000001
+  ID_AA64MMFR1_EL1       S3_0_C0_C7_1     read             NATIVE         value=0x0000100011312000
+  ID_AA64ISAR1_EL1       S3_0_C0_C6_1     read             NATIVE         value=0x0010221110211502
+  SCTLR_EL1              S3_0_C1_C0_0     read             NATIVE         value=0x0000000030d00800
+  HCR_EL2                S3_4_C1_C1_0     read             NATIVE         value=0x0100000080000000
+  VTTBR_EL2              S3_4_C2_C1_0     read             NATIVE         value=0x0000000000000000
+  SCTLR_EL2              S3_4_C1_C0_0     read             NATIVE         value=0x0000000030c50830
+  UDF (.long 0)                           exec             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SVC #0                                  exec             GUEST-EXC@EL2  ESR=0x56000000 EC=0x15 SVC64
+  HVC #0                                  exec             GUEST-EXC@EL2  ESR=0x5a000000 EC=0x16 HVC64
+  SMC #0                                  exec             EXIT->VMM      ESR=0x5e000000 EC=0x17 SMC64
+  BRK #0                                  exec             GUEST-EXC@EL2  ESR=0xf2000000 EC=0x3c BRK
+  WFI                                     exec             EXIT->VMM      ESR=0x07e00000 EC=0x01 WFx
+
+--- Apple IMPLEMENTATION DEFINED sysregs (the darwin-vm fork emulates all of these) ---
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    write(old|bits)  GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_PPERM_EL1         S3_6_C15_C1_6    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_PPERM_EL1         S3_6_C15_C1_6    write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_PPERM_EL1         S3_6_C15_C1_6    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_PPERM_EL1         S3_6_C15_C1_6    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_UPERM_EL0         S3_6_C15_C1_5    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_AMRANGE_EL1       S3_6_C15_C1_3    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_PMPRR_EL1         S3_6_C15_C3_1    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_UMPRR_EL1         S3_6_C15_C3_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_CONFIG_EL1         S3_6_C15_C1_2    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_ENTRY_EL1          S3_6_C15_C8_1    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_PABENTRY_EL1       S3_6_C15_C8_2    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CURRENTG               S3_6_C15_C8_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  ASPSR_GL1              S3_6_C15_C10_4   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SP_GL1                 S3_6_C15_C10_0   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  ESR_GL1                S3_6_C15_C10_5   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  ELR_GL1                S3_6_C15_C10_6   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VBAR_GL1               S3_6_C15_C10_2   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APCTL_EL1              S3_4_C15_C0_4    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APCTL_EL1              S3_4_C15_C0_4    write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APCTL_EL1              S3_4_C15_C0_4    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APCTL_EL1              S3_4_C15_C0_4    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APSTS_EL1              S3_6_C15_C12_4   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  KERNKEYLO_EL1          S3_4_C15_C1_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  KERNKEYLO_EL1          S3_4_C15_C1_0    write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  KERNKEYLO_EL1          S3_4_C15_C1_0    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  KERNKEYLO_EL1          S3_4_C15_C1_0    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  AMXIDR_EL1             S3_6_C15_C2_7    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  AMX_CONFIG_EL1         S3_4_C15_C1_4    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  AMX_STATE_T_EL1        S3_4_C15_C1_3    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VMSA_LOCK_EL1          S3_4_C15_C1_2    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VMSA_LOCK_EL1          S3_4_C15_C1_2    write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VMSA_LOCK_EL1          S3_4_C15_C1_2    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VMSA_LOCK_EL1          S3_4_C15_C1_2    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CTRR_A_UPR_EL1         S3_4_C15_C2_4    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CTRR_A_CTL_EL1         S3_4_C15_C2_5    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  HID0                   S3_0_C15_C0_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  HID4                   S3_0_C15_C4_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  HID11                  S3_0_C15_C11_0   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  EHID0                  S3_0_C15_C0_1    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  PMCR0_EL1              S3_1_C15_C0_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  PMCR0_EL1              S3_1_C15_C0_0    write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  PMCR0_EL1              S3_1_C15_C0_0    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  PMCR0_EL1              S3_1_C15_C0_0    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  PMC0                   S3_2_C15_C0_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CYC_OVRD               S3_5_C15_C5_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  ACC_CFG                S3_5_C15_C4_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  IPI_SR                 S3_5_C15_C1_1    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  IMP_MSR_RO_CTRL0_EL1   S3_4_C15_C0_5    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  ACNTPCT_EL0            S3_4_C15_C10_5   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  ACNTVCT_EL0            S3_4_C15_C10_6   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_CONFIG_EL2        S3_6_C15_C14_2   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_CONFIG_EL2        S3_6_C15_C14_2   write(old|bits)  GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_CONFIG_EL2        S3_6_C15_C14_2   read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_CONFIG_EL2        S3_6_C15_C14_2   write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_PPERM_EL2         S3_6_C15_C1_7    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SPRR_AMRANGE_EL2       S3_6_C15_C14_3   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_CONFIG_EL2         S3_6_C15_C1_4    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_ENTRY_EL2          S3_6_C15_C12_0   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_PABENTRY_EL2       S3_6_C15_C12_1   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SP_GL2                 S3_6_C15_C11_0   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  ESR_GL2                S3_6_C15_C11_5   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  ELR_GL2                S3_6_C15_C11_6   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  TAG_OFFSET_EL2         S3_0_C11_C9_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  TAG_OFFSET_EL2         S3_0_C11_C9_0    write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  TAG_OFFSET_EL2         S3_0_C11_C9_0    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  TAG_OFFSET_EL2         S3_0_C11_C9_0    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APCTL_EL2              S3_6_C15_C12_2   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APCTL_EL2              S3_6_C15_C12_2   write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APCTL_EL2              S3_6_C15_C12_2   read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APCTL_EL2              S3_6_C15_C12_2   write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  APSTS_EL2              S3_6_C15_C12_3   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VMSA_LOCK_EL2          S3_4_C15_C1_5    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VMSA_LOCK_EL2          S3_4_C15_C1_5    write(same)      GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VMSA_LOCK_EL2          S3_4_C15_C1_5    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  VMSA_LOCK_EL2          S3_4_C15_C1_5    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  AMX_CONFIG_EL2         S3_4_C15_C4_7    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CTRR_A_LWR_EL2         S3_4_C15_C6_4    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CTRR_A_CTL_EL2         S3_4_C15_C6_2    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  AHCR_EL2               S3_4_C15_C12_1   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  MMU_SFAR_EL2           S3_6_C15_C14_6   read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  HPFAR_GL2              S3_6_C15_C1_1    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+
+--- GXF: enable GXF_CONFIG, set GXF_ENTRY to a stub, execute genter / gexit ---
+  GXF_CONFIG_EL2         S3_6_C15_C1_4    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_CONFIG_EL2         S3_6_C15_C1_4    write(old|1)     GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_CONFIG_EL2         S3_6_C15_C1_4    read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_ENTRY_EL2          S3_6_C15_C12_0   write stub addr  GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_ENTRY_EL2          S3_6_C15_C12_0   read-back        GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  genter                                  exec             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  CURRENTG               S3_6_C15_C8_0    read             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  gexit (not in GL)                       exec             GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  GXF_CONFIG_EL2         S3_6_C15_C1_4    write(restore)   GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+
+=================== MODE: EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0) ===================
+
+--- architectural sanity + trapping instructions ---
+  CurrentEL              S3_0_C4_C2_2     read             NATIVE         value=0x0000000000000004
+  MIDR_EL1               S3_0_C0_C0_0     read             NATIVE         value=0x00000000610f0000
+  ID_AA64PFR0_EL1        S3_0_C0_C4_0     read             NATIVE         value=0x1101000010110011
+  ID_AA64PFR1_EL1        S3_0_C0_C4_1     read             NATIVE         value=0x0000000202000001
+  ID_AA64MMFR1_EL1       S3_0_C0_C7_1     read             NATIVE         value=0x0000100011312000
+  ID_AA64ISAR1_EL1       S3_0_C0_C6_1     read             NATIVE         value=0x0010221110211502
+  SCTLR_EL1              S3_0_C1_C0_0     read             NATIVE         value=0x0000000030d00980
+  UDF (.long 0)                           exec             GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SVC #0                                  exec             GUEST-EXC@EL1  ESR=0x56000000 EC=0x15 SVC64
+  HVC #0                                  exec             GUEST-EXC@EL2  ESR=0x5a000000 EC=0x16 HVC64
+  SMC #0                                  exec             EXIT->VMM      ESR=0x5e000000 EC=0x17 SMC64
+  BRK #0                                  exec             GUEST-EXC@EL1  ESR=0xf2000000 EC=0x3c BRK
+  WFI                                     exec             EXIT->VMM      ESR=0x07e00000 EC=0x01 WFx
+
+--- MTE: ID field, SCTLR.ATA, GCR, IRG/ADDG (MMU on, Tagged Normal memory), STG/LDG round trip ---
+  host set SCTLR_EL1=0xc0030d01805 (M|C|I|ATA|ATA0): rc=HV_SUCCESS, read back 0xc0030d01805 -> ATA bits retained
+FIXME IF: "Handle this" line 82
+  MTE sequence                                             CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+
+--- Apple IMPLEMENTATION DEFINED sysregs (the darwin-vm fork emulates all of these) ---
+FIXME IF: "Handle this" line 82
+  SPRR_CONFIG_EL1                                          CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_PPERM_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_UPERM_EL0                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_AMRANGE_EL1                                         CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_PMPRR_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_UMPRR_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  GXF_CONFIG_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  GXF_ENTRY_EL1                                            CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  GXF_PABENTRY_EL1                                         CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CURRENTG                                                 CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ASPSR_GL1                                                CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SP_GL1                                                   CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ESR_GL1                                                  CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ELR_GL1                                                  CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  VBAR_GL1                                                 CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  APCTL_EL1                                                CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  APSTS_EL1                                                CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  KERNKEYLO_EL1                                            CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  AMXIDR_EL1                                               CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  AMX_CONFIG_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  AMX_STATE_T_EL1                                          CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  VMSA_LOCK_EL1                                            CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CTRR_A_LWR_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CTRR_A_UPR_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CTRR_A_CTL_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  HID0                                                     CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  HID4                                                     CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  HID11                                                    CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  EHID0                                                    CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  PMCR0_EL1                                                CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  PMC0                                                     CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CYC_OVRD                                                 CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ACC_CFG                                                  CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  IPI_SR                                                   CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  IMP_MSR_RO_CTRL0_EL1                                     CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ACNTPCT_EL0                                              CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ACNTVCT_EL0                                              CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+
+--- GXF: enable GXF_CONFIG, set GXF_ENTRY to a stub, execute genter / gexit ---
+FIXME IF: "Handle this" line 82
+  GXF sequence                                             CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+
+=================== MODE: EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0) ===================
+
+--- architectural sanity + trapping instructions ---
+  CurrentEL              S3_0_C4_C2_2     read             NATIVE         value=0x0000000000000004
+  MIDR_EL1               S3_0_C0_C0_0     read             NATIVE         value=0x00000000610f0000
+  ID_AA64PFR0_EL1        S3_0_C0_C4_0     read             NATIVE         value=0x1101000010110011
+  ID_AA64PFR1_EL1        S3_0_C0_C4_1     read             NATIVE         value=0x0000000202000001
+  ID_AA64MMFR1_EL1       S3_0_C0_C7_1     read             NATIVE         value=0x0000100011312000
+  ID_AA64ISAR1_EL1       S3_0_C0_C6_1     read             NATIVE         value=0x0010221110211502
+  SCTLR_EL1              S3_0_C1_C0_0     read             NATIVE         value=0x0000000030d00980
+  UDF (.long 0)                           exec             GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+  SVC #0                                  exec             GUEST-EXC@EL1  ESR=0x56000000 EC=0x15 SVC64
+  HVC #0                                  exec             GUEST-EXC@EL2  ESR=0x5a000000 EC=0x16 HVC64
+  SMC #0                                  exec             EXIT->VMM      ESR=0x5e000000 EC=0x17 SMC64
+  BRK #0                                  exec             GUEST-EXC@EL1  ESR=0xf2000000 EC=0x3c BRK
+  WFI                                     exec             EXIT->VMM      ESR=0x07e00000 EC=0x01 WFx
+
+--- MTE: ID field, SCTLR.ATA, GCR, IRG/ADDG (MMU on, Tagged Normal memory), STG/LDG round trip ---
+  host set SCTLR_EL1=0xc0030d01805 (M|C|I|ATA|ATA0): rc=HV_SUCCESS, read back 0xc0030d01805 -> ATA bits retained
+FIXME IF: "Handle this" line 82
+  MTE sequence                                             CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+
+--- Apple IMPLEMENTATION DEFINED sysregs (the darwin-vm fork emulates all of these) ---
+FIXME IF: "Handle this" line 82
+  SPRR_CONFIG_EL1                                          CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_PPERM_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_UPERM_EL0                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_AMRANGE_EL1                                         CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_PMPRR_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SPRR_UMPRR_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  GXF_CONFIG_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  GXF_ENTRY_EL1                                            CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  GXF_PABENTRY_EL1                                         CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CURRENTG                                                 CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ASPSR_GL1                                                CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  SP_GL1                                                   CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ESR_GL1                                                  CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ELR_GL1                                                  CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  VBAR_GL1                                                 CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  APCTL_EL1                                                CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  APSTS_EL1                                                CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  KERNKEYLO_EL1                                            CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  AMXIDR_EL1                                               CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  AMX_CONFIG_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  AMX_STATE_T_EL1                                          CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  VMSA_LOCK_EL1                                            CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CTRR_A_LWR_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CTRR_A_UPR_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CTRR_A_CTL_EL1                                           CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  HID0                                                     CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  HID4                                                     CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  HID11                                                    CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  EHID0                                                    CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  PMCR0_EL1                                                CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  PMC0                                                     CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  CYC_OVRD                                                 CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ACC_CFG                                                  CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  IPI_SR                                                   CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  IMP_MSR_RO_CTRL0_EL1                                     CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ACNTPCT_EL0                                              CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+FIXME IF: "Handle this" line 82
+  ACNTVCT_EL0                                              CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+
+--- GXF: enable GXF_CONFIG, set GXF_ENTRY to a stub, execute genter / gexit ---
+FIXME IF: "Handle this" line 82
+  GXF sequence                                             CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+
+=================== MODE: EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1) ===================
+
+--- do IMP-DEF accesses from EL1 trap to the *guest* EL2 (EC=0x18 in the EL2 handler)? ---
+  HID0                   S3_0_C15_C0_0    read             GUEST-EXC@EL2  ESR=0x62303c01 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C0_0 read -> x0
+  SPRR_CONFIG_EL1        S3_6_C15_C1_0    read             GUEST-EXC@EL2  ESR=0x6231bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 read -> x0
+  CTRR_A_LWR_EL1         S3_4_C15_C2_3    read             GUEST-EXC@EL2  ESR=0x62373c05 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 read -> x0
+  ACNTPCT_EL0            S3_4_C15_C10_5   read             GUEST-EXC@EL2  ESR=0x623b3c15 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C10_5 read -> x0
+  APCTL_EL1              S3_4_C15_C0_4    read             GUEST-EXC@EL2  ESR=0x62393c01 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 read -> x0
+  PMC0                   S3_2_C15_C0_0    read             GUEST-EXC@EL2  ESR=0x6230bc01 EC=0x18 MSR/MRS/SYS trap S3_2_C15_C0_0 read -> x0
+  GXF_CONFIG_EL1         S3_6_C15_C1_2    read             GUEST-EXC@EL2  ESR=0x6235bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 read -> x0
+
+done.

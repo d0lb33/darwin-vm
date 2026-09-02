@@ -1,0 +1,13 @@
+--- MTE: ID field, SCTLR.ATA, GCR, IRG/ADDG (MMU on, Tagged Normal memory), STG/LDG round trip ---
+  [--try-force-mte] hv_vcpu_set_sys_reg(ID_AA64PFR1_EL1.MTE=2): HV_SUCCESS, now 0x202000201
+  host set SCTLR_EL1=0xc0030d01805 (M|C|I|ATA|ATA0): rc=HV_SUCCESS, read back 0xc0030d01805 -> ATA bits retained
+  ID_AA64PFR1_EL1        S3_0_C0_C4_1     read             NATIVE         value=0x0000000202000201
+  SCTLR_EL1              S3_0_C1_C0_0     read             NATIVE         value=0x00000c0030d01985
+  GCR_EL1                S3_0_C1_C0_6     write 0xFFFD     TRAP->VMM      ESR=0x623c0420 EC=0x18 MSR/MRS/SYS trap S3_0_C1_C0_6 write <- x1
+  GCR_EL1                S3_0_C1_C0_6     read-back        TRAP->VMM      ESR=0x623c0441 EC=0x18 MSR/MRS/SYS trap S3_0_C1_C0_6 read -> x2
+  IRG x0, x1, xzr                         exec             NATIVE         value=0x0000000010020000
+  ADDG x2, x1, #16, #3                    exec             NATIVE         value=0x0000000010020010
+  STG x2, [x2]                            exec             NATIVE         (no trap, no guest exception)
+  LDG x3, [x3]                            exec             NATIVE         value=0x0000000010020010
+
+--- Apple IMPLEMENTATION DEFINED sysregs (the darwin-vm fork emulates all of these) ---

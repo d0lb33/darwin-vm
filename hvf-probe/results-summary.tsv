@@ -1,0 +1,313 @@
+EL1 in a plain VM (no EL2)	CurrentEL	S3_0_C4_C2_2	read	native	NATIVE         value=0x0000000000000004
+EL1 in a plain VM (no EL2)	MIDR_EL1	S3_0_C0_C0_0	read	native	NATIVE         value=0x00000000610f0000
+EL1 in a plain VM (no EL2)	ID_AA64PFR0_EL1	S3_0_C0_C4_0	read	native	NATIVE         value=0x1101000010110011
+EL1 in a plain VM (no EL2)	ID_AA64PFR1_EL1	S3_0_C0_C4_1	read	native	NATIVE         value=0x0000000202000001
+EL1 in a plain VM (no EL2)	ID_AA64MMFR1_EL1	S3_0_C0_C7_1	read	native	NATIVE         value=0x0000100011312000
+EL1 in a plain VM (no EL2)	ID_AA64ISAR1_EL1	S3_0_C0_C6_1	read	native	NATIVE         value=0x0010221110211502
+EL1 in a plain VM (no EL2)	SCTLR_EL1	S3_0_C1_C0_0	read	native	NATIVE         value=0x0000000030d00980
+EL1 in a plain VM (no EL2)	UDF (.long 0)		exec	guest-exception	GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL1 in a plain VM (no EL2)	SVC #0		exec	guest-exception	GUEST-EXC@EL1  ESR=0x56000000 EC=0x15 SVC64
+EL1 in a plain VM (no EL2)	HVC #0		exec	trap-to-vmm	EXIT->VMM      ESR=0x5a000000 EC=0x16 HVC64
+EL1 in a plain VM (no EL2)	SMC #0		exec	trap-to-vmm	EXIT->VMM      ESR=0x5e000000 EC=0x17 SMC64
+EL1 in a plain VM (no EL2)	BRK #0		exec	guest-exception	GUEST-EXC@EL1  ESR=0xf2000000 EC=0x3c BRK
+EL1 in a plain VM (no EL2)	WFI		exec	trap-to-vmm	EXIT->VMM      ESR=0x07e00000 EC=0x01 WFx
+EL1 in a plain VM (no EL2)	ID_AA64PFR1_EL1	S3_0_C0_C4_1	read	native	NATIVE         value=0x0000000202000001
+EL1 in a plain VM (no EL2)	SCTLR_EL1	S3_0_C1_C0_0	read	native	NATIVE         value=0x00000c0030d01985
+EL1 in a plain VM (no EL2)	GCR_EL1	S3_0_C1_C0_6	write 0xFFFD	trap-to-vmm	TRAP->VMM      ESR=0x623c0420 EC=0x18 MSR/MRS/SYS trap S3_0_C1_C0_6 write <- x1
+EL1 in a plain VM (no EL2)	GCR_EL1	S3_0_C1_C0_6	read-back	trap-to-vmm	TRAP->VMM      ESR=0x623c0441 EC=0x18 MSR/MRS/SYS trap S3_0_C1_C0_6 read -> x2
+EL1 in a plain VM (no EL2)	IRG x0, x1, xzr		exec	native	NATIVE         value=0x0000000010020000
+EL1 in a plain VM (no EL2)	ADDG x2, x1, #16, #3		exec	native	NATIVE         value=0x0000000010020100
+EL1 in a plain VM (no EL2)	STG x2, [x2]		exec	native	NATIVE         (no trap, no guest exception)
+EL1 in a plain VM (no EL2)	LDG x3, [x3]		exec	native	NATIVE         value=0x0000000010020010
+EL1 in a plain VM (no EL2)	SPRR_CONFIG_EL1	S3_6_C15_C1_0	read	trap-to-vmm	TRAP->VMM      ESR=0x6231bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 read -> x0
+EL1 in a plain VM (no EL2)	SPRR_CONFIG_EL1	S3_6_C15_C1_0	write(old|bits)	trap-to-vmm	TRAP->VMM      ESR=0x6231bc22 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 write <- x1
+EL1 in a plain VM (no EL2)	SPRR_CONFIG_EL1	S3_6_C15_C1_0	read-back	trap-to-vmm	TRAP->VMM      ESR=0x6231bc43 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 read -> x2
+EL1 in a plain VM (no EL2)	SPRR_CONFIG_EL1	S3_6_C15_C1_0	write(restore)	trap-to-vmm	TRAP->VMM      ESR=0x6231bc02 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 write <- x0
+EL1 in a plain VM (no EL2)	SPRR_PPERM_EL1	S3_6_C15_C1_6	read	trap-to-vmm	TRAP->VMM      ESR=0x623dbc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_6 read -> x0
+EL1 in a plain VM (no EL2)	SPRR_PPERM_EL1	S3_6_C15_C1_6	write(same)	trap-to-vmm	TRAP->VMM      ESR=0x623dbc22 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_6 write <- x1
+EL1 in a plain VM (no EL2)	SPRR_PPERM_EL1	S3_6_C15_C1_6	read-back	trap-to-vmm	TRAP->VMM      ESR=0x623dbc43 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_6 read -> x2
+EL1 in a plain VM (no EL2)	SPRR_PPERM_EL1	S3_6_C15_C1_6	write(restore)	trap-to-vmm	TRAP->VMM      ESR=0x623dbc02 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_6 write <- x0
+EL1 in a plain VM (no EL2)	SPRR_UPERM_EL0	S3_6_C15_C1_5	read	trap-to-vmm	TRAP->VMM      ESR=0x623bbc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_5 read -> x0
+EL1 in a plain VM (no EL2)	SPRR_AMRANGE_EL1	S3_6_C15_C1_3	read	trap-to-vmm	TRAP->VMM      ESR=0x6237bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_3 read -> x0
+EL1 in a plain VM (no EL2)	SPRR_PMPRR_EL1	S3_6_C15_C3_1	read	trap-to-vmm	TRAP->VMM      ESR=0x6233bc07 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C3_1 read -> x0
+EL1 in a plain VM (no EL2)	SPRR_UMPRR_EL1	S3_6_C15_C3_0	read	trap-to-vmm	TRAP->VMM      ESR=0x6231bc07 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C3_0 read -> x0
+EL1 in a plain VM (no EL2)	GXF_CONFIG_EL1	S3_6_C15_C1_2	read	trap-to-vmm	TRAP->VMM      ESR=0x6235bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 read -> x0
+EL1 in a plain VM (no EL2)	GXF_ENTRY_EL1	S3_6_C15_C8_1	read	trap-to-vmm	TRAP->VMM      ESR=0x6233bc11 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_1 read -> x0
+EL1 in a plain VM (no EL2)	GXF_PABENTRY_EL1	S3_6_C15_C8_2	read	trap-to-vmm	TRAP->VMM      ESR=0x6235bc11 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_2 read -> x0
+EL1 in a plain VM (no EL2)	CURRENTG	S3_6_C15_C8_0	read	trap-to-vmm	TRAP->VMM      ESR=0x6231bc11 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_0 read -> x0
+EL1 in a plain VM (no EL2)	ASPSR_GL1	S3_6_C15_C10_4	read	trap-to-vmm	TRAP->VMM      ESR=0x6239bc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_4 read -> x0
+EL1 in a plain VM (no EL2)	SP_GL1	S3_6_C15_C10_0	read	trap-to-vmm	TRAP->VMM      ESR=0x6231bc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_0 read -> x0
+EL1 in a plain VM (no EL2)	ESR_GL1	S3_6_C15_C10_5	read	trap-to-vmm	TRAP->VMM      ESR=0x623bbc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_5 read -> x0
+EL1 in a plain VM (no EL2)	ELR_GL1	S3_6_C15_C10_6	read	trap-to-vmm	TRAP->VMM      ESR=0x623dbc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_6 read -> x0
+EL1 in a plain VM (no EL2)	VBAR_GL1	S3_6_C15_C10_2	read	trap-to-vmm	TRAP->VMM      ESR=0x6235bc15 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C10_2 read -> x0
+EL1 in a plain VM (no EL2)	APCTL_EL1	S3_4_C15_C0_4	read	trap-to-vmm	TRAP->VMM      ESR=0x62393c01 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 read -> x0
+EL1 in a plain VM (no EL2)	APCTL_EL1	S3_4_C15_C0_4	write(same)	trap-to-vmm	TRAP->VMM      ESR=0x62393c20 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 write <- x1
+EL1 in a plain VM (no EL2)	APCTL_EL1	S3_4_C15_C0_4	read-back	trap-to-vmm	TRAP->VMM      ESR=0x62393c41 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 read -> x2
+EL1 in a plain VM (no EL2)	APCTL_EL1	S3_4_C15_C0_4	write(restore)	trap-to-vmm	TRAP->VMM      ESR=0x62393c00 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 write <- x0
+EL1 in a plain VM (no EL2)	APSTS_EL1	S3_6_C15_C12_4	read	trap-to-vmm	TRAP->VMM      ESR=0x6239bc19 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C12_4 read -> x0
+EL1 in a plain VM (no EL2)	KERNKEYLO_EL1	S3_4_C15_C1_0	read	trap-to-vmm	TRAP->VMM      ESR=0x62313c03 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_0 read -> x0
+EL1 in a plain VM (no EL2)	KERNKEYLO_EL1	S3_4_C15_C1_0	write(same)	trap-to-vmm	TRAP->VMM      ESR=0x62313c22 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_0 write <- x1
+EL1 in a plain VM (no EL2)	KERNKEYLO_EL1	S3_4_C15_C1_0	read-back	trap-to-vmm	TRAP->VMM      ESR=0x62313c43 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_0 read -> x2
+EL1 in a plain VM (no EL2)	KERNKEYLO_EL1	S3_4_C15_C1_0	write(restore)	trap-to-vmm	TRAP->VMM      ESR=0x62313c02 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_0 write <- x0
+EL1 in a plain VM (no EL2)	AMXIDR_EL1	S3_6_C15_C2_7	read	trap-to-vmm	TRAP->VMM      ESR=0x623fbc05 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C2_7 read -> x0
+EL1 in a plain VM (no EL2)	AMX_CONFIG_EL1	S3_4_C15_C1_4	read	trap-to-vmm	TRAP->VMM      ESR=0x62393c03 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_4 read -> x0
+EL1 in a plain VM (no EL2)	AMX_STATE_T_EL1	S3_4_C15_C1_3	read	trap-to-vmm	TRAP->VMM      ESR=0x62373c03 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_3 read -> x0
+EL1 in a plain VM (no EL2)	VMSA_LOCK_EL1	S3_4_C15_C1_2	read	trap-to-vmm	TRAP->VMM      ESR=0x62353c03 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_2 read -> x0
+EL1 in a plain VM (no EL2)	VMSA_LOCK_EL1	S3_4_C15_C1_2	write(same)	trap-to-vmm	TRAP->VMM      ESR=0x62353c22 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_2 write <- x1
+EL1 in a plain VM (no EL2)	VMSA_LOCK_EL1	S3_4_C15_C1_2	read-back	trap-to-vmm	TRAP->VMM      ESR=0x62353c43 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_2 read -> x2
+EL1 in a plain VM (no EL2)	VMSA_LOCK_EL1	S3_4_C15_C1_2	write(restore)	trap-to-vmm	TRAP->VMM      ESR=0x62353c02 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C1_2 write <- x0
+EL1 in a plain VM (no EL2)	CTRR_A_LWR_EL1	S3_4_C15_C2_3	read	trap-to-vmm	TRAP->VMM      ESR=0x62373c05 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 read -> x0
+EL1 in a plain VM (no EL2)	CTRR_A_LWR_EL1	S3_4_C15_C2_3	write(same)	trap-to-vmm	TRAP->VMM      ESR=0x62373c24 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 write <- x1
+EL1 in a plain VM (no EL2)	CTRR_A_LWR_EL1	S3_4_C15_C2_3	read-back	trap-to-vmm	TRAP->VMM      ESR=0x62373c45 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 read -> x2
+EL1 in a plain VM (no EL2)	CTRR_A_LWR_EL1	S3_4_C15_C2_3	write(restore)	trap-to-vmm	TRAP->VMM      ESR=0x62373c04 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 write <- x0
+EL1 in a plain VM (no EL2)	CTRR_A_UPR_EL1	S3_4_C15_C2_4	read	trap-to-vmm	TRAP->VMM      ESR=0x62393c05 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_4 read -> x0
+EL1 in a plain VM (no EL2)	CTRR_A_CTL_EL1	S3_4_C15_C2_5	read	trap-to-vmm	TRAP->VMM      ESR=0x623b3c05 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_5 read -> x0
+EL1 in a plain VM (no EL2)	HID0	S3_0_C15_C0_0	read	trap-to-vmm	TRAP->VMM      ESR=0x62303c01 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C0_0 read -> x0
+EL1 in a plain VM (no EL2)	HID4	S3_0_C15_C4_0	read	trap-to-vmm	TRAP->VMM      ESR=0x62303c09 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C4_0 read -> x0
+EL1 in a plain VM (no EL2)	HID11	S3_0_C15_C11_0	read	trap-to-vmm	TRAP->VMM      ESR=0x62303c17 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C11_0 read -> x0
+EL1 in a plain VM (no EL2)	EHID0	S3_0_C15_C0_1	read	trap-to-vmm	TRAP->VMM      ESR=0x62323c01 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C0_1 read -> x0
+EL1 in a plain VM (no EL2)	PMCR0_EL1	S3_1_C15_C0_0	read	trap-to-vmm	TRAP->VMM      ESR=0x62307c01 EC=0x18 MSR/MRS/SYS trap S3_1_C15_C0_0 read -> x0
+EL1 in a plain VM (no EL2)	PMCR0_EL1	S3_1_C15_C0_0	write(same)	trap-to-vmm	TRAP->VMM      ESR=0x62307c20 EC=0x18 MSR/MRS/SYS trap S3_1_C15_C0_0 write <- x1
+EL1 in a plain VM (no EL2)	PMCR0_EL1	S3_1_C15_C0_0	read-back	trap-to-vmm	TRAP->VMM      ESR=0x62307c41 EC=0x18 MSR/MRS/SYS trap S3_1_C15_C0_0 read -> x2
+EL1 in a plain VM (no EL2)	PMCR0_EL1	S3_1_C15_C0_0	write(restore)	trap-to-vmm	TRAP->VMM      ESR=0x62307c00 EC=0x18 MSR/MRS/SYS trap S3_1_C15_C0_0 write <- x0
+EL1 in a plain VM (no EL2)	PMC0	S3_2_C15_C0_0	read	trap-to-vmm	TRAP->VMM      ESR=0x6230bc01 EC=0x18 MSR/MRS/SYS trap S3_2_C15_C0_0 read -> x0
+EL1 in a plain VM (no EL2)	CYC_OVRD	S3_5_C15_C5_0	read	trap-to-vmm	TRAP->VMM      ESR=0x62317c0b EC=0x18 MSR/MRS/SYS trap S3_5_C15_C5_0 read -> x0
+EL1 in a plain VM (no EL2)	ACC_CFG	S3_5_C15_C4_0	read	trap-to-vmm	TRAP->VMM      ESR=0x62317c09 EC=0x18 MSR/MRS/SYS trap S3_5_C15_C4_0 read -> x0
+EL1 in a plain VM (no EL2)	IPI_SR	S3_5_C15_C1_1	read	trap-to-vmm	TRAP->VMM      ESR=0x62337c03 EC=0x18 MSR/MRS/SYS trap S3_5_C15_C1_1 read -> x0
+EL1 in a plain VM (no EL2)	IMP_MSR_RO_CTRL0_EL1	S3_4_C15_C0_5	read	trap-to-vmm	TRAP->VMM      ESR=0x623b3c01 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_5 read -> x0
+EL1 in a plain VM (no EL2)	ACNTPCT_EL0	S3_4_C15_C10_5	read	trap-to-vmm	TRAP->VMM      ESR=0x623b3c15 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C10_5 read -> x0
+EL1 in a plain VM (no EL2)	ACNTVCT_EL0	S3_4_C15_C10_6	read	trap-to-vmm	TRAP->VMM      ESR=0x623d3c15 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C10_6 read -> x0
+EL1 in a plain VM (no EL2)	GXF_CONFIG_EL1	S3_6_C15_C1_2	read	trap-to-vmm	TRAP->VMM      ESR=0x6235bca3 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 read -> x5
+EL1 in a plain VM (no EL2)	GXF_CONFIG_EL1	S3_6_C15_C1_2	write(old|1)	trap-to-vmm	TRAP->VMM      ESR=0x6235bc22 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 write <- x1
+EL1 in a plain VM (no EL2)	GXF_CONFIG_EL1	S3_6_C15_C1_2	read-back	trap-to-vmm	TRAP->VMM      ESR=0x6235bc43 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 read -> x2
+EL1 in a plain VM (no EL2)	GXF_ENTRY_EL1	S3_6_C15_C8_1	write stub addr	trap-to-vmm	TRAP->VMM      ESR=0x6233bc30 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_1 write <- x1
+EL1 in a plain VM (no EL2)	GXF_ENTRY_EL1	S3_6_C15_C8_1	read-back	trap-to-vmm	TRAP->VMM      ESR=0x6233bc51 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_1 read -> x2
+EL1 in a plain VM (no EL2)	genter		exec	guest-exception	GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL1 in a plain VM (no EL2)	CURRENTG	S3_6_C15_C8_0	read	trap-to-vmm	TRAP->VMM      ESR=0x6231bc11 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C8_0 read -> x0
+EL1 in a plain VM (no EL2)	gexit (not in GL)		exec	guest-exception	GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL1 in a plain VM (no EL2)	GXF_CONFIG_EL1	S3_6_C15_C1_2	write(restore)	trap-to-vmm	TRAP->VMM      ESR=0x6235bca2 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 write <- x5
+EL2 in an EL2-enabled (nested-virt) VM	CurrentEL	S3_0_C4_C2_2	read	native	NATIVE         value=0x0000000000000008
+EL2 in an EL2-enabled (nested-virt) VM	MIDR_EL1	S3_0_C0_C0_0	read	native	NATIVE         value=0x00000000610f0000
+EL2 in an EL2-enabled (nested-virt) VM	ID_AA64PFR0_EL1	S3_0_C0_C4_0	read	native	NATIVE         value=0x1101000010110011
+EL2 in an EL2-enabled (nested-virt) VM	ID_AA64PFR1_EL1	S3_0_C0_C4_1	read	native	NATIVE         value=0x0000000202000001
+EL2 in an EL2-enabled (nested-virt) VM	ID_AA64MMFR1_EL1	S3_0_C0_C7_1	read	native	NATIVE         value=0x0000100011312000
+EL2 in an EL2-enabled (nested-virt) VM	ID_AA64ISAR1_EL1	S3_0_C0_C6_1	read	native	NATIVE         value=0x0010221110211502
+EL2 in an EL2-enabled (nested-virt) VM	SCTLR_EL1	S3_0_C1_C0_0	read	native	NATIVE         value=0x0000000030d00800
+EL2 in an EL2-enabled (nested-virt) VM	HCR_EL2	S3_4_C1_C1_0	read	native	NATIVE         value=0x0100000080000000
+EL2 in an EL2-enabled (nested-virt) VM	VTTBR_EL2	S3_4_C2_C1_0	read	native	NATIVE         value=0x0000000000000000
+EL2 in an EL2-enabled (nested-virt) VM	SCTLR_EL2	S3_4_C1_C0_0	read	native	NATIVE         value=0x0000000030c50830
+EL2 in an EL2-enabled (nested-virt) VM	UDF (.long 0)		exec	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SVC #0		exec	guest-exception	GUEST-EXC@EL2  ESR=0x56000000 EC=0x15 SVC64
+EL2 in an EL2-enabled (nested-virt) VM	HVC #0		exec	guest-exception	GUEST-EXC@EL2  ESR=0x5a000000 EC=0x16 HVC64
+EL2 in an EL2-enabled (nested-virt) VM	SMC #0		exec	trap-to-vmm	EXIT->VMM      ESR=0x5e000000 EC=0x17 SMC64
+EL2 in an EL2-enabled (nested-virt) VM	BRK #0		exec	guest-exception	GUEST-EXC@EL2  ESR=0xf2000000 EC=0x3c BRK
+EL2 in an EL2-enabled (nested-virt) VM	WFI		exec	trap-to-vmm	EXIT->VMM      ESR=0x07e00000 EC=0x01 WFx
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_CONFIG_EL1	S3_6_C15_C1_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_CONFIG_EL1	S3_6_C15_C1_0	write(old|bits)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_CONFIG_EL1	S3_6_C15_C1_0	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_CONFIG_EL1	S3_6_C15_C1_0	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_PPERM_EL1	S3_6_C15_C1_6	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_PPERM_EL1	S3_6_C15_C1_6	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_PPERM_EL1	S3_6_C15_C1_6	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_PPERM_EL1	S3_6_C15_C1_6	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_UPERM_EL0	S3_6_C15_C1_5	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_AMRANGE_EL1	S3_6_C15_C1_3	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_PMPRR_EL1	S3_6_C15_C3_1	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_UMPRR_EL1	S3_6_C15_C3_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_CONFIG_EL1	S3_6_C15_C1_2	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_ENTRY_EL1	S3_6_C15_C8_1	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_PABENTRY_EL1	S3_6_C15_C8_2	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CURRENTG	S3_6_C15_C8_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	ASPSR_GL1	S3_6_C15_C10_4	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SP_GL1	S3_6_C15_C10_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	ESR_GL1	S3_6_C15_C10_5	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	ELR_GL1	S3_6_C15_C10_6	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VBAR_GL1	S3_6_C15_C10_2	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APCTL_EL1	S3_4_C15_C0_4	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APCTL_EL1	S3_4_C15_C0_4	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APCTL_EL1	S3_4_C15_C0_4	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APCTL_EL1	S3_4_C15_C0_4	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APSTS_EL1	S3_6_C15_C12_4	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	KERNKEYLO_EL1	S3_4_C15_C1_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	KERNKEYLO_EL1	S3_4_C15_C1_0	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	KERNKEYLO_EL1	S3_4_C15_C1_0	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	KERNKEYLO_EL1	S3_4_C15_C1_0	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	AMXIDR_EL1	S3_6_C15_C2_7	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	AMX_CONFIG_EL1	S3_4_C15_C1_4	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	AMX_STATE_T_EL1	S3_4_C15_C1_3	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VMSA_LOCK_EL1	S3_4_C15_C1_2	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VMSA_LOCK_EL1	S3_4_C15_C1_2	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VMSA_LOCK_EL1	S3_4_C15_C1_2	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VMSA_LOCK_EL1	S3_4_C15_C1_2	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CTRR_A_LWR_EL1	S3_4_C15_C2_3	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CTRR_A_LWR_EL1	S3_4_C15_C2_3	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CTRR_A_LWR_EL1	S3_4_C15_C2_3	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CTRR_A_LWR_EL1	S3_4_C15_C2_3	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CTRR_A_UPR_EL1	S3_4_C15_C2_4	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CTRR_A_CTL_EL1	S3_4_C15_C2_5	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	HID0	S3_0_C15_C0_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	HID4	S3_0_C15_C4_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	HID11	S3_0_C15_C11_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	EHID0	S3_0_C15_C0_1	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	PMCR0_EL1	S3_1_C15_C0_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	PMCR0_EL1	S3_1_C15_C0_0	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	PMCR0_EL1	S3_1_C15_C0_0	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	PMCR0_EL1	S3_1_C15_C0_0	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	PMC0	S3_2_C15_C0_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CYC_OVRD	S3_5_C15_C5_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	ACC_CFG	S3_5_C15_C4_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	IPI_SR	S3_5_C15_C1_1	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	IMP_MSR_RO_CTRL0_EL1	S3_4_C15_C0_5	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	ACNTPCT_EL0	S3_4_C15_C10_5	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	ACNTVCT_EL0	S3_4_C15_C10_6	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_CONFIG_EL2	S3_6_C15_C14_2	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_CONFIG_EL2	S3_6_C15_C14_2	write(old|bits)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_CONFIG_EL2	S3_6_C15_C14_2	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_CONFIG_EL2	S3_6_C15_C14_2	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_PPERM_EL2	S3_6_C15_C1_7	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SPRR_AMRANGE_EL2	S3_6_C15_C14_3	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_CONFIG_EL2	S3_6_C15_C1_4	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_ENTRY_EL2	S3_6_C15_C12_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_PABENTRY_EL2	S3_6_C15_C12_1	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	SP_GL2	S3_6_C15_C11_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	ESR_GL2	S3_6_C15_C11_5	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	ELR_GL2	S3_6_C15_C11_6	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	TAG_OFFSET_EL2	S3_0_C11_C9_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	TAG_OFFSET_EL2	S3_0_C11_C9_0	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	TAG_OFFSET_EL2	S3_0_C11_C9_0	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	TAG_OFFSET_EL2	S3_0_C11_C9_0	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APCTL_EL2	S3_6_C15_C12_2	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APCTL_EL2	S3_6_C15_C12_2	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APCTL_EL2	S3_6_C15_C12_2	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APCTL_EL2	S3_6_C15_C12_2	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	APSTS_EL2	S3_6_C15_C12_3	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VMSA_LOCK_EL2	S3_4_C15_C1_5	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VMSA_LOCK_EL2	S3_4_C15_C1_5	write(same)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VMSA_LOCK_EL2	S3_4_C15_C1_5	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	VMSA_LOCK_EL2	S3_4_C15_C1_5	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	AMX_CONFIG_EL2	S3_4_C15_C4_7	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CTRR_A_LWR_EL2	S3_4_C15_C6_4	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CTRR_A_CTL_EL2	S3_4_C15_C6_2	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	AHCR_EL2	S3_4_C15_C12_1	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	MMU_SFAR_EL2	S3_6_C15_C14_6	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	HPFAR_GL2	S3_6_C15_C1_1	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_CONFIG_EL2	S3_6_C15_C1_4	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_CONFIG_EL2	S3_6_C15_C1_4	write(old|1)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_CONFIG_EL2	S3_6_C15_C1_4	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_ENTRY_EL2	S3_6_C15_C12_0	write stub addr	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_ENTRY_EL2	S3_6_C15_C12_0	read-back	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	genter		exec	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	CURRENTG	S3_6_C15_C8_0	read	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	gexit (not in GL)		exec	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL2 in an EL2-enabled (nested-virt) VM	GXF_CONFIG_EL2	S3_6_C15_C1_4	write(restore)	guest-exception	GUEST-EXC@EL2  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	CurrentEL	S3_0_C4_C2_2	read	native	NATIVE         value=0x0000000000000004
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	MIDR_EL1	S3_0_C0_C0_0	read	native	NATIVE         value=0x00000000610f0000
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ID_AA64PFR0_EL1	S3_0_C0_C4_0	read	native	NATIVE         value=0x1101000010110011
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ID_AA64PFR1_EL1	S3_0_C0_C4_1	read	native	NATIVE         value=0x0000000202000001
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ID_AA64MMFR1_EL1	S3_0_C0_C7_1	read	native	NATIVE         value=0x0000100011312000
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ID_AA64ISAR1_EL1	S3_0_C0_C6_1	read	native	NATIVE         value=0x0010221110211502
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SCTLR_EL1	S3_0_C1_C0_0	read	native	NATIVE         value=0x0000000030d00980
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	UDF (.long 0)		exec	guest-exception	GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SVC #0		exec	guest-exception	GUEST-EXC@EL1  ESR=0x56000000 EC=0x15 SVC64
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	HVC #0		exec	guest-exception	GUEST-EXC@EL2  ESR=0x5a000000 EC=0x16 HVC64
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SMC #0		exec	trap-to-vmm	EXIT->VMM      ESR=0x5e000000 EC=0x17 SMC64
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	BRK #0		exec	guest-exception	GUEST-EXC@EL1  ESR=0xf2000000 EC=0x3c BRK
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	WFI		exec	trap-to-vmm	EXIT->VMM      ESR=0x07e00000 EC=0x01 WFx
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	MTE sequence			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SPRR_CONFIG_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SPRR_PPERM_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SPRR_UPERM_EL0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SPRR_AMRANGE_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SPRR_PMPRR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SPRR_UMPRR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	GXF_CONFIG_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	GXF_ENTRY_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	GXF_PABENTRY_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	CURRENTG			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ASPSR_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	SP_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ESR_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ELR_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	VBAR_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	APCTL_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	APSTS_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	KERNKEYLO_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	AMXIDR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	AMX_CONFIG_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	AMX_STATE_T_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	VMSA_LOCK_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	CTRR_A_LWR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	CTRR_A_UPR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	CTRR_A_CTL_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	HID0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	HID4			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	HID11			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	EHID0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	PMCR0_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	PMC0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	CYC_OVRD			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ACC_CFG			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	IPI_SR			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	IMP_MSR_RO_CTRL0_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ACNTPCT_EL0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	ACNTVCT_EL0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0)	GXF sequence			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	CurrentEL	S3_0_C4_C2_2	read	native	NATIVE         value=0x0000000000000004
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	MIDR_EL1	S3_0_C0_C0_0	read	native	NATIVE         value=0x00000000610f0000
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ID_AA64PFR0_EL1	S3_0_C0_C4_0	read	native	NATIVE         value=0x1101000010110011
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ID_AA64PFR1_EL1	S3_0_C0_C4_1	read	native	NATIVE         value=0x0000000202000001
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ID_AA64MMFR1_EL1	S3_0_C0_C7_1	read	native	NATIVE         value=0x0000100011312000
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ID_AA64ISAR1_EL1	S3_0_C0_C6_1	read	native	NATIVE         value=0x0010221110211502
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SCTLR_EL1	S3_0_C1_C0_0	read	native	NATIVE         value=0x0000000030d00980
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	UDF (.long 0)		exec	guest-exception	GUEST-EXC@EL1  ESR=0x02000000 EC=0x00 UNKNOWN/UNDEF
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SVC #0		exec	guest-exception	GUEST-EXC@EL1  ESR=0x56000000 EC=0x15 SVC64
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	HVC #0		exec	guest-exception	GUEST-EXC@EL2  ESR=0x5a000000 EC=0x16 HVC64
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SMC #0		exec	trap-to-vmm	EXIT->VMM      ESR=0x5e000000 EC=0x17 SMC64
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	BRK #0		exec	guest-exception	GUEST-EXC@EL1  ESR=0xf2000000 EC=0x3c BRK
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	WFI		exec	trap-to-vmm	EXIT->VMM      ESR=0x07e00000 EC=0x01 WFx
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	MTE sequence			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SPRR_CONFIG_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SPRR_PPERM_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SPRR_UPERM_EL0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SPRR_AMRANGE_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SPRR_PMPRR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SPRR_UMPRR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	GXF_CONFIG_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	GXF_ENTRY_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	GXF_PABENTRY_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	CURRENTG			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ASPSR_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	SP_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ESR_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ELR_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	VBAR_GL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	APCTL_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	APSTS_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	KERNKEYLO_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	AMXIDR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	AMX_CONFIG_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	AMX_STATE_T_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	VMSA_LOCK_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	CTRR_A_LWR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	CTRR_A_UPR_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	CTRR_A_CTL_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	HID0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	HID4			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	HID11			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	EHID0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	PMCR0_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	PMC0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	CYC_OVRD			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ACC_CFG			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	IPI_SR			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	IMP_MSR_RO_CTRL0_EL1			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ACNTPCT_EL0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	ACNTVCT_EL0			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0)	GXF sequence			framework-abort	CRASHED        Hypervisor.framework killed the process: signal 5 (Trace/BPT trap: 5), an internal report_fixme/unimplemented path
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1)	HID0	S3_0_C15_C0_0	read	trap-to-guest-el2	GUEST-EXC@EL2  ESR=0x62303c01 EC=0x18 MSR/MRS/SYS trap S3_0_C15_C0_0 read -> x0
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1)	SPRR_CONFIG_EL1	S3_6_C15_C1_0	read	trap-to-guest-el2	GUEST-EXC@EL2  ESR=0x6231bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_0 read -> x0
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1)	CTRR_A_LWR_EL1	S3_4_C15_C2_3	read	trap-to-guest-el2	GUEST-EXC@EL2  ESR=0x62373c05 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C2_3 read -> x0
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1)	ACNTPCT_EL0	S3_4_C15_C10_5	read	trap-to-guest-el2	GUEST-EXC@EL2  ESR=0x623b3c15 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C10_5 read -> x0
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1)	APCTL_EL1	S3_4_C15_C0_4	read	trap-to-guest-el2	GUEST-EXC@EL2  ESR=0x62393c01 EC=0x18 MSR/MRS/SYS trap S3_4_C15_C0_4 read -> x0
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1)	PMC0	S3_2_C15_C0_0	read	trap-to-guest-el2	GUEST-EXC@EL2  ESR=0x6230bc01 EC=0x18 MSR/MRS/SYS trap S3_2_C15_C0_0 read -> x0
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1)	GXF_CONFIG_EL1	S3_6_C15_C1_2	read	trap-to-guest-el2	GUEST-EXC@EL2  ESR=0x6235bc03 EC=0x18 MSR/MRS/SYS trap S3_6_C15_C1_2 read -> x0

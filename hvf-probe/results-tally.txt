@@ -1,0 +1,7 @@
+
+=== per-mode tally ===
+EL1 in a plain VM (no EL2): guest-exception=5, native=13, trap-to-vmm=70
+EL2 in an EL2-enabled (nested-virt) VM: guest-exception=102, native=10, trap-to-vmm=2
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=0, TIDCP=0): framework-abort=39, guest-exception=4, native=7, trap-to-vmm=2
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1 identity stage-2, TIDCP=0): framework-abort=39, guest-exception=4, native=7, trap-to-vmm=2
+EL1 under guest EL2 (nested-virt VM, HCR_EL2.VM=1, TIDCP=1): trap-to-guest-el2=7

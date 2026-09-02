@@ -1,0 +1,741 @@
+<title>SPTM Under Hypervisor.framework</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<style>
+:root {
+  --ground:      #EEF1F5;
+  --surface:     #FFFFFF;
+  --surface-alt: #F6F8FA;
+  --ink:         #11161D;
+  --ink-soft:    #4A5563;
+  --ink-faint:   #77828F;
+  --rule:        #D7DDE5;
+  --rule-soft:   #E6EAF0;
+
+  --accent:      #2C4FA8;   /* also the "traps to the VMM" state */
+  --accent-bg:   #E3EAF9;
+  --ok:          #2C6E49;
+  --ok-bg:       #DDEEE3;
+  --bad:         #A62B1F;
+  --bad-bg:      #F7E1DE;
+  --abort:       #7A3E8F;
+  --abort-bg:    #EFE2F4;
+  --none:        #6B7280;
+  --none-bg:     #E7EAEE;
+
+  --shadow: 0 1px 2px rgba(17,22,29,.05), 0 8px 24px -12px rgba(17,22,29,.18);
+
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --measure: 66ch;
+  --wide: 1080px;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --ground:      #0D1117;
+    --surface:     #151B24;
+    --surface-alt: #1B222C;
+    --ink:         #E4E9F0;
+    --ink-soft:    #A6B1BF;
+    --ink-faint:   #7C8797;
+    --rule:        #2A3341;
+    --rule-soft:   #222A36;
+
+    --accent:      #85A8F2;
+    --accent-bg:   #1B2740;
+    --ok:          #63C08A;
+    --ok-bg:       #172B21;
+    --bad:         #F0867B;
+    --bad-bg:      #331B18;
+    --abort:       #C795DC;
+    --abort-bg:    #2A1E33;
+    --none:        #8B95A3;
+    --none-bg:     #212934;
+
+    --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"] {
+  --ground:      #0D1117;
+  --surface:     #151B24;
+  --surface-alt: #1B222C;
+  --ink:         #E4E9F0;
+  --ink-soft:    #A6B1BF;
+  --ink-faint:   #7C8797;
+  --rule:        #2A3341;
+  --rule-soft:   #222A36;
+
+  --accent:      #85A8F2;
+  --accent-bg:   #1B2740;
+  --ok:          #63C08A;
+  --ok-bg:       #172B21;
+  --bad:         #F0867B;
+  --bad-bg:      #331B18;
+  --abort:       #C795DC;
+  --abort-bg:    #2A1E33;
+  --none:        #8B95A3;
+  --none-bg:     #212934;
+
+  --shadow: 0 1px 2px rgba(0,0,0,.4), 0 8px 24px -12px rgba(0,0,0,.7);
+}
+
+* { box-sizing: border-box; }
+
+body {
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 17px;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+
+.page {
+  max-width: var(--wide);
+  margin: 0 auto;
+  padding: 0 24px 96px;
+}
+.col { max-width: var(--measure); }
+
+/* ---------------------------------------------------------- masthead */
+.masthead {
+  padding: 56px 0 28px;
+  border-bottom: 2px solid var(--ink);
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+.kicker {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 500;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+}
+h1 {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: clamp(34px, 5.4vw, 56px);
+  line-height: 1.02;
+  letter-spacing: -.022em;
+  text-wrap: balance;
+  margin: 0;
+  max-width: 18ch;
+}
+.standfirst {
+  font-size: 20px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+  max-width: 58ch;
+  margin: 0;
+}
+
+/* ------------------------------------------------------ verdict cells */
+.verdicts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1px;
+  background: var(--rule);
+  border: 1px solid var(--rule);
+  margin: 36px 0 0;
+  border-radius: 3px;
+  overflow: hidden;
+}
+.verdict {
+  background: var(--surface);
+  padding: 20px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.verdict .q {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.verdict .a {
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 27px;
+  line-height: 1.1;
+  letter-spacing: -.015em;
+}
+.verdict .a.yes { color: var(--ok); }
+.verdict .a.no  { color: var(--bad); }
+.verdict .why { font-size: 15px; color: var(--ink-soft); line-height: 1.45; }
+
+/* ----------------------------------------------------------- sections */
+section { padding-top: 60px; }
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.eyebrow::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--rule);
+}
+h2 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: clamp(25px, 3vw, 32px);
+  line-height: 1.14;
+  letter-spacing: -.018em;
+  text-wrap: balance;
+  margin: 0 0 16px;
+}
+h3 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 19px;
+  letter-spacing: -.008em;
+  margin: 32px 0 8px;
+}
+p { margin: 0 0 16px; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+code, .m { font-family: var(--mono); font-size: .88em; }
+code {
+  background: var(--surface-alt);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: .08em .34em;
+}
+ul { margin: 0 0 16px; padding-left: 1.15em; }
+li { margin-bottom: 7px; }
+li::marker { color: var(--ink-faint); }
+
+/* ------------------------------------------------------------- panels */
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 22px 24px;
+  box-shadow: var(--shadow);
+}
+.panel.flag {
+  border-left: 3px solid var(--abort);
+}
+.panel.flag .flag-label {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+  color: var(--abort);
+  margin-bottom: 8px;
+}
+.panel p:last-child { margin-bottom: 0; }
+
+/* -------------------------------------------------------------- table */
+.scroll { overflow-x: auto; margin: 22px 0 8px; }
+table {
+  border-collapse: collapse;
+  width: 100%;
+  min-width: 720px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  background: var(--surface);
+}
+caption {
+  caption-side: bottom;
+  text-align: left;
+  font-family: var(--body);
+  font-size: 14.5px;
+  color: var(--ink-faint);
+  padding-top: 12px;
+  line-height: 1.45;
+}
+th, td {
+  text-align: left;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--rule-soft);
+  vertical-align: top;
+}
+thead th {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .09em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  border-bottom: 1.5px solid var(--rule);
+  white-space: nowrap;
+}
+tbody tr:last-child td { border-bottom: none; }
+td.name { color: var(--ink); white-space: nowrap; }
+td.note { font-family: var(--body); font-size: 14.5px; color: var(--ink-soft); line-height: 1.4; }
+
+.tag {
+  display: inline-block;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: .03em;
+  padding: 2.5px 7px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
+.tag.trap  { color: var(--accent); background: var(--accent-bg); }
+.tag.ok    { color: var(--ok);     background: var(--ok-bg); }
+.tag.bad   { color: var(--bad);    background: var(--bad-bg); }
+.tag.abort { color: var(--abort);  background: var(--abort-bg); }
+.tag.none  { color: var(--none);   background: var(--none-bg); }
+
+/* ------------------------------------------------------------ diagram */
+.ladder {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 20px;
+  margin: 26px 0 8px;
+}
+.stack {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-shadow: var(--shadow);
+}
+.stack > h4 {
+  font-family: var(--display);
+  font-weight: 600;
+  font-size: 15px;
+  margin: 0 0 2px;
+  letter-spacing: -.005em;
+}
+.stack > .sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  margin: -8px 0 4px;
+}
+.rung {
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  padding: 11px 13px;
+  background: var(--surface-alt);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rung.host { border-style: dashed; background: transparent; }
+.rung .el {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+}
+.rung .who { font-family: var(--display); font-weight: 500; font-size: 15px; }
+.rung .lands { font-size: 14px; line-height: 1.4; color: var(--ink-soft); }
+.rung.pivot { border-color: var(--bad); background: var(--bad-bg); }
+.rung.pivot .el, .rung.pivot .who { color: var(--bad); }
+.rung.pivot .lands { color: var(--bad); }
+.rung.good { border-color: var(--accent); background: var(--accent-bg); }
+.rung.good .el, .rung.good .who { color: var(--accent); }
+.rung.good .lands { color: var(--accent); }
+
+/* --------------------------------------------------------- work items */
+.work { list-style: none; padding: 0; margin: 18px 0 0; display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+.work li { margin: 0; background: var(--surface); padding: 15px 18px; display: grid; grid-template-columns: 1fr auto; gap: 4px 18px; align-items: baseline; }
+.work .task { font-family: var(--display); font-weight: 500; font-size: 16px; }
+.work .est { font-family: var(--mono); font-size: 12.5px; color: var(--ink-faint); white-space: nowrap; }
+.work .detail { grid-column: 1 / -1; font-size: 15px; color: var(--ink-soft); line-height: 1.45; }
+
+details {
+  margin-top: 18px;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  background: var(--surface);
+  padding: 0 18px;
+}
+summary {
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  padding: 14px 0;
+}
+details[open] summary { border-bottom: 1px solid var(--rule-soft); margin-bottom: 14px; }
+details > *:last-child { margin-bottom: 16px; }
+
+pre {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--surface-alt);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: 13px 15px;
+  overflow-x: auto;
+  margin: 0 0 16px;
+}
+
+footer {
+  margin-top: 72px;
+  padding-top: 20px;
+  border-top: 1px solid var(--rule);
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-faint);
+  line-height: 1.7;
+}
+</style>
+
+<div class="page">
+
+<header class="masthead">
+  <div class="kicker">
+    <span>Feasibility probe</span>
+    <span>Apple M5 Max &middot; macOS 27.0 (26A5421a)</span>
+    <span>2026-09-01</span>
+  </div>
+  <h1>SPTM Under Hypervisor.framework</h1>
+  <p class="standfirst">Apple's hypervisor now offers guests a real EL2, and QEMU already knows how to use it. It still cannot run an SPTM kernel, and the reason is structural rather than a missing patch.</p>
+</header>
+
+<div class="verdicts">
+  <div class="verdict">
+    <div class="q">EL2 available?</div>
+    <div class="a yes">Yes</div>
+    <div class="why"><code>hv_vm_config_get_el2_supported</code> returns true on this machine.</div>
+  </div>
+  <div class="verdict">
+    <div class="q">Does the fork support it?</div>
+    <div class="a yes">Already</div>
+    <div class="why">The QEMU 11.1 base ships the whole nested path. Nothing to port.</div>
+  </div>
+  <div class="verdict">
+    <div class="q">Can SPTM run on it?</div>
+    <div class="a no">No</div>
+    <div class="why">Apple registers are undefined at guest EL2, and the VMM never sees the access.</div>
+  </div>
+</div>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">The finding</p>
+    <h2>Traps are the currency, and EL2 does not pay</h2>
+    <p>Trap-and-emulate only works when the hypervisor sees the access. On this Mac, a guest running at EL1 in an ordinary virtual machine hands the VMM every Apple implementation-defined register access as a clean system-register trap, complete with the register encoding and the destination register. That is exactly the raw material a <span class="m">darwin</span> machine would need.</p>
+    <p>Raise the guest to EL2, which is where SPTM lives, and that channel closes. The same instructions become undefined instructions taken by the guest itself. The VMM is never told. There is no control that redirects them, because the exception is already being delivered at the highest exception level the guest has.</p>
+  </div>
+
+  <div class="ladder">
+    <div class="stack">
+      <h4>Ordinary VM</h4>
+      <div class="sub">EL2 disabled</div>
+      <div class="rung host">
+        <div class="el">Host EL2</div>
+        <div class="who">Hypervisor.framework</div>
+        <div class="lands">Your VMM process gets the exits.</div>
+      </div>
+      <div class="rung good">
+        <div class="el">Guest EL1</div>
+        <div class="who">XNU without SPTM</div>
+        <div class="lands">Apple registers trap out with ESR EC 0x18. Emulatable.</div>
+      </div>
+    </div>
+
+    <div class="stack">
+      <h4>EL2-enabled VM</h4>
+      <div class="sub">Nested virtualization</div>
+      <div class="rung host">
+        <div class="el">Host EL2</div>
+        <div class="who">Hypervisor.framework</div>
+        <div class="lands">Sees only SMC, WFI and stage-2 faults.</div>
+      </div>
+      <div class="rung pivot">
+        <div class="el">Guest EL2</div>
+        <div class="who">SPTM and TXM</div>
+        <div class="lands">Apple registers and genter are undefined here, and the fault stays inside the guest.</div>
+      </div>
+      <div class="rung">
+        <div class="el">Guest EL1</div>
+        <div class="who">XNU kernel</div>
+        <div class="lands">Traps to guest EL2 when it sets TIDCP, so a guest hypervisor could emulate for the kernel.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Host</p>
+    <h2>What this machine offers</h2>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr><th>Property</th><th>Value</th><th style="width:44%">Consequence</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="name">Chip</td><td>Apple M5 Max (T6050)</td><td class="note">Darwin 27.0.0, xnu-13432.1.9.</td></tr>
+        <tr><td class="name">macOS</td><td>27.0, build 26A5421a</td><td class="note">Well past the 15.0 minimum for the EL2 API.</td></tr>
+        <tr><td class="name">EL2 supported</td><td><span class="tag ok">true</span></td><td class="note">Guests can be given their own EL2.</td></tr>
+        <tr><td class="name">IPA size</td><td>36 bits default, 40 bits max</td><td class="note">Enough for the Apple physical map the fork builds.</td></tr>
+        <tr><td class="name">Guest ID_AA64PFR1.MTE</td><td>0</td><td class="note">Memory tagging is not offered to guests at all.</td></tr>
+        <tr><td class="name">Guest ID_AA64PFR0.EL2</td><td>0</td><td class="note">Reads zero even from a guest that is running at EL2. A VMM has to correct this itself.</td></tr>
+        <tr><td class="name">Host MTE hardware</td><td>FEAT_MTE, MTE2, MTE4 present</td><td class="note">The silicon has it. The hypervisor does not expose it.</td></tr>
+      </tbody>
+    </table>
+    <caption>Read from <code>sysctl</code>, <code>sw_vers</code>, and <code>hv_vcpu_config_get_feature_reg</code> on the probe's first run.</caption>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Toolchain</p>
+    <h2>The fork already has the EL2 backend</h2>
+    <p>The <span class="m">qemu-sptm</span> tree is QEMU 11.1.0, and 11.1 is the release that landed HVF nested virtualization. Every piece is present: the support check, the configuration call that enables guest EL2, the full table of EL2 system registers, and a PSCI path that starts secondary cores at EL2. No patch series needs porting and no mailing-list archaeology is required.</p>
+    <p>What is missing is one wire. The switch that turns the feature on is called from exactly one place in the tree, the <span class="m">virt</span> machine's virtualization property. The <span class="m">darwin</span> machine does not mention the accelerator anywhere.</p>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Piece</th><th>Where</th><th style="width:38%">Status</th></tr></thead>
+      <tbody>
+        <tr><td class="name">EL2 support check</td><td>target/arm/hvf/hvf.c:1310</td><td class="note"><span class="tag ok">present</span> Calls the framework and reports cleanly.</td></tr>
+        <tr><td class="name">Enable guest EL2</td><td>target/arm/hvf/hvf.c:1340</td><td class="note"><span class="tag ok">present</span></td></tr>
+        <tr><td class="name">EL2 sysreg table</td><td>target/arm/hvf/sysreg.c.inc</td><td class="note"><span class="tag ok">present</span> 20 registers, gated on the feature.</td></tr>
+        <tr><td class="name">PSCI target EL</td><td>target/arm/hvf/hvf.c:1548</td><td class="note"><span class="tag ok">present</span> Returns 2 when nested is on.</td></tr>
+        <tr><td class="name">Machine wiring</td><td>hw/arm/virt.c:3297</td><td class="note"><span class="tag bad">virt only</span> The darwin machine has no accelerator path.</td></tr>
+        <tr><td class="name">Apple register emulation</td><td>hw/arm/apple_regs.c</td><td class="note"><span class="tag bad">TCG only</span> 251 generated registers plus the banked SPRR and GXF set, all reached through the TCG cpreg path.</td></tr>
+      </tbody>
+    </table>
+    <caption>Porting effort for the HVF EL2 backend itself is zero. The work is machine integration, described at the end.</caption>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Probe</p>
+    <h2>What each feature actually does</h2>
+    <p>A standalone program builds a virtual machine, maps two megabytes of guest memory, writes hand-assembled instructions into it, and runs them. Each probed register or instruction sits in its own forked child with its own virtual machine, so a fatal outcome costs one line of the matrix rather than the run. Results come back through an unmapped address that turns every store into an exit the harness decodes.</p>
+    <p>Four configurations were swept. The classification is: <span class="tag ok">native</span> the instruction ran and returned a value, <span class="tag trap">to VMM</span> the hypervisor was handed the access, <span class="tag bad">guest UNDEF</span> the guest took an undefined-instruction exception the VMM never saw, and <span class="tag abort">abort</span> Hypervisor.framework killed the process.</p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <thead>
+        <tr>
+          <th style="width:24%">Feature</th>
+          <th>EL1, ordinary VM</th>
+          <th>EL2, nested VM</th>
+          <th>EL1 under guest EL2</th>
+          <th>Same, with TIDCP</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td class="name">SPRR_CONFIG_EL1<br>SPRR_PPERM, SPRR_UPERM</td>
+          <td><span class="tag trap">to VMM</span></td>
+          <td><span class="tag bad">guest UNDEF</span></td>
+          <td><span class="tag abort">abort</span></td>
+          <td><span class="tag trap">to guest EL2</span></td>
+        </tr>
+        <tr>
+          <td class="name">GXF_CONFIG_EL1<br>GXF_ENTRY, CURRENTG, *_GL1</td>
+          <td><span class="tag trap">to VMM</span></td>
+          <td><span class="tag bad">guest UNDEF</span></td>
+          <td><span class="tag abort">abort</span></td>
+          <td><span class="tag trap">to guest EL2</span></td>
+        </tr>
+        <tr>
+          <td class="name">genter / gexit</td>
+          <td><span class="tag bad">guest UNDEF</span></td>
+          <td><span class="tag bad">guest UNDEF</span></td>
+          <td><span class="tag abort">abort</span></td>
+          <td><span class="tag bad">guest UNDEF</span></td>
+        </tr>
+        <tr>
+          <td class="name">HID0, EHID0, CTRR, APCTL<br>PMCR0, AMX, ACNTPCT and peers</td>
+          <td><span class="tag trap">to VMM</span></td>
+          <td><span class="tag bad">guest UNDEF</span></td>
+          <td><span class="tag abort">abort</span></td>
+          <td><span class="tag trap">to guest EL2</span></td>
+        </tr>
+        <tr>
+          <td class="name">EL2 Apple registers<br>SPRR_CONFIG_EL2, TAG_OFFSET_EL2, AHCR_EL2</td>
+          <td><span class="tag none">n/a</span></td>
+          <td><span class="tag bad">guest UNDEF</span></td>
+          <td><span class="tag none">n/a</span></td>
+          <td><span class="tag none">n/a</span></td>
+        </tr>
+        <tr>
+          <td class="name">MTE: GCR_EL1</td>
+          <td><span class="tag trap">to VMM</span></td>
+          <td><span class="tag bad">guest UNDEF</span></td>
+          <td><span class="tag abort">abort</span></td>
+          <td><span class="tag none">not probed</span></td>
+        </tr>
+        <tr>
+          <td class="name">MTE: IRG, ADDG, STG, LDG</td>
+          <td><span class="tag ok">native, inert</span></td>
+          <td><span class="tag none">n/a</span></td>
+          <td><span class="tag abort">abort</span></td>
+          <td><span class="tag none">n/a</span></td>
+        </tr>
+        <tr>
+          <td class="name">SMC, WFI</td>
+          <td><span class="tag trap">to VMM</span></td>
+          <td><span class="tag trap">to VMM</span></td>
+          <td><span class="tag trap">to VMM</span></td>
+          <td><span class="tag none">not probed</span></td>
+        </tr>
+        <tr>
+          <td class="name">HVC</td>
+          <td><span class="tag trap">to VMM</span></td>
+          <td><span class="tag bad">guest EL2</span></td>
+          <td><span class="tag bad">guest EL2</span></td>
+          <td><span class="tag none">not probed</span></td>
+        </tr>
+        <tr>
+          <td class="name">Architectural sysregs<br>MIDR, ID_AA64*, SCTLR, HCR_EL2</td>
+          <td><span class="tag ok">native</span></td>
+          <td><span class="tag ok">native</span></td>
+          <td><span class="tag ok">native</span></td>
+          <td><span class="tag ok">native</span></td>
+        </tr>
+      </tbody>
+    </table>
+    <caption>Per-mode totals across 313 probe lines. Ordinary EL1 VM: 70 traps to the VMM, 13 native, 5 guest exceptions. Guest EL2: 102 guest exceptions, 10 native, 2 traps. EL1 under guest EL2 without TIDCP: 39 framework aborts.</caption>
+  </div>
+
+  <div class="col">
+    <h3>The exception syndromes are complete</h3>
+    <p>Where an access does trap out, the information is everything an emulator needs. A read of the SPRR configuration register from EL1 arrives as syndrome <span class="m">0x6231bc03</span>, which decodes to the exact encoding, the direction, and the destination register. Writes carry the source register the same way. There is no guesswork and no instruction refetch.</p>
+    <pre>SPRR_CONFIG_EL1  read   ESR=0x6231bc03  EC=0x18  S3_6_C15_C1_0 read  -&gt; x0
+SPRR_CONFIG_EL1  write  ESR=0x6231bc22  EC=0x18  S3_6_C15_C1_0 write &lt;- x1
+GXF_ENTRY_EL1    write  ESR=0x6233bc30  EC=0x18  S3_6_C15_C8_1 write &lt;- x1
+HID0             read   ESR=0x62303c01  EC=0x18  S3_0_C15_C0_0 read  -&gt; x0</pre>
+
+    <h3>Guarded execution cannot be emulated at all</h3>
+    <p>Every Apple register can at least be intercepted somewhere. The <span class="m">genter</span> instruction cannot. In an ordinary virtual machine the guest at EL1 executes it and takes its own undefined-instruction exception. The VMM is not involved, so there is no opportunity to synthesise the guarded-mode entry that the fork implements in software. Redirecting undefined instructions to the host would need a control the framework does not expose, and setting it would break the guest kernel in other ways.</p>
+    <p>This matters because guarded execution is not incidental to SPTM. It is how the monitor separates itself from the kernel.</p>
+
+    <h3>Memory tagging is absent and cannot be faked</h3>
+    <p>The tagging feature field reads zero in every configuration even though the host silicon implements three generations of it. The tagging instructions do decode and execute, but they perform no tag work. Address arithmetic happens and the tag field stays zero, so a store-then-load round trip returns an untagged pointer.</p>
+    <p>Overriding the identification register to advertise tagging succeeds as an API call and the guest does read the new value. Nothing changes underneath. The tag control register still traps out and the instructions stay inert. Since the darwin machine already checks whether a kernel collection uses tagging and configures the CPU accordingly, tagged iOS kernels are out of reach on this path regardless of the SPTM question.</p>
+  </div>
+
+  <div class="panel flag" style="margin-top:26px">
+    <div class="flag-label">Framework defect worth filing</div>
+    <p>When a guest at EL1 under a guest EL2 executes any Apple implementation-defined register access and the guest hypervisor has not set the trap control, Hypervisor.framework does not return an error. It kills the calling process with a trace trap from an internal unimplemented path, printing <span class="m">FIXME IF: "Handle this" line 82</span>. The crash report shows the abort inside the framework's own exception emulator, reached from its system-register exit handler.</p>
+    <p>This reproduces on 39 different registers and is independent of stage-2 translation. Any VMM offering nested virtualization can be killed by unprivileged guest code, so it is worth a Feedback Assistant report with the probe attached.</p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Recommendation</p>
+    <h2>Neither path runs SPTM, so pick by what you actually want</h2>
+    <p>Trap-and-emulate on Hypervisor.framework fails for SPTM because the registers SPTM needs are invisible at the level SPTM runs at. Adding emulation code cannot fix an access the hypervisor is never told about.</p>
+    <p>Asahi Linux with KVM does not solve it either, and it is worth being precise about why. On bare metal the Apple registers and guarded execution are real hardware, so they work. But SPTM still wants its own EL2, and giving a guest a real EL2 needs the architectural nested-virtualization extension that Apple's cores do not implement. Apple's own EL2 for guests is a software construction inside the framework, which is exactly why it has unimplemented paths that abort.</p>
+    <p>So the honest ranking depends on the goal behind the question.</p>
+    <ul>
+      <li><strong>If the goal is a fast SPTM kernel</strong>, stay on TCG. Nothing available on this machine changes that today, and the fork's emulation is the only thing that models guarded execution and the monitor's registers at all.</li>
+      <li><strong>If the goal is a fast XNU</strong>, an HVF path for kernels that do not use SPTM is genuinely attractive. Those run at EL1, every Apple register access lands in the VMM with a complete syndrome, and the existing register handlers can be reused nearly as they are.</li>
+      <li><strong>If the goal is bare-metal fidelity</strong>, Asahi with KVM gives real Apple registers and real guarded execution for an EL1 guest, without a software EL2. It is the better long-term host for kernel work, at the cost of a second machine and a very different bring-up.</li>
+    </ul>
+    <p>Between the two the study asked about, prefer the HVF path, scoped to kernels without the monitor. It reuses the tree you already have and it is the only one of the three that is a bounded piece of work.</p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Scope</p>
+    <h2>Adding an HVF path to the darwin machine</h2>
+    <p>This estimate covers a non-SPTM kernel booting at EL1 under the hardware accelerator, on a branch that leaves the current TCG behaviour untouched. It does not cover SPTM, which the findings above rule out.</p>
+  </div>
+  <ul class="work">
+    <li>
+      <span class="task">Route unknown system-register traps to the Apple table</span>
+      <span class="est">1 day</span>
+      <span class="detail">The accelerator already has a helper that looks up a register by encoding and calls its read or write function. The Apple registers are defined in that same form. The change is to consult that table in the fallback case instead of injecting an undefined instruction.</span>
+    </li>
+    <li>
+      <span class="task">Machine wiring and an accelerator guard</span>
+      <span class="est">1 day</span>
+      <span class="detail">Select the CPU and reset path by accelerator, refuse the combination of the monitor and hardware acceleration with a clear message, and set initial state through the accelerator rather than by writing the emulated register file.</span>
+    </li>
+    <li>
+      <span class="task">Correct the guest-visible identification registers</span>
+      <span class="est">1 day</span>
+      <span class="detail">The exception-level field reads zero and the tagging field is fixed at zero. Both need deliberate handling so the kernel's own feature probing sees something coherent.</span>
+    </li>
+    <li>
+      <span class="task">Interrupt controller and timer under the accelerator</span>
+      <span class="est">3 to 5 days</span>
+      <span class="detail">The darwin machine wires the hypervisor virtual timer to fast interrupts, which suits emulation. The accelerator reports timer expiry only as its own exit and expects the VMM to inject through the guest's controller. This is the least mechanical item and the most likely to surprise.</span>
+    </li>
+    <li>
+      <span class="task">Memory map, address space size, and bring-up debugging</span>
+      <span class="est">3 to 5 days</span>
+      <span class="detail">Map the Apple physical layout within the intermediate address limit, then work through whatever the kernel does differently when its register accesses are real rather than emulated.</span>
+    </li>
+  </ul>
+  <div class="col">
+    <p style="margin-top:20px">Call it two to three weeks of focused work to a first boot attempt, with the timer path carrying most of the risk. The register plumbing itself is small because the accelerator and the Apple register definitions already speak the same interface.</p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="eyebrow">Reproducing</p>
+    <h2>The probe</h2>
+    <p>The program is standalone C against Hypervisor.framework with no QEMU dependency. It is ad-hoc signed with the hypervisor entitlement during the build, which needs neither administrator rights nor a developer account. Every hand-encoded instruction is cross-checked against the system assembler by a separate target, so an encoding mistake cannot be misread as a hardware finding.</p>
+    <pre>cd ~/Downloads/darwin-vm/hvf-probe
+make          # build and sign
+make check    # diff hand-encoded words against clang, prints "encodings match clang"
+make run      # full sweep, writes results.txt
+./summarize.py results.txt   # one line per probe, with a verdict class</pre>
+    <p>Useful flags are <code>--modes=1</code> to run a single configuration, <code>--verbose</code> to print every exit as it happens, and <code>--try-force-mte</code> to repeat the tagging experiment after overriding the identification register.</p>
+    <details>
+      <summary>Files</summary>
+      <ul>
+        <li><span class="m">hvf_probe.c</span> harness, register table, mini assembler, and the four configurations</li>
+        <li><span class="m">check.S</span> the same instruction list for the assembler to encode</li>
+        <li><span class="m">summarize.py</span> reduces the transcript to a table</li>
+        <li><span class="m">results.txt</span> the full sweep behind every claim here</li>
+        <li><span class="m">results-summary.tsv</span> and <span class="m">results-tally.txt</span> the derived tables</li>
+      </ul>
+      <p style="margin-bottom:0">Nothing in the QEMU build tree or the display working tree was touched.</p>
+    </details>
+  </div>
+</section>
+
+<footer>
+  Measured on Apple M5 Max, macOS 27.0 build 26A5421a, Darwin 27.0.0, xnu-13432.1.9.<br>
+  qemu-sptm at 6c3ca66, QEMU 11.1.0 base. Probe sources in darwin-vm/hvf-probe.
+</footer>
+
+</div>
