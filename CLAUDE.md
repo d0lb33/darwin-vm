@@ -198,14 +198,22 @@ Nothing was ever missing from the device tree; the driver was simply never
 allowed to finish `start()`.
 
 **What is still stubbed:** every RPC *method* returns status 0 with zeroed
-output except `A401`; class 0 subkind 0, class 3, and the entire `D`-series
-callback direction (DCP → AP) are not modelled. There are no pixels yet: the
+output except `A401`; class 0 subkind 0 and class 3 are not modelled. The
+`D`-series callback direction (DCP → AP) now has a **working transport**: we
+send a callback, the AP acknowledges, and a handler runs and writes into our
+buffer. `tools/re/dcp_dtable.py` enumerates all **139** callbacks with handler
+addresses — note the real dispatch entry is `link_rpc_lookup` at
+`0xfffffff00917d328` fanning across nine blocks in two kexts, and
+`0xa0d05ac`-`0xa0d0680` is only the D400-D424 leaf. What is *not* solved is
+dispatch of an **inbound** request: it is acknowledged but `rpc_callee_gated`
+only runs after a further class-2/subkind-1 on the same slot. See
+`docs/re/iomfb-dseries.md`; the kick is behind `DARWIN_DCP_IOMFB_CB_KICK`,
+default off. There are no pixels yet: the
 AP goes quiet after `A353`, has not powered the DCP on, and has not asked for
-a framebuffer. On real hardware the firmware drives that next phase, which is
-why the `D`-series is the next piece of work. `link_rpc_lookup`'s nested
-switch at `0xfffffff00a0d05ac`-`0xa0d0680` is the AP's dispatch table for
-those names and gives a handler per callback, so the next gate can be named
-before booting.
+a framebuffer. On real hardware the firmware drives that next phase. Getters are
+now exhausted — a 23-getter sweep returned status 0 with distinct values and
+the AP still issues only `A401`/`A465`/`A353` — so the remaining signal is in
+the **input-carrying** callbacks.
 
 ### Method that keeps working
 
@@ -346,6 +354,13 @@ a create.
 
 Still open: **personas.** `usermanagerd` dies with "Daemon failed to load
 persona manifest" and 248 `kpersona_find_by_type(type 6)` failures follow.
+
+### A trap in fresh agent worktrees
+
+`firmware/` is gitignored, so a new worktree does not have it. `probe.sh` then
+silently drops `-sptm`/`-txm` and the guest hangs at the kernel entry with
+**zero serial output and zero panics** — which reads exactly like a
+catastrophic regression and is not one. Symlink `firmware` into the worktree.
 
 ### Two traps in the panic logs, both of which have already cost an hour
 
