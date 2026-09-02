@@ -213,6 +213,16 @@ def get_soc_gen(d):
   return int(soc_gen_name[1:])
 
 def fixup(d, nvram_file):
+  # This is a one-shot transform on a device tree straight out of an IPSW. Run
+  # twice, it fails deep inside with a confusing error (the second pass looks
+  # for nodes the first pass removed), so say so up front.
+  if d['chosen'].props.get('firmware-version') == IBOOT_NAME:
+    raise SystemExit(
+      "error: this device tree has already been patched by dt_fixup "
+      f"(chosen/firmware-version is already '{IBOOT_NAME}').\n"
+      "       Pass the original tree from the IPSW, eg:\n"
+      "         ipsw img4 im4p extract $(find ipsw_db -iname 'DeviceTree*' | head -1) -o dtree_raw")
+
   d.props['platform-name'] = get_platform_name(d)
   soc_gen = get_soc_gen(d)
 
