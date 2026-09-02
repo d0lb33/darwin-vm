@@ -286,6 +286,10 @@ def fixup_fstab_drop_unavailable(d):
     tab.props['max_fs_entries'] = f"u32:{len(tab.children)}"
   return removed
 
+IOP_REGION_BASE = 0x10010000000
+IOP_REGION_SIZE = 0x100000
+IOP_REGION_STRIDE = 0x1000000
+
 def fixup_iops(d):
   # Getting an IOP's drivers to *match* is not the same as getting XNU to start
   # it. Without these, RTBuddy binds the DCP and AppleDCPExpert matches, but the
@@ -321,6 +325,13 @@ def fixup_iops(d):
   # Leaving those nubs alone, ANS boots clean and Apple's own storage drivers
   # probe: AppleANS3CGv2Controller returns score 500000, AppleANS2NVMeController
   # 100000, and RTBuddy(ANS2) starts.
+  # Each IOP that needs an invented region gets its OWN slot. Handing two of
+  # them the same base is what made "-enable ans" plus "-enable dcp" panic SPTM
+  # at RTBuddy(DCP): start with VIOLATION_FRAME_TYPE / XNU_KERNEL_RESTRICTED
+  # while either alone was fine: before ANS's placeholder region-base = 0x0 was
+  # recognised, only the DCP was eligible and there was exactly one claimant.
+  # Stride is 16x the region so a future size increase cannot overlap.
+  slot = 0
   for c in d['arm-io'].children:
     if 'compatible' not in c.props:
       continue
@@ -339,9 +350,10 @@ def fixup_iops(d):
       if 'rtbuddy' not in compat or nub.props.get('region-base') not in (None, 'u64:0x0'):
         continue
       nub.props['pre-loaded'] = "u32:1"
-      nub.props['region-base'] = "u64:0x10010000000"
-      nub.props['region-size'] = "u64:0x100000"
+      nub.props['region-base'] = f"u64:{IOP_REGION_BASE + slot * IOP_REGION_STRIDE:#x}"
+      nub.props['region-size'] = f"u64:{IOP_REGION_SIZE:#x}"
       nub.props['no-firmware-service'] = "<NULL>"
+      slot += 1
 
 def fixup_sep(d):
   # AppleSEPBooter::initForSEP asserts on a property iBoot normally adds and
