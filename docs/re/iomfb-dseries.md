@@ -487,3 +487,42 @@ layout) or is not a callback at all.
 
 That bounds the next search usefully: it is no longer worth sweeping the
 getters, and the `in`-carrying names are where the remaining signal is.
+
+## 6. D120 layout initialization and the first real IOSurface
+
+The D120 callback's layout phase is now understood well enough to exercise the
+real default-surface path.  Its boot-side gate is at
+`0xfffffff009188074`; when `A454` returns one, the writer at
+`0xfffffff009187e24` fills the D120 layout state and returns at
+`0xfffffff009188030`.  The successful experiment supplied this exact 44-byte
+`A033` response (FourCC `ARGB` in the wire representation, followed by the
+one-plane/4-byte format fields):
+
+```
+4152474200000000000000000000000000000000000000000000000000000000000000000000000001000000
+```
+
+The trace shows the writer changing the state from zero to a descriptor whose
+leading fields are `41524742 01000000 04000000`, followed by the D586 request
+and local create path (`/tmp/dvm/PERSIST_DCP_A033_BGRA_1.iomfb.jsonl:50-66`).
+For 1179x2556, D586 computes a required `0xb8c000` bytes; the layout capacity
+getter at `0xfffffff02a0c0684` returns `0xc00000`, and the simple layout path
+at `0xfffffff02a0c0954` completes.  The local-create trace records return
+`w0=0x00b8c000` and a subsequent surface store.  The guest confirms the
+corresponding decision at `/tmp/dvm/probe/PERSIST_DCP_A033_BGRA_1.serial.log:326`:
+
+```
+layout_buffers: size_override = 12107776 > max = 12582912, proceeding with default size = 12107776
+```
+
+This is evidence that the default IOSurface object is created and published;
+it is not evidence of a visible frame or scanout.
+
+The `A385` experiment remains negative.  `A385=01` is an unnamed boolean
+response, not a decoded display semantic.  In
+`PERSIST_DCP_A385_ONE_2`, the guest reaches Early Boot, emits the DCP hotplug
+notification (`/tmp/dvm/probe/PERSIST_DCP_A385_ONE_2.serial.log:654,1395`),
+and produces four identical blank screendump hashes, but SpringBoard is later
+reported as a critical crashed process (`:11057`).  There is no panic.  Thus
+the response does not fix the persistent display path; this run still emitted
+4,971 A385 requests.  Welcome/Hello and scanout remain unproven.
