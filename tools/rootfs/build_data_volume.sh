@@ -23,14 +23,13 @@
 # every mount -- but the real fix is not to generate the churn at all.
 #
 # So: we do not build the template on the host. We create an EMPTY Data volume
-# and let iOS populate it on first boot. mount-phase-2 already knows how to
-# seed /private/var from the on-volume template -- that is the ~213 seconds it
-# currently spends every boot writing into an -ephemeral-data tmpfs. Pointed at
-# a real Data volume it pays that cost once, and every later boot mounts an
-# already-populated volume. Ownership is set by iOS as root, which sidesteps
-# the no-sudo problem entirely. Preboot and Hardware also need empty slots:
-# the disk fstab resolves *every* remaining entry by APFS role before it will
-# mount Data, so a Data-only container leaves /private/var read-only.
+# for the guest-format and guest-mount experiments. Do not mistake that for a
+# bootable persistent-var image: on 2026-09-02 both normal and -skip-keybag
+# system boots mounted an empty encrypted Data volume and produced zero
+# `Copying ` records, so this build has not found a guest seeder yet. Preboot
+# and Hardware also need empty slots: the disk fstab resolves *every* remaining
+# entry by APFS role before it will mount Data, so a Data-only container leaves
+# /private/var read-only.
 #
 # Host filesystem churn here: one APFS clone (instant, copy-on-write), one
 # image resize, three addVolume calls. No file deletions at all.
@@ -117,6 +116,6 @@ diskutil apfs list "$OURDEV" | grep -E "APFS Volume|Role|Name:|Capacity" | sed '
 
 echo "==> done: $OUT"
 echo
-echo "Next: boot with this image as the ANS backing store and DROP -ephemeral-data."
-echo "The first boot pays mount-phase-2's seed cost once; the second should mount"
-echo "an already-populated /private/var. Verify by booting twice and comparing."
+echo "Next: format Data in the guest, then boot without -ephemeral-data to test it."
+echo "The current guest path mounts an empty Data volume but does not seed it;"
+echo "bootstrap_data_volume.sh fails closed unless a future boot proves copies."

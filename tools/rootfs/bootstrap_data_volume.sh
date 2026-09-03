@@ -28,8 +28,13 @@
 #   3. The volume must be POPULATED. We cannot do this from the host or from a
 #      shell: the /private/var template files carry data-protection classes that
 #      an empty keybag cannot unlock, and `cp` panics reading MobileAsset even
-#      with --reflink=never. iOS's own `mount-phase-2` boot task can, because it
-#      has the keybag. That is what phase 3 is for.
+#      with --reflink=never. An earlier hypothesis was that iOS's own
+#      `mount-phase-2` would seed a real empty Data volume. It does not: the
+#      independent normal and -skip-keybag controls both mount Data and emit
+#      zero `Copying ` lines (BOOTSTRAP_SEED*.serial.log), and the latter then
+#      dies because tzinit cannot find its Data files. Phase 3 is therefore a
+#      fail-closed test for the still-missing guest seeder, not a claim that the
+#      pipeline can already populate Data.
 #
 # Usage:
 #   tools/rootfs/bootstrap_data_volume.sh [all|image|format|seed|verify]
@@ -187,9 +192,10 @@ phase_format() {
 }
 
 # ---------------------------------------------------------------- phase 3 ----
-# Boot the system volume with NO -ephemeral-data and let mount-phase-2 seed the
-# volume from the on-volume template. This is the only actor that can: it runs
-# inside iOS with the keybag, so the protection classes come out right.
+# Boot the system volume with NO -ephemeral-data and test whether mount-phase-2
+# seeds the empty Data volume. It is the only plausible guest-side actor: it
+# runs with the keybag, so any copied protection classes would be correct. Do
+# not call a mount success a seed success: the phase requires copy evidence.
 phase_seed() {
     [ -f "$OVL" ] || die "no overlay; run the image and format phases first"
     local dt="$WORK/dt_sysvol.bin"
@@ -197,21 +203,23 @@ phase_seed() {
     python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$dt" -nvram "$NVRAM" \
         -enable ans -enable smc -enable sep -dram 12G \
         || die "dt_fixup failed"
-    say "[seed] booting the system volume off the NVMe disk (first boot pays the seed once)"
+    say "[seed] booting the system volume off the NVMe disk (testing first-boot seeding)"
     "$REPO/tools/probe.sh" --dtree "$dt" --tc "$TC" --mem 12G --secs 1200 \
         --tag BOOTSTRAP_SEED \
         --bootargs "rootdev=disk1s1 $BOOTARGS_COMMON" \
         -- -drive "if=none,id=ans,file=$OVL,format=qcow2" | tail -8
     # probe.sh intentionally returns after a dead guest so callers can inspect
-    # its logs.  Do not let that make an unseeded Data volume look successful.
-    phase_verify
+    # its logs.  Do not let either a dead guest or a Data mount with no copies
+    # make an unseeded volume look successful.
+    EXPECT_SEED=required phase_verify
 }
 
 # ---------------------------------------------------------------- verify -----
 phase_verify() {
     local L=/tmp/dvm/probe/BOOTSTRAP_SEED.serial.log
     [ -f "$L" ] || die "no seed log; run the seed phase first"
-    local root mount2 var copies early unencrypted panics
+    local root mount2 var copies early unencrypted panics expect_seed
+    expect_seed=${EXPECT_SEED:-any}
     root=$(grep -ao 'BSD root: [a-z0-9]*' "$L" | head -1 | cut -d' ' -f3)
     mount2=$(grep -ao '(mount-phase-2) <Notice>: [A-Za-z -]*' "$L" | head -1)
     var=$(grep -ao '/dev/disk1s[0-9]* on /private/var[^\"]*' "$L" | head -1)
@@ -231,11 +239,21 @@ phase_verify() {
     [ "$root" = "disk1s1" ] || die "seed boot did not root from the ANS System volume"
     [[ "$mount2" == *"Doing boot task"* ]] || die "mount-phase-2 did not run"
     [ -n "$var" ] || die "Data volume was not mounted on /private/var"
+    case "$expect_seed" in
+        required)
+            (( copies > 0 )) || die "Data mounted but mount-phase-2 copied no template files; an empty real Data volume is not seeded by this boot path"
+            ;;
+        none)
+            (( copies == 0 )) || die "persistence boot unexpectedly copied template files"
+            ;;
+        any) ;;
+        *) die "invalid EXPECT_SEED=$expect_seed (use required, none, or any)" ;;
+    esac
     (( early > 0 )) || die "seed boot did not reach Early boot complete"
     (( unencrypted == 0 )) || die "Data volume was rejected as unencrypted"
     (( panics == 0 )) || die "seed boot panicked; see first panic(cpu in $L"
-    echo "    Verified: Data mounted on /private/var with no panic. A second seed boot"
-    echo "    should show 0 'Copying' lines while retaining that mount (persistence proof)."
+    echo "    Verified: Data mounted on /private/var, copied its template, and reached early boot."
+    echo "    Re-run with EXPECT_SEED=none to require the persistence/no-copy witness."
 }
 
 case "$MODE" in
