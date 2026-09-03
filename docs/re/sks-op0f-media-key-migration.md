@@ -2,53 +2,160 @@
 
 ## Source metadata
 
-iOS 27.0 beta 8 (24A5430a), iPhone17,3 / t8140. Primary binary: /tmp/dvm/kexts/com.apple.driver.AppleSEPKeyStore, extracted from firmware/bootkc with ipsw kernel extract; 363,432 bytes, SHA-256 4e94489161384d9fc1b14704ad064e27e674fd2e586055b5bf388a95c92bf273. Addresses below are unslid VAs; runtime uses the project-standard +0x20000000 slide. APFS cross-check: /tmp/dvm/kexts/com.apple.filesystems.apfs, SHA-256 1eb00b3ccafc79e70fb11e62ab34b9b6acfdd27e7118be11eea17e0e4bb5e131. Live witnesses: /tmp/dvm/probe/BOOTSTRAP_SEED_SKSDEBUG.stderr.log:579-617 and /tmp/dvm/probe/BOOTSTRAP_SEED.serial.log:425-451,575.
+iOS 27.0 beta 8 (24A5430a), iPhone17,3 / t8140. Primary binary:
+`/tmp/dvm/kexts/com.apple.driver.AppleSEPKeyStore`, extracted from
+`firmware/bootkc` with `ipsw kernel extract`; 363,432 bytes, SHA-256
+`4e94489161384d9fc1b14704ad064e27e674fd2e586055b5bf388a95c92bf273`.
+Addresses below are unslid VAs; runtime uses the project-standard
+`+0x20000000` slide. APFS cross-check:
+`/tmp/dvm/kexts/com.apple.filesystems.apfs`, SHA-256
+`1eb00b3ccafc79e70fb11e62ab34b9b6acfdd27e7118be11eea17e0e4bb5e131`.
 
-## Summary
+The decisive live witnesses are:
 
-SKS wire opcode 0x0f is the AppleSEPKeyStore path that logs as fs_migrate_media_key_to_class, not fs_new_media_key_wrapped_to_class.
-The failing request selects variant 3, supplies a 40-byte opaque media-key record and class 0x0e, and reserves a 64-byte output; the current status-only reply leaves that output at length zero and APFS panics.
-Static marshaller evidence derives a one-blob, 64-byte variant-3 reply, but no real SEP reply has been captured, so the proposed byte layout needs the acceptance run below before it is treated as confirmed protocol.
+- accepted request and reply: `/tmp/dvm/probe/BOOTSTRAP_SEED_OP0F_ACCEPTED_FINAL.stderr.log:583-598`
+- APFS keybag writes and successful migration: `/tmp/dvm/probe/BOOTSTRAP_SEED_OP0F_ACCEPTED_FINAL.serial.log:420-446`
+- encrypted Data mount: the same serial log at lines 449-465
+- final cold-reboot control: `/tmp/dvm/probe/BOOTSTRAP_SEED_SKS_FINAL_COLD.stderr.log:565-641` and `.serial.log:428-450,586`
 
-## Register/protocol/layout evidence
+## Result
 
-| Item | Observed or derived behavior | Evidence |
-| --- | --- | --- |
-| Wire operation | Opcode 0x0f is passed to transport at 0xfffffff00957bc08; its enclosing wrapper is called from 0xfffffff009574e48. | 0xfffffff00957bc00-0x957bc18 loads w1 = 0x0f immediately before the signed transport call; live request at BOOTSTRAP_SEED_SKSDEBUG.stderr.log:579-595. |
-| Operation name | High-level wrapper is fs_migrate_media_key_to_class. This corrects the false association with fs_new_media_key_wrapped_to_class, which calls distinct opcode 0x31 at 0xfffffff00957d6e4. | Migration wrapper 0xfffffff009573024-0x95731a0 logs cstring 0xfffffff007703f68; it calls 0xfffffff009574e48, then 0xfffffff00957bc08. New-key cstring 0xfffffff007703ebd, function 0xfffffff0095731a4, bridge 0xfffffff00957d6e4. |
-| Request header | IPC v1 has 76 bytes: u32 body-size 0x48 at +0, digest[16] at +4, u32 version 1 at +0x14. Reply digest is SHA-256 over [+0x14,+0x4c) followed by body, truncated to 16 bytes at +4; it is not a secret MAC. | Live bytes: BOOTSTRAP_SEED_SKSDEBUG.stderr.log:582-593. Model mirror: qemu-sptm/hw/arm/darwin_sep.c:340-356,823-848. AP-side digest trace: docs/re/sks-feasibility.md “Question 1a.” |
-| Body +0x4c | u32 variant = 3. | BOOTSTRAP_SEED_SKSDEBUG.stderr.log:587-588. |
-| Body +0x50..+0x67 | Fixed in this request: three u32 values 1, 0, 0, then u64 UINT64_MAX. Field names are unverified. | BOOTSTRAP_SEED_SKSDEBUG.stderr.log:588-589. |
-| Target class | u32 0x0e at +0x6c. APFS takes class-0x0e path and selects argument 3 at 0xfffffff00a8723d0-0xa8723f8; symbolic class name unverified. | Request line 589; APFS dispatch 0xfffffff00a8723d0-0xa872400. |
-| Input record | u32 record_len=0x28 at +0x78 then opaque record[40] at +0x7c..+0xa3. | BOOTSTRAP_SEED_SKSDEBUG.stderr.log:590-593; successful unwrap treats the same form as opaque at qemu-sptm/hw/arm/darwin_sep.c:1048-1067. |
-| Output capacity | u32 0x40 at +0xa4, followed by zero at +0xa8. The final four request bytes are not printed by the 172-byte debug truncation. Migration wrapper allocates/passes 0x40. | Request line 593; the logger caps its dump at header + 96 in qemu-sptm/hw/arm/darwin_sep.c:942-950; wrapper AppleSEPKeyStore 0xfffffff0095730f8-0x957310c. |
-| Reply plumbing | The 0x0f marshaller has one pointer/length output pair. It initializes local var_148/var_150 at 0xfffffff00957bbcc-0x957bbfc and publishes it at 0xfffffff00957bc20-0x957bc60; no second pair or returned scalar is copied. | AppleSEPKeyStore instructions cited. |
-| Derived reply | u32 variant=3; u32 output_len=0x40; output[64]: 72-byte body and 148-byte OOL reply (0x4c+0x48). This is not dynamically confirmed. | Smallest layout matching selected variant, single output pair, and capacity. Existing 0x10/0x31/0x32 replies echo their variants at qemu-sptm/hw/arm/darwin_sep.c:989-1069; negative control is 80-byte status-only reply at stderr:594-595. |
-| Key material | First control is existing stable 64-byte sks_media_key. It must survive reboot; no AP-side secret comparison is known. | Fake-key mode at BOOTSTRAP_SEED.serial.log:427-439; stable material remount control in docs/re/sks-feasibility.md “Implementation result.” |
-| Failure semantics | Zero output length is not success: APFS panics in apfs_crypto_state_init. | First panic BOOTSTRAP_SEED.serial.log:575; immediate predecessor is status-only reply at stderr:594-595. |
-| Cross-reboot state | No extra secret/persistent state is justified in fake-key mode. Preserve deterministic 0x31/0x32 material; do not generalize this claim to real SEP mode. | Fake-key and second-boot controls cited above. |
+Wire opcode `0x0f` is `fs_migrate_media_key_to_class`. The captured request is
+variant 3, contains a 40-byte opaque wrapped-key record, targets class 14, and
+provides capacity for a record of up to 64 bytes. The accepted reply is not the
+initially inferred 148-byte `{variant, len=64, key[64]}` message. It is a
+128-byte authenticated IPC v1 message whose 52-byte body is:
 
-### Write-only or ignorable fields
+```
+le32(3)                         response union selector
+le32(40)                        returned record length
+sks_wrapped_key[40]             stable opaque wrapped record
+le32(14)                        returned class
+```
 
-None can safely be called ignorable. The 40-byte input is opaque to the model but protocol-significant; variant and class must remain parser-selected. The fixed-looking scalars at +0x50..+0x77 remain unlabelled rather than declared write-only.
+The request's `64` is output capacity, not the required returned length. APFS
+rejects a migrated record length of `0x39` or greater at
+`0xfffffff00a875648..0xfffffff00a875660`. The returned scalar must match target
+class 14 at `0xfffffff00a875598..0xfffffff00a8755a4`.
 
-## Device-modeler specification
+This shape is confirmed behaviorally. The guest records result zero for
+`fs_migrate_media_key_to_class`, writes both media and container keybags,
+reports migration success, unwraps the resulting records with opcode `0x32`,
+and mounts `disk1s2` at `/private/var` with `protect` enabled.
 
-Add SKS_MIGRATE_MEDIA_KEY_TO_CLASS for wire code 0x0f in qemu-sptm/hw/arm/darwin_sep.c; do not alter APFS or bootstrap scripts. Validate the existing v1 header and require the captured 0xb0-byte request, variant 3, record length 0x28, and output capacity 0x40; log a distinct rejection for another shape rather than silently succeeding.
+## Request layout and validation
 
-For the captured shape, construct a 148-byte reply with existing identity-copy and SHA-256 helpers and body { le32(3), le32(64), sks_media_key[64] }, on the same endpoint/tag/id. Do not parse, rewrite, or persist the 40-byte record and do not create another output; if acceptance produces a parser error or another output length, replace this inferred body with captured evidence rather than padding speculatively.
+| Absolute offset | Size | Captured value | Treatment |
+| --- | ---: | --- | --- |
+| `+0x00` | 4 | header body size `0x48` | require IPC v1 header shape |
+| `+0x04` | 16 | truncated SHA-256 digest | verify with existing helper |
+| `+0x14` | 4 | IPC version `1` | require |
+| `+0x4c` | 4 | variant `3` | require |
+| `+0x50` | 4 | `1` | require |
+| `+0x54` | 4 | `0` | require |
+| `+0x58` | 4 | `0` | require |
+| `+0x5c` | 4 | zero alignment slot | require; the following u64 is aligned |
+| `+0x60` | 8 | `UINT64_MAX` | require |
+| `+0x68` | 4 | `0` | observed but not assigned a semantic name |
+| `+0x6c` | 4 | target class `14` | require |
+| `+0x70` | 8 | zero | observed but not assigned semantic names |
+| `+0x78` | 4 | record length `40` | require |
+| `+0x7c` | 40 | opaque record | preserve opaque semantics |
+| `+0xa4` | 4 | output capacity `64` | require |
+| `+0xa8` | 4 | `0` | require |
+| `+0xac` | 4 | request-side scalar `0` | require |
 
-Acceptance needs all three independent witnesses:
+The whole request must be exactly 176 bytes. Unsupported lengths, versions,
+variants, classes, fixed fields, or record boundaries are logged and rejected;
+they must not receive a status-only success.
 
-1. SEP stderr logs code 0x0f, request length 176, variant 3, and a 148-byte SHA-256-authenticated reply with 64-byte output.
-2. Serial log has no apfs_crypto_state_init invalid-key-length panic, proceeds past former line 575, and retains disk1s2 encrypted/protect mount evidence.
-3. Following 0x32 unwraps still show 64-byte keys; a cold reboot repeats migration length with no transport-digest error.
+Static identity and plumbing evidence:
 
-## Open questions
+- the high-level wrapper at `0xfffffff009573024..0xfffffff0095731a0`
+  logs `fs_migrate_media_key_to_class`, calls `0xfffffff009574e48`, and reaches
+  the opcode-`0x0f` transport call at `0xfffffff00957bc08`
+- this is distinct from `fs_new_media_key_wrapped_to_class`, which uses opcode
+  `0x31` at `0xfffffff00957d6e4`
+- the generated `0x0f` bridge publishes one pointer/length output and one u32
+  output at `0xfffffff00957bbcc..0xfffffff00957bc60`
+- IPC v1 has a 76-byte header; its 16-byte authentication field is SHA-256 over
+  `[+0x14,+0x4c)` followed by the body, truncated to 16 bytes
 
-| Open question | Observation that settles it |
+## Runtime controls
+
+The first implementation followed the incomplete static inference. It
+authenticated correctly but failed semantically:
+
+| Reply control | Result |
 | --- | --- |
-| Is {variant 3, len 64, bytes} exact? | Capture real SEP 0x0f OOL reply, or run derived 148-byte response and verify no decoder error plus a 64-byte APFS result. |
-| What are +0x50..+0x77 and what is class 0x0e called? | Recover type metadata for fs_migrate_media_key_to_class, or compare captures for two requested classes. |
-| Does a later path compare key and record-specific material? | Boot through mount-phase-2 and cold-boot, then compare two deliberate stable 64-byte values and record the first divergent check. |
-| Is state needed outside fake-key mode? | Repeat with no-effaceable-storage absent and a real effaceable backend; this note makes no claim for that configuration. |
+| 148 bytes, variant 3, length 64, key[64], no scalar | Guest returned `e00002bc`; `/tmp/dvm/probe/BOOTSTRAP_SEED_OP0F_148_NEG.stderr.log:595-598`, `.serial.log:420-422` |
+| 152 bytes, same key plus trailing scalar 0 | Still rejected; `/tmp/dvm/probe/BOOTSTRAP_SEED_OP0F_152_SCALAR0_NEG.*` |
+| 128 bytes, record length 40, class 14, reply variants 0-2 | Transport decoded, but APFS rejected the semantic result; `/tmp/dvm/probe/BOOTSTRAP_SEED_OP0F_SWEEP_VARIANT{0,1,2}.*` |
+| 128 bytes, record length 40, class 14, reply variant 3 | Accepted; three requests at stderr lines 583-598, 630-645, and 655-670 |
+
+The accepted boot then supplies 64-byte live keys through opcode `0x32` at
+stderr lines 680-714. This distinction is important: opcode `0x0f` returns the
+40-byte wrapped record; opcode `0x32` unwraps that record into the 64-byte CPX
+key.
+
+## Follow-on opcode 0x10 requirement
+
+Acceptance of `0x0f` exposed a later, separate `apfs_crypto_state_init` panic.
+The existing opcode-`0x10` status reply encoded five empty blobs. Static APFS
+checks and runtime mask controls show that reply variant 2 requires exactly the
+first two outputs to contain 16-byte keys:
+
+- output 0 only (`mask 0x1`) gets past the main key check but panics with
+  `invalid iv key length (0)` at
+  `/tmp/dvm/probe/BOOTSTRAP_SEED_OP10_SWEEP_MASK1.serial.log:570`
+- outputs 0 and 1 (`mask 0x3`) eliminate both invalid-key panics and advance to
+  the class-D marker failure at
+  `/tmp/dvm/probe/BOOTSTRAP_SEED_OP10_SWEEP_MASK3.serial.log:585`
+- APFS enforces the two 16-byte lengths at
+  `0xfffffff00a915158..0xfffffff00a915174`
+
+The model therefore returns deterministic 16-byte file and IV keys in the first
+two blobs, then three zero-length blobs and two zero scalars. This is the
+smallest runtime-supported response and does not claim persistent SEP secrets.
+
+## Final acceptance
+
+1. The accepted boot logs request length 176, variant 3, class 14, record length
+   40, capacity 64, and an authenticated 128-byte reply
+   (`BOOTSTRAP_SEED_OP0F_ACCEPTED_FINAL.stderr.log:583-598`).
+2. It writes APFS media and container keybags and reports successful migration
+   (`.serial.log:420-446`).
+3. It obtains primary and secondary volume keys and mounts encrypted/protected
+   `disk1s2` on `/private/var` (`.serial.log:449-465`).
+4. Following opcode-`0x32` operations continue to return 64-byte keys
+   (`.stderr.log:680-714`).
+5. Two final boots with no test overrides repeat the encrypted/protected mount.
+   The cold control retains 64-byte opcode-`0x32` outputs and authenticated
+   opcode-`0x10` replies (`BOOTSTRAP_SEED_SKS_FINAL_COLD.stderr.log:565-641`)
+   without a transport digest, keystore timeout, invalid-key-length, or invalid
+   IV-key-length failure.
+
+## Remaining blocker
+
+The SKS migration and key lengths are no longer the first failure. The seed
+phase reaches mount-phase-2 with the real encrypted Data volume mounted, but
+copies zero template files. Early userspace then panics with:
+
+```
+Creating classD marker file in /var/keybags in early boot task failed
+```
+
+The final cold witness is
+`/tmp/dvm/probe/BOOTSTRAP_SEED_SKS_FINAL_COLD.serial.log:586`. This demonstrates
+that mount-phase-2 does not populate a completely empty real Data volume merely
+because it is mounted. Supplying the initial Data filesystem layout is a
+separate bootstrap-design problem; it is not evidence for more SKS opcode
+guessing.
+
+## Scope limits
+
+The 40-byte record remains opaque and is never parsed or rewritten. Stable test
+material is intentional under `no-effaceable-storage`; this model makes no
+claim about real SEP secret generation or persistence. The names of the
+unlabelled request fields and the semantics of later status-only opcodes such as
+`0x19` and `0x04` remain unverified.
