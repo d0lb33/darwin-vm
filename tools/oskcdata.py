@@ -13,7 +13,7 @@ is the durable one.
 Pair it with tools/snap_at_marker.sh (freeze the guest inside the failure
 window) and tools/guest_memgrep.py (copy RAM out).
 
-kcdata layout, XNU osfmk/kern/kern_cdata.h: a buffer is a chain of items, each
+kcdata layout, XNU osfmk/kern/kcdata.h: a buffer is a chain of items, each
 `u32 type, u32 size, u64 flags` followed by `size` bytes, starting with an item
 whose type is the buffer magic and ending with KCDATA_TYPE_BUFFER_END. We scan
 for the magic rather than following any pointer, because we have no symbols.
@@ -29,7 +29,10 @@ import sys
 
 MAGICS = {
     0x53A20900: "OS_REASON",
-    0xDEB7CAF3: "CRASHINFO",
+    # osfmk/kern/kcdata.h: KCDATA_BUFFER_BEGIN_CRASHINFO.  Do not confuse
+    # this with one of the historical crash-report signatures: kcdata's
+    # buffer magic is 0xDEADF157.
+    0xDEADF157: "CRASHINFO",
     0x59A25807: "STACKSHOT",
     0xDE17A59A: "DELTA_STACKSHOT",
 }
@@ -39,7 +42,13 @@ ITEM = {
     0x00000001: "STRING_DESC",
     0x00000002: "UINT32_DESC",
     0x00000003: "UINT64_DESC",
-    0xFFFFFFFF: "BUFFER_END",
+    # osfmk/kern/kcdata.h: KCDATA_TYPE_BUFFER_END.  0xffffffff is not a
+    # kcdata terminator, so treating it as one silently made us walk past
+    # real buffers and attribute unrelated bytes to an os_reason.
+    0xF19158ED: "BUFFER_END",
+    0x00000036: "KCDATA_TYPE_PID",
+    0x00000037: "KCDATA_TYPE_PROCNAME",
+    0x00000038: "KCDATA_TYPE_NESTED_KCDATA",
     # bsd/sys/reason.h
     0x1001: "EXIT_REASON_SNAPSHOT",
     0x1002: "EXIT_REASON_USER_DESC",
@@ -47,9 +56,21 @@ ITEM = {
     0x1004: "EXIT_REASON_CODESIGNING_INFO",
     0x1005: "EXIT_REASON_WORKLOOP_ID",
     0x1006: "EXIT_REASON_DISPATCH_QUEUE_NO",
-    # task crashinfo range 0x800.., only the ones we have actually seen
-    0x0847: "PROC_NAME",
+    # osfmk/kern/kcdata.h task crashinfo range.  0x847 is deliberately not
+    # named: current XNU does not define it as a process-name field.
+    0x0805: "TASK_CRASHINFO_PID",
+    0x0809: "TASK_CRASHINFO_PROC_NAME",
+    0x080F: "TASK_CRASHINFO_PROC_PATH",
+    0x081A: "TASK_CRASHINFO_CRASHED_THREADID",
 }
+
+KCDATA_TYPE_BUFFER_END = 0xF19158ED
+KCDATA_TYPE_PID = 0x36
+KCDATA_TYPE_PROCNAME = 0x37
+KCDATA_TYPE_NESTED_KCDATA = 0x38
+TASK_CRASHINFO_PID = 0x805
+TASK_CRASHINFO_PROC_NAME = 0x809
+TASK_CRASHINFO_PROC_PATH = 0x80F
 
 # bsd/sys/reason.h OS_REASON_* . Only the low numbers are load-bearing here;
 # the rest are carried so a future hit prints a name instead of a bare integer.
@@ -92,10 +113,10 @@ def walk(buf, start, limit=512):
         if pos + 16 > len(buf):
             return
         t, sz, fl = struct.unpack_from("<IIQ", buf, pos)
-        if sz > (1 << 20):
+        if sz > (1 << 20) or pos + 16 + sz > len(buf):
             return
         yield t, sz, buf[pos + 16:pos + 16 + sz]
-        if t == 0xFFFFFFFF:
+        if t == KCDATA_TYPE_BUFFER_END:
             return
         pos = (pos + 16 + sz + 3) & ~3
 
@@ -113,14 +134,26 @@ def render(path, off, tag, out=sys.stdout):
             lines.append("  %-26s namespace=%d (%s) code=0x%x flags=0x%x"
                          % (name, ns, NAMESPACE.get(ns, "?"), code, flags))
             interesting = True
-        elif sz and all(c in (0, 9, 10) or 32 <= c < 127
-                        for c in data[:min(sz, 64)]):
+        elif t in (KCDATA_TYPE_PID, TASK_CRASHINFO_PID) and sz >= 4:
+            pid, = struct.unpack_from("<i", data, 0)
+            lines.append("  %-26s %d" % (name, pid))
+            interesting = True
+        elif t == KCDATA_TYPE_NESTED_KCDATA and sz >= 16:
+            nested_type, = struct.unpack_from("<I", data, 0)
+            nested_name = MAGICS.get(nested_type, "0x%x" % nested_type)
+            lines.append("  %-26s %s (%d bytes)"
+                         % (name, nested_name, sz))
+            interesting = True
+        elif (t in (KCDATA_TYPE_PROCNAME, TASK_CRASHINFO_PROC_NAME,
+                    TASK_CRASHINFO_PROC_PATH, 0x1002) and sz and
+              all(c in (0, 9, 10) or 32 <= c < 127
+                  for c in data[:min(sz, 64)])):
             txt = data.split(b"\0")[0].decode("ascii", "replace")
             txt = txt.replace("\n", " ")
             if txt:
                 lines.append("  %-26s %r" % (name, txt[:500]))
                 interesting = True
-        if t == 0xFFFFFFFF or (t == 0 and sz == 0 and len(lines) > 2):
+        if t == KCDATA_TYPE_BUFFER_END:
             break
     if not interesting:
         return False
