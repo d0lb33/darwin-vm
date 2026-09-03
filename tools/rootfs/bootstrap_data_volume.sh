@@ -37,13 +37,17 @@
 #      pipeline can already populate Data.
 #
 # Usage:
-#   tools/rootfs/bootstrap_data_volume.sh [all|image|format|seed|copy-data|manifest|layout|marker|normal|verify]
+#   tools/rootfs/bootstrap_data_volume.sh [all|image|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|normal|verify]
 #
 # Env:
 #   SRC   cryptex-merged system volume  (default ~/dvm-artifacts/build/rootfs_cx.dmg)
 #   OUT   disk image to build           (default ~/dvm-artifacts/build/rootfs_cx_dual.dmg)
 #   OVL   qcow2 overlay the guest writes to
 #   WORK  scratch dir for trees, sockets and logs (default /tmp/dvm/bootstrap)
+#   RESTORE_RAMDISK_BASE  source ramdisk for ramdisk-helper
+#   RESTORE_RAMDISK_OUT   new derived ramdisk for ramdisk-helper
+#   RESTORE_RAMDISK       optional derived restore ramdisk containing helper
+#   RESTORE_HELPER_SOURCE absolute guest path to that helper
 set -uo pipefail
 
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
@@ -56,12 +60,20 @@ WORK=${WORK:-/tmp/dvm/bootstrap}
 QEMU_IMG="$REPO/qemu-sptm/build/qemu-img"
 BOOTARGS_COMMON='ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort'
 SERIAL_CHAR_DELAY=${SERIAL_CHAR_DELAY:-0.002}
-# The seeder is built and trusted only for disposable restore boots.  It is
-# uploaded through the UART; neither this script nor its helpers attach an
-# image on the host.  Keep the output under WORK so a rerun cannot mistake a
-# binary from another checkout for the current source.
+# The seeder is built and trusted only for disposable restore boots.  The
+# default transport is the checksummed UART uploader.  A caller may instead
+# supply a derived restore ramdisk and guest path; restore_prepare_helper still
+# proves its guest-side size and checksum before execution.  This is important
+# because the earlier unverified UART path printed success after running no
+# helper at all (BOOTSTRAP_FMT attempts 1/2, `echo` received as `cho`).
+# Keep the output under WORK so a rerun cannot mistake a binary from another
+# checkout for the current source.
 SEED_HELPER=${SEED_HELPER:-$WORK/data_seed_helper}
 SEED_HELPER_TC=${SEED_HELPER_TC:-$WORK/data_seed_helper.tc}
+RESTORE_RAMDISK=${RESTORE_RAMDISK:-}
+RESTORE_HELPER_SOURCE=${RESTORE_HELPER_SOURCE:-}
+RESTORE_RAMDISK_BASE=${RESTORE_RAMDISK_BASE:-$REPO/firmware/ramdisk.dmg}
+RESTORE_RAMDISK_OUT=${RESTORE_RAMDISK_OUT:-$WORK/ramdisk-data-seed.dmg}
 
 die() { echo "!! $*" >&2; exit 1; }
 say() { echo "==> $*"; }
@@ -75,16 +87,55 @@ build_seed_helper() {
         || die "helper build returned success without binary and trustcache"
 }
 
+# ---------------------------------------------------------------- ramdisk helper --
+# A paced UART transfer of the 74 KiB helper expands to roughly 1.5 million
+# transmitted shell bytes and took about 15 minutes after the leading-byte
+# loss workaround.  The helper itself is not secret and the restore ramdisk is
+# an unencrypted, disposable 241 MiB APFS image, so a derived copy is the
+# narrow host-side write path.  The large System/Data container is never
+# attached here.  Every later guest use still requires an independent numeric
+# checksum witness; this phase only prepares transport, it does not prove guest
+# execution.
+phase_ramdisk_helper() {
+    local mnt= src_cksum dst_cksum
+    build_seed_helper
+    [ -f "$RESTORE_RAMDISK_BASE" ] || die "missing restore ramdisk: $RESTORE_RAMDISK_BASE"
+    [ ! -e "$RESTORE_RAMDISK_OUT" ] || die "refusing to overwrite derived ramdisk: $RESTORE_RAMDISK_OUT"
+    mkdir -p "$(dirname "$RESTORE_RAMDISK_OUT")"
+    cp -p "$RESTORE_RAMDISK_BASE" "$RESTORE_RAMDISK_OUT" \
+        || die 'could not copy restore ramdisk'
+    mnt=$("$REPO/tools/rootfs/safe_attach.sh" attach "$RESTORE_RAMDISK_OUT" --owners on) \
+        || die 'could not safely attach derived restore ramdisk'
+    [[ "$mnt" == /Volumes/* ]] && [ -d "$mnt/libexec" ] || {
+        "$REPO/tools/rootfs/safe_attach.sh" detach "$mnt" 2>/dev/null || true
+        die "unexpected restore ramdisk mountpoint/layout: $mnt"
+    }
+    trap '"$REPO/tools/rootfs/safe_attach.sh" detach "$mnt" >/dev/null 2>&1 || true' EXIT INT TERM
+    cp -X "$SEED_HELPER" "$mnt/libexec/dvm_data_seed_helper" \
+        || die 'could not install helper in derived restore ramdisk'
+    chmod 755 "$mnt/libexec/dvm_data_seed_helper" || die 'could not make ramdisk helper executable'
+    xattr -c "$mnt/libexec/dvm_data_seed_helper" 2>/dev/null || true
+    src_cksum=$(cksum "$SEED_HELPER" | awk '{print $1 " " $2}')
+    dst_cksum=$(cksum "$mnt/libexec/dvm_data_seed_helper" | awk '{print $1 " " $2}')
+    [ "$src_cksum" = "$dst_cksum" ] || die "host helper checksum mismatch: $src_cksum != $dst_cksum"
+    sync
+    "$REPO/tools/rootfs/safe_attach.sh" detach "$mnt" || die 'could not detach derived restore ramdisk'
+    trap - EXIT INT TERM
+    say "[ramdisk-helper] image=$RESTORE_RAMDISK_OUT guest=/libexec/dvm_data_seed_helper cksum=$src_cksum"
+}
+
 # Restore-stage transport.  `probe.sh` owns QEMU's lifetime, but its UART log
 # is also the only reliable witness: socket reads drain console bytes.  Every
 # caller supplies an unambiguous tag so cleanup never reaps another agent's VM.
 restore_start() {
     local tag=$1 overlay=$2 stage_tc=$3
     local sock="$WORK/$tag.sock" dt="$WORK/dt_restore.bin"
+    local ramdisk_args=()
     python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$dt" -nvram "$NVRAM" \
         -enable ans -enable smc -enable sep -dram 12G || die "restore dt_fixup failed"
     rm -f "$sock"
-    "$REPO/tools/probe.sh" --dtree "$dt" --tc "$stage_tc" --mem 12G --secs 2400 \
+    [ -z "$RESTORE_RAMDISK" ] || ramdisk_args=(--ramdisk "$RESTORE_RAMDISK")
+    "$REPO/tools/probe.sh" "${ramdisk_args[@]}" --dtree "$dt" --tc "$stage_tc" --mem 12G --secs 2400 \
         --tag "$tag" --uart-socket "$sock" --bootargs "rd=md0 $BOOTARGS_COMMON" \
         -- -drive "if=none,id=ans,file=$overlay,format=qcow2" >/dev/null 2>&1 &
     RESTORE_PID=$!; RESTORE_TAG=$tag; RESTORE_SOCK=$sock
@@ -135,6 +186,29 @@ restore_upload() {
         --remote-path "$remote" --secs 180 --log "$clog" --char-delay "$SERIAL_CHAR_DELAY" >/dev/null \
         || die "$tag helper upload failed"
     grep -qa 'DVM_UPLOAD_FINAL_RC=0' "$slog" || die "$tag upload lacks checksum witness"
+}
+
+# Select a helper and prove that the guest sees the exact binary just built.
+# A ramdisk-resident helper avoids sending ~1.5 MB of paced Base64 shell input,
+# but it is not trusted merely because the host copied it into an image: the
+# numeric guest cksum/size witness is independent of that host-side operation.
+restore_prepare_helper() {
+    local tag=$1 upload_target=$2 expected_cksum expected_bytes command marker
+    if [ -z "$RESTORE_HELPER_SOURCE" ]; then
+        restore_upload "$tag" "$upload_target"
+        RESTORE_HELPER_PATH=$upload_target
+        return
+    fi
+    [ -n "$RESTORE_RAMDISK" ] || die 'RESTORE_HELPER_SOURCE requires RESTORE_RAMDISK'
+    [[ "$RESTORE_HELPER_SOURCE" =~ ^/[A-Za-z0-9_./-]+$ ]] \
+        && [[ "$RESTORE_HELPER_SOURCE" != *'/../'* ]] \
+        || die "unsafe RESTORE_HELPER_SOURCE=$RESTORE_HELPER_SOURCE"
+    set -- $(cksum "$SEED_HELPER")
+    expected_cksum=$1; expected_bytes=$2
+    command="set -- \$(/bin/cksum '$RESTORE_HELPER_SOURCE'); test \"\$1\" = '$expected_cksum' && test \"\$2\" = '$expected_bytes'; rc=\$?; echo DVM_HELPER_SOURCE_RC=\$rc DVM_HELPER_BYTES=\$2"
+    marker="DVM_HELPER_SOURCE_RC=0 DVM_HELPER_BYTES=$expected_bytes"
+    restore_send "$tag" "$command" "$marker"
+    RESTORE_HELPER_PATH=$RESTORE_HELPER_SOURCE
 }
 
 seed_child() {
@@ -338,8 +412,8 @@ phase_copy_data() {
     local parent=${PARENT:?set PARENT to the guest-formatted/User parent} child=${OUT_OVL:?set OUT_OVL to a new qcow path} tag=${TAG:-BOOTSTRAP_COPY_$$} allowed
     build_seed_helper; seed_child "$parent" "$child"; restore_start "$tag" "$child" "$SEED_HELPER_TC"
     restore_send "$tag" 'mount_apfs /dev/disk1s2 /private/var; mkdir -p /private/var/hardware; mount_apfs /dev/disk1s1 /private/var/hardware; echo DVM_COPY_MOUNTS_RC=$?' 'DVM_COPY_MOUNTS_RC=0'
-    restore_upload "$tag" /private/var/.dvm-data-seed/data_seed_helper
-    restore_send "$tag" 'chmod 755 /private/var/.dvm-data-seed/data_seed_helper; /private/var/.dvm-data-seed/data_seed_helper --copy-data /private/var/hardware/private/var /private/var; hrc=$?; sync; src=$?; echo DVM_COPY_SHELL_RC=$hrc DVM_COPY_SYNC_RC=$src' 'DVM_COPY_SHELL_RC=0 DVM_COPY_SYNC_RC=0'
+    restore_prepare_helper "$tag" /private/var/.dvm-data-seed/data_seed_helper
+    restore_send "$tag" "chmod 755 '$RESTORE_HELPER_PATH'; '$RESTORE_HELPER_PATH' --copy-data /private/var/hardware/private/var /private/var; hrc=\$?; sync; src=\$?; echo DVM_COPY_SHELL_RC=\$hrc DVM_COPY_SYNC_RC=\$src" 'DVM_COPY_SHELL_RC=0 DVM_COPY_SYNC_RC=0'
     grep -qa 'DVM_SEED_COPY_DATA_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'copy helper did not finish'
     grep -qa 'DVM_SEED_TIMEZONE_PRECREATE_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'copy helper did not precreate db/timezone/localtime before AKS'
     grep -qa 'DVM_SEED_TIMEZONE_SYMLINK_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'copy helper did not preserve db/timezone/localtime symlink'
@@ -353,8 +427,8 @@ phase_manifest() {
     local parent=${PARENT:?set PARENT} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_MANIFEST_$$}
     build_seed_helper; seed_child "$parent" "$child"; restore_start "$tag" "$child" "$SEED_HELPER_TC"
     restore_send "$tag" 'mount_apfs /dev/disk1s2 /private/var; mkdir -p /private/var/hardware; mount_apfs /dev/disk1s5 /private/var/hardware; echo DVM_MANIFEST_MOUNTS_RC=$?' 'DVM_MANIFEST_MOUNTS_RC=0'
-    restore_upload "$tag" /private/var/.dvm-data-seed/data_seed_helper
-    restore_send "$tag" 'chmod 755 /private/var/.dvm-data-seed/data_seed_helper; /private/var/.dvm-data-seed/data_seed_helper --user-manifest /private/var/hardware/private/var /private/var; hrc=$?; sync; src=$?; echo DVM_MANIFEST_SHELL_RC=$hrc DVM_MANIFEST_SYNC_RC=$src' 'DVM_MANIFEST_SHELL_RC=0 DVM_MANIFEST_SYNC_RC=0'
+    restore_prepare_helper "$tag" /private/var/.dvm-data-seed/data_seed_helper
+    restore_send "$tag" "chmod 755 '$RESTORE_HELPER_PATH'; '$RESTORE_HELPER_PATH' --user-manifest /private/var/hardware/private/var /private/var; hrc=\$?; sync; src=\$?; echo DVM_MANIFEST_SHELL_RC=\$hrc DVM_MANIFEST_SYNC_RC=\$src" 'DVM_MANIFEST_SHELL_RC=0 DVM_MANIFEST_SYNC_RC=0'
     grep -qa 'DVM_SEED_USER_MANIFEST_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'manifest helper did not finish'
     restore_stop
 }
@@ -363,8 +437,8 @@ phase_layout() {
     local parent=${PARENT:?set PARENT} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_LAYOUT_$$}
     build_seed_helper; seed_child "$parent" "$child"; restore_start "$tag" "$child" "$SEED_HELPER_TC"
     restore_send "$tag" 'mount_apfs /dev/disk1s1 /private/var; mkdir -p /private/var/hardware; mount_apfs /dev/disk1s5 /private/var/hardware; echo DVM_LAYOUT_MOUNTS_RC=$?' 'DVM_LAYOUT_MOUNTS_RC=0'
-    restore_upload "$tag" /private/var/hardware/.dvm-data-seed/data_seed_helper
-    restore_send "$tag" 'chmod 755 /private/var/hardware/.dvm-data-seed/data_seed_helper; /private/var/hardware/.dvm-data-seed/data_seed_helper --user-layout /private/var/hardware/private/var /private/var; hrc=$?; sync; src=$?; echo DVM_LAYOUT_SHELL_RC=$hrc DVM_LAYOUT_SYNC_RC=$src' 'DVM_LAYOUT_SHELL_RC=0 DVM_LAYOUT_SYNC_RC=0'
+    restore_prepare_helper "$tag" /private/var/hardware/.dvm-data-seed/data_seed_helper
+    restore_send "$tag" "chmod 755 '$RESTORE_HELPER_PATH'; '$RESTORE_HELPER_PATH' --user-layout /private/var/hardware/private/var /private/var; hrc=\$?; sync; src=\$?; echo DVM_LAYOUT_SHELL_RC=\$hrc DVM_LAYOUT_SYNC_RC=\$src" 'DVM_LAYOUT_SHELL_RC=0 DVM_LAYOUT_SYNC_RC=0'
     grep -qa 'DVM_SEED_USER_LAYOUT_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'layout helper did not finish'
     restore_stop
 }
@@ -373,8 +447,8 @@ phase_marker() {
     local parent=${PARENT:?set PARENT} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_MARKER_$$}
     build_seed_helper; seed_child "$parent" "$child"; restore_start "$tag" "$child" "$SEED_HELPER_TC"
     restore_send "$tag" 'mount_apfs /dev/disk1s2 /private/var; mkdir -p /private/var/hardware; mount_apfs /dev/disk1s1 /private/var/hardware; echo DVM_MARKER_MOUNTS_RC=$?' 'DVM_MARKER_MOUNTS_RC=0'
-    restore_upload "$tag" /private/var/.dvm-data-seed/data_seed_helper
-    restore_send "$tag" 'chmod 755 /private/var/.dvm-data-seed/data_seed_helper; /private/var/.dvm-data-seed/data_seed_helper --final-marker /private/var/hardware/private/var /private/var; hrc=$?; sync; src=$?; test -f /private/var/.dvm-data-seed-complete; mrc=$?; echo DVM_MARKER_SHELL_RC=$hrc DVM_MARKER_SYNC_RC=$src DVM_MARKER_STAT_RC=$mrc' 'DVM_MARKER_SHELL_RC=0 DVM_MARKER_SYNC_RC=0 DVM_MARKER_STAT_RC=0'
+    restore_prepare_helper "$tag" /private/var/.dvm-data-seed/data_seed_helper
+    restore_send "$tag" "chmod 755 '$RESTORE_HELPER_PATH'; '$RESTORE_HELPER_PATH' --final-marker /private/var/hardware/private/var /private/var; hrc=\$?; sync; src=\$?; test -f /private/var/.dvm-data-seed-complete; mrc=\$?; echo DVM_MARKER_SHELL_RC=\$hrc DVM_MARKER_SYNC_RC=\$src DVM_MARKER_STAT_RC=\$mrc" 'DVM_MARKER_SHELL_RC=0 DVM_MARKER_SYNC_RC=0 DVM_MARKER_STAT_RC=0'
     restore_stop
 }
 
@@ -454,6 +528,7 @@ phase_verify() {
 case "$MODE" in
     image)  phase_image ;;
     format) phase_format ;;
+    ramdisk-helper) phase_ramdisk_helper ;;
     seed)   phase_seed ;;
     copy-data) phase_copy_data ;;
     manifest) phase_manifest ;;
@@ -462,5 +537,5 @@ case "$MODE" in
     normal) phase_normal_boot ;;
     verify) phase_verify ;;
     all)    phase_image; phase_format; phase_seed ;;
-    *) die "usage: $0 [all|image|format|seed|copy-data|manifest|layout|marker|normal|verify]" ;;
+    *) die "usage: $0 [all|image|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|normal|verify]" ;;
 esac
