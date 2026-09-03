@@ -1,0 +1,255 @@
+{
+"2": [
+"_IOMobileFramebufferCalibrationToolboxCommand"
+],
+"3": [
+"_IOMobileFramebufferCalibrationToolboxCommand",
+"_kern_DisplayWallEnumerate",
+"_kern_GetLayerDefaultSurface"
+],
+"4": [
+"_IOMobileFramebufferCalibrationToolboxCommand",
+"_kern_DisplayWallValidateConfig",
+"_kern_SwapBegin"
+],
+"5": [
+"_IOMobileFramebufferCalibrationToolboxCommand",
+"_kern_DisplayWallEnable",
+"_kern_SwapEnd"
+],
+"6": [
+"_kern_DisplayWallDisable",
+"_kern_SwapWait",
+"_kern_SwapWaitWithTimeout"
+],
+"7": [
+"_kern_DisplayWallStatus",
+"_kern_GetID"
+],
+"8": [
+"_kern_DisplayMappingGet",
+"_kern_GetDisplaySize"
+],
+"9": [
+"_kern_DisplayMappingSet"
+],
+"10": [
+"_kern_DisplayResourcesAllocationGet",
+"_kern_SetTVOutMode"
+],
+"11": [
+"_kern_DisplayResourcesAllocationSet",
+"_kern_SetWSSInfo"
+],
+"12": [
+"_kern_DisplayResourcesValidateAllocationSet",
+"_kern_RequestPowerChange"
+],
+"13": [
+"_kern_DisplayResourcesAllocationGetV2",
+"_kern_EnableStatistics"
+],
+"14": [
+"_kern_DisplayCapabilitiesGet",
+"_kern_SetFlags"
+],
+"15": [
+"_kern_DisplayResourcesValidateAllocationSetEx",
+"_kern_SetDebugFlags"
+],
+"16": [
+"_kern_DisplayReconfigComplete",
+"_kern_SetTVOutSignalType"
+],
+"17": [
+"_kern_DisplayRearrange",
+"_kern_SetGammaTable"
+],
+"18": [
+"_IOMobileFramebufferIsMainDisplay"
+],
+"19": [
+"_kern_SetWhiteOnBlackMode"
+],
+"20": [
+"_kern_SwapSignal"
+],
+"22": [
+"_kern_SetDisplayDevice"
+],
+"23": [
+"_kern_SetDigitalOutMode"
+],
+"24": [
+"_kern_GetHDCPDownstreamState"
+],
+"25": [
+"_kern_GetDigitalOutState"
+],
+"26": [
+"_kern_printDisplayRegs"
+],
+"27": [
+"_kern_GetGammaTable"
+],
+"28": [
+"_kern_GetDotPitch"
+],
+"29": [
+"_kern_GetDisplayArea"
+],
+"30": [
+"_kern_EnableDisableDithering"
+],
+"31": [
+"_kern_SetUnderrunColor"
+],
+"33": [
+"_kern_EnableDisableVideoPowerSavings"
+],
+"34": [
+"_kern_SetVideoDACGain"
+],
+"35": [
+"_kern_SetLine21Data"
+],
+"41": [
+"_IOMobileFramebufferEnableMirroring"
+],
+"42": [
+"_IOMobileFramebufferEnableMirroring"
+],
+"43": [
+"_IOMobileFramebufferSetRenderingAngle"
+],
+"44": [
+"_IOMobileFramebufferSetMirrorContentRegion"
+],
+"47": [
+"_kern_HDCPSendRequest"
+],
+"48": [
+"_kern_HDCPGetReply"
+],
+"49": [
+"_kern_SurfaceIsReplaceable"
+],
+"50": [
+"_kern_SetBrightnessCorrection"
+],
+"51": [
+"_kern_SetColorRemapMode"
+],
+"52": [
+"_kern_SwapCancel"
+],
+"53": [
+"_IOMobileFramebufferSetCanvasSize"
+],
+"54": [
+"_IOMobileFramebufferGetMatrix"
+],
+"55": [
+"_IOMobileFramebufferSetMatrix"
+],
+"56": [
+"_IOMobileFramebufferKernelTests"
+],
+"57": [
+"_kern_GetColorRemapMode"
+],
+"66": [
+"_kern_SPLCSetBrightness"
+],
+"67": [
+"_kern_SPLCGetBrightness"
+],
+"68": [
+"_kern_SetParameter"
+],
+"69": [
+"_kern_SwapSetColorMatrix"
+],
+"72": [
+"_kern_DisableNotifications",
+"_kern_EnableNotifications"
+],
+"73": [
+"_kern_ChangeFrameInfo"
+],
+"74": [
+"_kern_SupportedFrameInfo"
+],
+"75": [
+"_kern_FactoryPortal"
+],
+"77": [
+"_kern_GetCurrentAbsoluteTime"
+],
+"78": [
+"_kern_SetBlock"
+],
+"79": [
+"_kern_GetBlock"
+],
+"80": [
+"_kern_GetLinkQuality"
+],
+"81": [
+"_kern_SwapCancelAll"
+],
+"82": [
+"_kern_GetProtectionOptions"
+],
+"83": [
+"_kern_CopyLayerDisplayedSurface"
+],
+"84": [
+"_kern_SetContrast"
+],
+"85": [
+"_kern_GetBufBlock"
+],
+"86": [
+"_kern_SwapSetSecureAnimation"
+],
+"87": [
+"_iomfb_AnnounceNextSwapTimestamp"
+],
+"88": [
+"_IOMobileFramebufferOpenByName"
+],
+"89": [
+"_kern_SetClamshellState"
+],
+"90": [
+"_kern_GetDotPitchFloat"
+],
+"91": [
+"_kern_SwapGetCurrent"
+],
+"92": [
+"_kern_SwapCancelAllGetCurrent"
+],
+"93": [
+"_kern_StartTask"
+],
+"94": [
+"_kern_AbortTask"
+],
+"95": [
+"_kern_CheckTaskStatus"
+],
+"96": [
+"_kern_GetBlockSize"
+],
+"97": [
+"_kern_AbortBlock"
+],
+"98": [
+"_kern_GetLPRFrameTimestamp"
+],
+"99": [
+"_IOMobileFramebufferSwapSetGainMap"
+]
+}

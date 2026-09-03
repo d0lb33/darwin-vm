@@ -125,3 +125,35 @@ bug on a beta OS. We trigger it; we can avoid it.
   Prefer copying the wanted subtree into a fresh volume.
 - Keep at most one 21 GB clone alive at a time, and watch free space: the host
   Data volume was at 93% during both panics, which is where APFS gets fragile.
+
+## The persistent-NVMe parent, and the second wipe (2026-09-03)
+
+The host rebooted at 13:14 on 2026-09-03 and `/tmp/dvm` went with it, including
+the persistent Data/User parent `sks-op09-complete-2.qcow2` and its entire
+qcow2 chain, the probe logs, and the device tree. Two things made that cheap:
+
+- **The chain is a script now.** `tools/rootfs/rebuild_persistent_parent.sh`
+  runs `format → ramdisk-helper → copy-data → manifest → layout → marker →
+  normal ×2` from the surviving base disk
+  `~/dvm-artifacts/build/rootfs_cx_dual_roles.dmg` and leaves the result linked
+  at `/tmp/dvm/data-seed/persistent-parent.qcow2`. Measured on the first rerun:
+  format 27 s, ramdisk-helper 8 s, copy-data 106 s, manifest / layout / marker
+  about 22 s each; the normal boots are bounded by `BOOT1_SECS` / `BOOT2_SECS`.
+  Every stage is a fresh child, so a failed stage is rerun with `START_AT=`.
+- **The device tree is one line**, recorded here because it was only in a
+  session log before:
+
+  ```bash
+  ipsw img4 im4p extract --output /tmp/dvm/dtree_raw ipsw_db/24A5430a__iPhone17,3/DeviceTree.d47ap.im4p
+  python3 dt_fixup.py /tmp/dvm/dtree_raw /tmp/dvm/data-seed/dt_nvme_welcome.bin \
+      -nvram nvram.bin -enable ans -enable smc -enable sep -enable dcp -dram 12G
+  ```
+
+  `-dram 12G` means every boot of it needs `--mem 12G`.
+
+There is also a fast path that did not work from here: macOS keeps local
+Time Machine APFS snapshots (`tmutil listlocalsnapshots /`), and the 10:39
+snapshot that day still held all of `/private/tmp/dvm`. `mount_apfs -s` and
+the auto-mounted `/Volumes/com.apple.TimeMachine.localsnapshots` both refuse
+a shell without Full Disk Access, so recovering that way needs a terminal
+granted that privilege. Rebuilding took less time than arranging it.
