@@ -45,11 +45,32 @@ proves that returning an acceptable device-state value is required before
 credential-manager startup can complete.  Selectors 17 and 35 are co-occurring
 users of the same codec; their process-level semantics remain unverified.
 
+### Dynamic rejection witness (not a transport timeout)
+
+An isolated `DARWIN_SEP_DEBUG=1` child, `SKS_USERSEL_OP19_DYN_1`, captured an
+actual selector-7 request: its body ends
+`58 99 67 c0 9f 7b 1c a2 fa ff ff ff 00 00 00 00`, i.e. context
+`0xa21c7b9fc0679958`, state `-6`, and trailing zero
+(`/tmp/dvm/probe/SKS_USERSEL_OP19_DYN_1.stderr.log:458-468`).  It accepted
+the existing 84-byte `{2,0}` response at the SEP transport, but an LLDB
+breakpoint immediately after generated codec `fcn.fffffff00957c36c` returned
+to its caller at runtime `0xfffffff029547424` with `x0 = 0xe00002bc`
+(`/tmp/dvm/SKS_USERSEL_OP19_DYN_1.lldb.log`, breakpoint 1).  This establishes
+that the bad argument originates in the guest's op-19 codec/callback decode,
+not in the serial path, an endpoint timeout, or an unobserved request shape.
+
+There is a useful but **non-authoritative** comparison in the checked-out
+reference `sep-sim.c:919-950`: its older `0x19` reply is a 16-byte payload
+`{u32 selector=0, u32 blob_length=8, byte blob[8]}` and its source labels that
+blob as a guessed DER value.  That is evidence that a selector-0 blob union is
+a plausible alternate arm; it is not an implementable iOS-27 value until the
+iOS-27 decoder is observed accepting it.
+
 ## Implementation boundary
 
 An implementer may retain the existing authenticated IPC-v1 envelope and the
-`0x19` request parser, but must not treat scalar zero as a demonstrated device
-state.  Instrument the generated response callback beginning at
+`0x19` request parser, but must remove the claim that `{selector=2,scalar=0}`
+is a valid response: the dynamic return witness disproves it.  Instrument the generated response callback beginning at
 `0xfffffff009547544` (runtime address plus the kernel slide), log the decoded
 selector and scalar, and run a two-value response sweep only on an isolated
 child.  For `0x3d`, first capture the request body and stop in
@@ -60,6 +81,6 @@ reply would repeat the already disproved no-op pattern.
 
 | Question | Observation that would settle it |
 |---|---|
-| Which scalar value makes the selector-7 device-state method return success? | Break after the `0x19` response is decoded in `fcn.fffffff009547360`/its callback, record the decoded scalar and return value for a real reply candidate, then show `ACMTRM: _currentDeviceStateFromKeybag` succeeds in the serial log. |
+| Which response-union arm and payload make selector 7 succeed? | Break after the `0x19` response is decoded in `fcn.fffffff009547360`/its callback, record the union discriminator and decoded value for a candidate, then show `ACMTRM: _currentDeviceStateFromKeybag` succeeds in the serial log. The present selector-2/scalar-zero arm is ruled out by `SKS_USERSEL_OP19_DYN_1.lldb.log`. |
 | Are selectors 17 and 35 independently required for SpringBoard/Welcome? | With selector 7 cleared, compare a reproducible boot where each public-method error disappears against process evidence for `SpringBoard`/Setup Assistant and a rendered frame. |
 | What is the exact `0x3d` payload and reply union for selector 68? | Run one `DARWIN_SEP_DEBUG=1` isolated child and record the raw authenticated request, then break at the codec's response decoder; require both an echoed wire capture and a successful public selector-68 return. |
