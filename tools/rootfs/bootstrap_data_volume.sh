@@ -37,7 +37,7 @@
 #      pipeline can already populate Data.
 #
 # Usage:
-#   tools/rootfs/bootstrap_data_volume.sh [all|image|format|seed|verify]
+#   tools/rootfs/bootstrap_data_volume.sh [all|image|format|seed|copy-data|manifest|layout|marker|normal|verify]
 #
 # Env:
 #   SRC   cryptex-merged system volume  (default ~/dvm-artifacts/build/rootfs_cx.dmg)
@@ -55,9 +55,94 @@ TC=${TC:-$HOME/dvm-artifacts/tc/merged_sysvol_cryptex_tc.bin}
 WORK=${WORK:-/tmp/dvm/bootstrap}
 QEMU_IMG="$REPO/qemu-sptm/build/qemu-img"
 BOOTARGS_COMMON='ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort'
+SERIAL_CHAR_DELAY=${SERIAL_CHAR_DELAY:-0.002}
+# The seeder is built and trusted only for disposable restore boots.  It is
+# uploaded through the UART; neither this script nor its helpers attach an
+# image on the host.  Keep the output under WORK so a rerun cannot mistake a
+# binary from another checkout for the current source.
+SEED_HELPER=${SEED_HELPER:-$WORK/data_seed_helper}
+SEED_HELPER_TC=${SEED_HELPER_TC:-$WORK/data_seed_helper.tc}
 
 die() { echo "!! $*" >&2; exit 1; }
 say() { echo "==> $*"; }
+
+build_seed_helper() {
+    say "[seed] build/sign helper and a disposable restore trustcache"
+    make -C "$REPO/tools/rootfs" data-seed-helper-tc \
+        OUT="$SEED_HELPER" HELPER_TC="$SEED_HELPER_TC" REPO="$REPO" \
+        || die "could not build the restore-only data seeder"
+    [ -s "$SEED_HELPER" ] && [ -s "$SEED_HELPER_TC" ] \
+        || die "helper build returned success without binary and trustcache"
+}
+
+# Restore-stage transport.  `probe.sh` owns QEMU's lifetime, but its UART log
+# is also the only reliable witness: socket reads drain console bytes.  Every
+# caller supplies an unambiguous tag so cleanup never reaps another agent's VM.
+restore_start() {
+    local tag=$1 overlay=$2 stage_tc=$3
+    local sock="$WORK/$tag.sock" dt="$WORK/dt_restore.bin"
+    python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$dt" -nvram "$NVRAM" \
+        -enable ans -enable smc -enable sep -dram 12G || die "restore dt_fixup failed"
+    rm -f "$sock"
+    "$REPO/tools/probe.sh" --dtree "$dt" --tc "$stage_tc" --mem 12G --secs 2400 \
+        --tag "$tag" --uart-socket "$sock" --bootargs "rd=md0 $BOOTARGS_COMMON" \
+        -- -drive "if=none,id=ans,file=$overlay,format=qcow2" >/dev/null 2>&1 &
+    RESTORE_PID=$!; RESTORE_TAG=$tag; RESTORE_SOCK=$sock
+    # Every failing stage exits through die(); keep that from leaking the
+    # probe-launched QEMU subshell.  restore_stop disarms this after normal
+    # completion, before a later unrelated phase can inherit the tag.
+    trap 'restore_stop' EXIT INT TERM
+    local log=/tmp/dvm/probe/$tag.serial.log waited=0
+    say "[restore] tag=$tag serial=$log socket=$sock"
+    while (( waited < 180 )); do
+        [ -S "$sock" ] && grep -qa "can't access tty" "$log" 2>/dev/null && return 0
+        grep -qa 'panic(cpu' "$log" 2>/dev/null && die "$tag panicked before shell; see $log"
+        sleep 3; waited=$((waited+3))
+    done
+    die "$tag did not reach restore shell; see $log"
+}
+
+restore_stop() {
+    [ -n "${RESTORE_PID:-}" ] && kill "$RESTORE_PID" 2>/dev/null || true
+    [ -n "${RESTORE_TAG:-}" ] && pkill -f "$RESTORE_TAG" 2>/dev/null || true
+    RESTORE_PID= RESTORE_TAG= RESTORE_SOCK=
+    trap - EXIT INT TERM
+}
+
+restore_send() {
+    local tag=$1 command=$2 marker=$3
+    local clog="$WORK/$tag.console.log" slog=/tmp/dvm/probe/$tag.serial.log waited=0
+    python3 "$REPO/tools/serial.py" "$RESTORE_SOCK" send "$command" --secs 180 \
+        --log "$clog" --char-delay "$SERIAL_CHAR_DELAY" >/dev/null || die "$tag serial transport rejected command"
+    # serial.py verifies the echoed command, but its idle drain is deliberately
+    # short.  newfs_apfs and APFS key work can be quiet longer than that; the
+    # QEMU logfile is the durable guest->host witness, so poll it rather than
+    # treating a quiet socket as command completion.
+    while (( waited < ${RESTORE_STAGE_TIMEOUT:-240} )); do
+        grep -Fqa -- "$marker" "$slog" && return 0
+        grep -qa 'panic(cpu' "$slog" && die "$tag panicked; see first panic(cpu in $slog"
+        [ -S "$RESTORE_SOCK" ] || die "$tag UART disappeared before witness '$marker'"
+        kill -0 "$RESTORE_PID" 2>/dev/null || die "$tag probe died before witness '$marker'"
+        sleep 3; waited=$((waited+3))
+    done
+    die "$tag missing witness '$marker' after ${RESTORE_STAGE_TIMEOUT:-240}s; see $slog"
+}
+
+restore_upload() {
+    local tag=$1 remote=$2
+    local clog="$WORK/$tag.console.log" slog=/tmp/dvm/probe/$tag.serial.log
+    python3 "$REPO/tools/serial.py" "$RESTORE_SOCK" upload "$SEED_HELPER" \
+        --remote-path "$remote" --secs 180 --log "$clog" --char-delay "$SERIAL_CHAR_DELAY" >/dev/null \
+        || die "$tag helper upload failed"
+    grep -qa 'DVM_UPLOAD_FINAL_RC=0' "$slog" || die "$tag upload lacks checksum witness"
+}
+
+seed_child() {
+    local parent=$1 child=$2
+    [ ! -e "$child" ] || die "refusing to reuse stage overlay $child"
+    "$QEMU_IMG" create -f qcow2 -F qcow2 -b "$parent" "$child" >/dev/null \
+        || die "could not create child $child"
+}
 
 mkdir -p "$WORK"
 [ -f "$SRC" ] || die "missing source image: $SRC"
@@ -187,6 +272,23 @@ phase_format() {
     [ "$rc" = "0" ] || die "newfs_apfs did not report success (rc=${rc:-none}); see $slog"
     (( after > before )) || die "newfs_apfs reported success but wrote nothing to $OVL -- a real format writes a superblock"
     say "[format] verified: the encrypted Data volume is in $OVL"
+
+    # UMLManager requires exactly one APFS role-User volume; mobile_obliterator
+    # creates it with this guest-only command before primary-user layout.
+    before=$after
+    python3 "$REPO/tools/serial.py" "$sock" send \
+        '/sbin/newfs_apfs -A -P -v User -R u -D /dev/disk1; echo USER_NEWFS_RC=$?' \
+        --secs 180 --log "$clog" | tail -5
+    waited=0; rc=""
+    while (( waited < 180 )); do
+        rc=$(grep -ao 'USER_NEWFS_RC=[0-9]\+' "$slog" 2>/dev/null | tail -1 | cut -d= -f2)
+        [ -n "$rc" ] && break; sleep 3; waited=$((waited+3))
+    done
+    after=$(stat -f%z "$OVL")
+    [ "$rc" = "0" ] || die "User role creation failed (rc=${rc:-none}); see $slog"
+    (( after > before )) || die "User role creation wrote nothing to $OVL"
+    grep -qa 'disk1s5 mount\|volume User\|role.*User' "$slog" 2>/dev/null || true
+
     cleanup_format
     trap - EXIT INT TERM
 }
@@ -199,6 +301,20 @@ phase_format() {
 phase_seed() {
     [ -f "$OVL" ] || die "no overlay; run the image and format phases first"
     local dt="$WORK/dt_sysvol.bin"
+    # The real-volume continuation deliberately runs in independent restore
+    # boots: (A) Data+User creates/updates the primary-user manifest; (B)
+    # System-at-var+User-at-hardware calls the opaque UML layout selector; and
+    # (C) Data+System writes/fsyncs the completion marker.  A restore sandbox
+    # denies the production alt_root User target, and /bin/sh has no umount,
+    # so combining B with A would be a silent namespace substitution.  Each
+    # stage must therefore use a fresh qcow child, a UART upload checksum,
+    # its numeric helper RC, and the accumulating probe serial log as
+    # witnesses.  Transport is only valid in its upload/execute/cleanup
+    # restore boot: encrypted Data inodes can be unwrappable after reboot,
+    # and the restore ramdisk's /tmp is read-only.
+    # build_seed_helper is intentionally before any guest starts: rebuilding a
+    # trustcache or helper while a VM is live would invalidate its evidence.
+    build_seed_helper
     say "[seed] device tree: no -ephemeral-data, encrypted Data keybag active"
     python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$dt" -nvram "$NVRAM" \
         -enable ans -enable smc -enable sep -dram 12G \
@@ -212,6 +328,85 @@ phase_seed() {
     # its logs.  Do not let either a dead guest or a Data mount with no copies
     # make an unseeded volume look successful.
     EXPECT_SEED=required phase_verify
+}
+
+# ---------------------------------------------------------------- staged seed --
+# These stages are intentionally separately invocable.  A successful stage is
+# a new child overlay, never a mutation of its parent; callers pass PARENT and
+# OUT_OVL explicitly to make reruns and review of each boundary deterministic.
+phase_copy_data() {
+    local parent=${PARENT:?set PARENT to the guest-formatted/User parent} child=${OUT_OVL:?set OUT_OVL to a new qcow path} tag=${TAG:-BOOTSTRAP_COPY_$$} allowed
+    build_seed_helper; seed_child "$parent" "$child"; restore_start "$tag" "$child" "$SEED_HELPER_TC"
+    restore_send "$tag" 'mount_apfs /dev/disk1s2 /private/var; mkdir -p /private/var/hardware; mount_apfs /dev/disk1s1 /private/var/hardware; echo DVM_COPY_MOUNTS_RC=$?' 'DVM_COPY_MOUNTS_RC=0'
+    restore_upload "$tag" /private/var/.dvm-data-seed/data_seed_helper
+    restore_send "$tag" 'chmod 755 /private/var/.dvm-data-seed/data_seed_helper; /private/var/.dvm-data-seed/data_seed_helper --copy-data /private/var/hardware/private/var /private/var; hrc=$?; sync; src=$?; echo DVM_COPY_SHELL_RC=$hrc DVM_COPY_SYNC_RC=$src' 'DVM_COPY_SHELL_RC=0 DVM_COPY_SYNC_RC=0'
+    grep -qa 'DVM_SEED_COPY_DATA_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'copy helper did not finish'
+    grep -qa 'DVM_SEED_TIMEZONE_PRECREATE_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'copy helper did not precreate db/timezone/localtime before AKS'
+    grep -qa 'DVM_SEED_TIMEZONE_SYMLINK_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'copy helper did not preserve db/timezone/localtime symlink'
+    allowed=$(grep -ao 'DVM_SEED_ALLOWED_COPY_ERRORS=[0-9]\+' "/tmp/dvm/probe/$tag.serial.log" | tail -1 | cut -d= -f2)
+    [ -n "$allowed" ] || die 'copy helper did not report restore-sandbox allowlist count'
+    say "[copy] allowed restore-sandbox copy errors=$allowed"
+    restore_stop
+}
+
+phase_manifest() {
+    local parent=${PARENT:?set PARENT} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_MANIFEST_$$}
+    build_seed_helper; seed_child "$parent" "$child"; restore_start "$tag" "$child" "$SEED_HELPER_TC"
+    restore_send "$tag" 'mount_apfs /dev/disk1s2 /private/var; mkdir -p /private/var/hardware; mount_apfs /dev/disk1s5 /private/var/hardware; echo DVM_MANIFEST_MOUNTS_RC=$?' 'DVM_MANIFEST_MOUNTS_RC=0'
+    restore_upload "$tag" /private/var/.dvm-data-seed/data_seed_helper
+    restore_send "$tag" 'chmod 755 /private/var/.dvm-data-seed/data_seed_helper; /private/var/.dvm-data-seed/data_seed_helper --user-manifest /private/var/hardware/private/var /private/var; hrc=$?; sync; src=$?; echo DVM_MANIFEST_SHELL_RC=$hrc DVM_MANIFEST_SYNC_RC=$src' 'DVM_MANIFEST_SHELL_RC=0 DVM_MANIFEST_SYNC_RC=0'
+    grep -qa 'DVM_SEED_USER_MANIFEST_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'manifest helper did not finish'
+    restore_stop
+}
+
+phase_layout() {
+    local parent=${PARENT:?set PARENT} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_LAYOUT_$$}
+    build_seed_helper; seed_child "$parent" "$child"; restore_start "$tag" "$child" "$SEED_HELPER_TC"
+    restore_send "$tag" 'mount_apfs /dev/disk1s1 /private/var; mkdir -p /private/var/hardware; mount_apfs /dev/disk1s5 /private/var/hardware; echo DVM_LAYOUT_MOUNTS_RC=$?' 'DVM_LAYOUT_MOUNTS_RC=0'
+    restore_upload "$tag" /private/var/hardware/.dvm-data-seed/data_seed_helper
+    restore_send "$tag" 'chmod 755 /private/var/hardware/.dvm-data-seed/data_seed_helper; /private/var/hardware/.dvm-data-seed/data_seed_helper --user-layout /private/var/hardware/private/var /private/var; hrc=$?; sync; src=$?; echo DVM_LAYOUT_SHELL_RC=$hrc DVM_LAYOUT_SYNC_RC=$src' 'DVM_LAYOUT_SHELL_RC=0 DVM_LAYOUT_SYNC_RC=0'
+    grep -qa 'DVM_SEED_USER_LAYOUT_RC=0' "/tmp/dvm/probe/$tag.serial.log" || die 'layout helper did not finish'
+    restore_stop
+}
+
+phase_marker() {
+    local parent=${PARENT:?set PARENT} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_MARKER_$$}
+    build_seed_helper; seed_child "$parent" "$child"; restore_start "$tag" "$child" "$SEED_HELPER_TC"
+    restore_send "$tag" 'mount_apfs /dev/disk1s2 /private/var; mkdir -p /private/var/hardware; mount_apfs /dev/disk1s1 /private/var/hardware; echo DVM_MARKER_MOUNTS_RC=$?' 'DVM_MARKER_MOUNTS_RC=0'
+    restore_upload "$tag" /private/var/.dvm-data-seed/data_seed_helper
+    restore_send "$tag" 'chmod 755 /private/var/.dvm-data-seed/data_seed_helper; /private/var/.dvm-data-seed/data_seed_helper --final-marker /private/var/hardware/private/var /private/var; hrc=$?; sync; src=$?; test -f /private/var/.dvm-data-seed-complete; mrc=$?; echo DVM_MARKER_SHELL_RC=$hrc DVM_MARKER_SYNC_RC=$src DVM_MARKER_STAT_RC=$mrc' 'DVM_MARKER_SHELL_RC=0 DVM_MARKER_SYNC_RC=0 DVM_MARKER_STAT_RC=0'
+    restore_stop
+}
+
+phase_normal_boot() {
+    local parent=${PARENT:?set PARENT to marker child} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_NORMAL}
+    say "[normal] parent=$parent child=$child tag=$tag"
+    seed_child "$parent" "$child"
+    python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$WORK/dt_sysvol.bin" -nvram "$NVRAM" \
+        -enable ans -enable smc -enable sep -dram 12G || die "normal boot dt_fixup failed"
+    "$REPO/tools/probe.sh" --dtree "$WORK/dt_sysvol.bin" --tc "$TC" --mem 12G \
+        --secs "${NORMAL_BOOT_SECS:-600}" \
+        --tag "$tag" --bootargs "rootdev=disk1s1 $BOOTARGS_COMMON" \
+        -- -drive "if=none,id=ans,file=$child,format=qcow2" | tail -8
+    local log=/tmp/dvm/probe/$tag.serial.log copies early panics preboot hardware root data data_crypto user
+    copies=$(grep -ac 'Copying ' "$log" 2>/dev/null || true); early=$(grep -ac 'Early boot complete' "$log" 2>/dev/null || true); panics=$(grep -ac 'panic(cpu' "$log" 2>/dev/null || true)
+    preboot=$(grep -ac 'mount-complete volume Preboot' "$log" 2>/dev/null || true); hardware=$(grep -ac 'mount-complete volume Hardware' "$log" 2>/dev/null || true)
+    root=$(grep -ac 'BSD root: disk1s1' "$log" 2>/dev/null || true)
+    data=$(grep -ac '/dev/disk1s2 on /private/var .*protect' "$log" 2>/dev/null || true)
+    data_crypto=$(grep -ac 'handle_mount:893: disk1s2 .*encrypted' "$log" 2>/dev/null || true)
+    user=$(grep -ac 'disk1s5 mount-complete volume User' "$log" 2>/dev/null || true)
+    (( root > 0 )) || die "$tag did not root from disk1s1"
+    (( data > 0 && data_crypto > 0 )) || die "$tag did not mount encrypted/protect Data disk1s2 on /private/var"
+    (( user > 0 )) || die "$tag did not recognize/mount role-User disk1s5"
+    (( copies == 0 )) || die "$tag copied template files; persistent Data was not used"
+    (( early > 0 )) || die "$tag did not reach Early boot complete"
+    if (( panics > 0 )); then
+        grep -m1 -A3 'panic(cpu' "$log" >&2 || true
+        die "$tag panicked; see first panic(cpu in $log"
+    fi
+    (( preboot > 0 )) || die "$tag did not enumerate/mount role-Preboot"
+    (( hardware > 0 )) || die "$tag did not enumerate/mount role-Hardware"
+    say "[normal] verified child=$child; use PARENT=$child with a distinct OUT_OVL for cold boot #2"
 }
 
 # ---------------------------------------------------------------- verify -----
@@ -260,7 +455,12 @@ case "$MODE" in
     image)  phase_image ;;
     format) phase_format ;;
     seed)   phase_seed ;;
+    copy-data) phase_copy_data ;;
+    manifest) phase_manifest ;;
+    layout) phase_layout ;;
+    marker) phase_marker ;;
+    normal) phase_normal_boot ;;
     verify) phase_verify ;;
     all)    phase_image; phase_format; phase_seed ;;
-    *) die "usage: $0 [all|image|format|seed|verify]" ;;
+    *) die "usage: $0 [all|image|format|seed|copy-data|manifest|layout|marker|normal|verify]" ;;
 esac

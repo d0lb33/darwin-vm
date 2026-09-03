@@ -27,6 +27,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/attr.h>
+#include <sys/mount.h>
 #include <sys/types.h>
 #include <sys/xattr.h>
 #include <unistd.h>
@@ -36,9 +38,14 @@
 #define PROBE_DIR "/private/var/.dvm-data-seed-probe"
 #define STAGING_DIR "/private/var/.dvm-data-seed"
 #define STAGING_HELPER "/private/var/.dvm-data-seed/data_seed_helper"
-#define COMPLETE_MARKER "/private/var/root/.dvm-data-seed-complete"
+#define COMPLETE_MARKER "/private/var/.dvm-data-seed-complete"
+#define USER_MOUNT "/private/var/hardware"
+#define USER_DEVICE "/dev/disk1s5"
+#define SYSTEM_MOUNT "/private/var"
 #define SYSTEMBAG_PATH DATA_MOUNT "/keybags/systembag.kb"
 #define SYSTEMBAG_WRITING_PATH DATA_MOUNT "/keybags/systembag.kb.writing"
+#define TIMEZONE_DIR_REL "db/timezone"
+#define TIMEZONE_LOCALTIME_REL TIMEZONE_DIR_REL "/localtime"
 #define CF_STRING_ENCODING_UTF8 0x08000100U
 #define DIAG_XATTR_FLAGS (XATTR_NOFOLLOW | XATTR_SHOWCOMPRESSION)
 
@@ -51,6 +58,14 @@ typedef CFStringRef (*cf_string_fn)(const void *, const char *, unsigned int);
 typedef void (*cf_release_fn)(const void *);
 typedef unsigned char (*uml_create_fn)(CFStringRef, CFStringRef, CFOptionFlags,
                                        CFErrorRef *);
+typedef void *objc_id;
+typedef void *objc_sel;
+typedef objc_id (*objc_send0_fn)(objc_id, objc_sel);
+typedef objc_id (*objc_send_create_fn)(objc_id, objc_sel, objc_id, void **);
+typedef unsigned char (*objc_send_update_fn)(objc_id, objc_sel, objc_id, objc_id, objc_id, objc_id, objc_id, void **);
+typedef unsigned char (*objc_send_layout_fn)(objc_id, objc_sel, objc_id, objc_id, void **);
+typedef unsigned long (*objc_send_ulong_fn)(objc_id, objc_sel);
+typedef const char *(*objc_send_cstr_fn)(objc_id, objc_sel);
 
 struct apis {
     aks_bootstrap_fs_fn aks_bootstrap_fs;
@@ -62,9 +77,11 @@ struct apis {
 
 struct copy_context {
     const char *skip_source;
+    const char *skip_timezone_source;
     const char *tag;
     int diagnostic;
     int abort_on_error;
+    int allow_sandbox_errors;
     int saw_error;
     int error_what;
     int error_stage;
@@ -74,6 +91,7 @@ struct copy_context {
     char error_source[1024];
     char error_destination[1024];
     unsigned long files;
+    unsigned long allowed_errors;
 };
 
 static void fail(const char *stage) {
@@ -86,6 +104,33 @@ static void fail_rc(const char *stage, int rc) {
     fprintf(stderr, "DVM_SEED_%s_RC=%d\n", stage, rc);
     fflush(stderr);
     exit(1);
+}
+
+/* This is only used on a failed UMLManager query.  The fixed prototypes keep
+ * the Objective-C arguments in x0/x1 (rather than the stack, as the old
+ * variadic objc_msgSend declaration did).  Report the NSError before deciding
+ * whether its nil result is merely "no existing primary user". */
+static void report_nserror(const char *stage, objc_id error, void *raw_send,
+                           void *(*sel)(const char *)) {
+    objc_send0_fn send0 = (objc_send0_fn)raw_send;
+    objc_send_ulong_fn send_ulong = (objc_send_ulong_fn)raw_send;
+    objc_send_cstr_fn send_cstr = (objc_send_cstr_fn)raw_send;
+    objc_id domain, description;
+    const char *domain_text = NULL, *description_text = NULL;
+    if (!error) {
+        printf("DVM_SEED_%s_ERROR_PRESENT=0\n", stage);
+        fflush(stdout);
+        return;
+    }
+    domain = send0(error, sel("domain"));
+    description = send0(error, sel("localizedDescription"));
+    if (domain) domain_text = send_cstr(domain, sel("UTF8String"));
+    if (description) description_text = send_cstr(description, sel("UTF8String"));
+    printf("DVM_SEED_%s_ERROR_PRESENT=1 CODE=%lu DOMAIN=%s DESCRIPTION=%s\n",
+           stage, send_ulong(error, sel("code")),
+           domain_text ? domain_text : "<unavailable>",
+           description_text ? description_text : "<unavailable>");
+    fflush(stdout);
 }
 
 static int exact(const char *got, const char *want) {
@@ -122,11 +167,14 @@ static void require_empty_data(const char *dest) {
     if (closedir(dir)) fail("DEST_CLOSE");
 }
 
-/* serial.py can only upload below this narrow staging directory.  Delete the
- * executable after all of our libraries are loaded so it cannot become an
- * accidental, persistent part of the seeded volume. */
+/* Transport lives below Data only for one restore boot: protected inodes may
+ * not unwrap after a reboot, while the restore ramdisk's /tmp is read-only.
+ * The uploader removes this exact target before each transfer; make its
+ * post-marker cleanup idempotent for a same-boot upload/execute/cleanup
+ * lifecycle.  Only --final-marker reaches it after its durable marker check. */
 static void remove_staging_helper(void) {
-    if (unlink(STAGING_HELPER) || rmdir(STAGING_DIR)) fail("STAGING_CLEANUP");
+    if (unlink(STAGING_HELPER) && errno != ENOENT) fail("STAGING_CLEANUP_UNLINK");
+    if (rmdir(STAGING_DIR) && errno != ENOENT) fail("STAGING_CLEANUP_RMDIR");
     printf("DVM_SEED_STAGING_CLEANUP_RC=0\n");
 }
 
@@ -212,6 +260,31 @@ static void initialise_data(const struct apis *a, const char *dest) {
     fflush(stdout);
 }
 
+/* These are the only restore-sandbox denials classified in the guest.  They
+ * are empty or placeholder template directories (apart from the absent/
+ * dangling Lockdown source), so allowing any broader prefix would hide a
+ * real copy omission.  OOPJit has its 58-byte regular `anchor` child, and a
+ * denied directory cannot exist for copyfile to create its children; permit
+ * only the exact root or a slash-bounded descendant of each classified root. */
+static int allowed_sandbox_copy_destination(const char *dst) {
+    static const char *const allowed[] = {
+        DATA_MOUNT "/root/Library/Lockdown",
+        DATA_MOUNT "/MobileDevice/ProvisioningProfiles",
+        DATA_MOUNT "/mobile/Library/WebClips",
+        DATA_MOUNT "/mobile/Library/Safari",
+        DATA_MOUNT "/OOPJit",
+        DATA_MOUNT "/protected/trustd",
+    };
+    size_t i;
+    for (i = 0; i < sizeof(allowed) / sizeof(allowed[0]); i++) {
+        size_t root_len = strlen(allowed[i]);
+        if (exact(dst, allowed[i]) ||
+            (dst && !strncmp(dst, allowed[i], root_len) && dst[root_len] == '/'))
+            return 1;
+    }
+    return 0;
+}
+
 static int copy_status(int what, int stage, copyfile_state_t state,
                        const char *src, const char *dst, void *opaque) {
     struct copy_context *ctx = opaque;
@@ -230,7 +303,19 @@ static int copy_status(int what, int stage, copyfile_state_t state,
         printf("DVM_SEED_SKIP_HARDWARE=1\n");
         return COPYFILE_SKIP;
     }
+    if (src && exact(src, ctx->skip_timezone_source)) {
+        printf("DVM_SEED_SKIP_TIMEZONE_LOCALTIME=1\n");
+        return COPYFILE_SKIP;
+    }
     if (stage == COPYFILE_ERR && ctx->abort_on_error) {
+        if (ctx->allow_sandbox_errors && allowed_sandbox_copy_destination(dst)) {
+            ctx->allowed_errors++;
+            printf("DVM_SEED_ALLOWED_COPY_ERROR=what=%d stage=%d errno=%d src=%s dst=%s count=%lu\n",
+                   what, stage, errno, src ? src : "-", dst,
+                   ctx->allowed_errors);
+            fflush(stdout);
+            return COPYFILE_CONTINUE;
+        }
         if (ctx->saw_error) return COPYFILE_QUIT;
         ctx->saw_error = 1;
         ctx->error_what = what;
@@ -240,7 +325,15 @@ static int copy_status(int what, int stage, copyfile_state_t state,
             strcpy(ctx->error_source, src);
         if (dst && strlen(dst) < sizeof(ctx->error_destination))
             strcpy(ctx->error_destination, dst);
-        printf("DVM_SEED_DIAG_FIRST_ERROR=%s what=%d stage=%d errno=%d src=%s dst=%s last_src=%s last_dst=%s\n",
+        /* Normal seeding is deliberately fail-closed too.  The diagnostic
+         * prefix is retained for the existing --diagnose consumer, while the
+         * COPY_ERROR line is the concise production-stage witness. */
+        printf("DVM_SEED_COPY_ERROR=%s what=%d stage=%d errno=%d src=%s dst=%s last_src=%s last_dst=%s\n",
+               ctx->tag ? ctx->tag : "copy", what, stage, errno,
+               src ? src : "-", dst ? dst : "-",
+               ctx->last_source[0] ? ctx->last_source : "-",
+               ctx->last_destination[0] ? ctx->last_destination : "-");
+        if (ctx->diagnostic) printf("DVM_SEED_DIAG_FIRST_ERROR=%s what=%d stage=%d errno=%d src=%s dst=%s last_src=%s last_dst=%s\n",
                ctx->tag, what, stage, errno, src ? src : "-", dst ? dst : "-",
                ctx->last_source[0] ? ctx->last_source : "-",
                ctx->last_destination[0] ? ctx->last_destination : "-");
@@ -317,7 +410,11 @@ static int copy_tree(const char *src, const char *dst, struct copy_context *ctx)
         copyfile_state_set(state, COPYFILE_STATE_STATUS_CB, copy_status)) {
         fail("COPY_STATE_SET");
     }
-    rc = copyfile(src, dst, state, COPYFILE_RECURSIVE | COPYFILE_ALL);
+    /* Do not dereference a template symlink while recursively copying it.
+     * In particular, db/timezone/localtime points back into /var and must be
+     * reproduced as that symlink on Data, not copied as its referent. */
+    rc = copyfile(src, dst, state,
+                  COPYFILE_RECURSIVE | COPYFILE_ALL | COPYFILE_NOFOLLOW_SRC);
     copyfile_state_free(state);
     return rc;
 }
@@ -346,6 +443,93 @@ static int copy_tree_contents(const char *source_root, const char *dest,
     }
     if (closedir(dir)) fail("COPY_SOURCE_CLOSE");
     return rc;
+}
+
+/* This is intentionally before aks_bootstrap_fs(): the restore guest can
+ * create the Data-side timezone link on the fresh mounted volume, while the
+ * identical operation hangs after AKS has initialized Data.  require_empty_data
+ * has already excluded a pre-existing db tree, so every mkdir here is strict.
+ * Preserve directory mode/ownership and link ownership from the read-only
+ * System template; no host filesystem ever observes either side. */
+static void precreate_timezone_directory(const char *src, const char *dst,
+                                         const char *stage) {
+    struct stat st;
+    if (lstat(src, &st)) fail("TIMEZONE_PRECREATE_SOURCE_LSTAT");
+    if (!S_ISDIR(st.st_mode)) fail_rc("TIMEZONE_PRECREATE_SOURCE_NOT_DIR", 0);
+    if (mkdir(dst, st.st_mode & 07777)) fail(stage);
+    if (chmod(dst, st.st_mode & 07777)) fail("TIMEZONE_PRECREATE_CHMOD");
+    if (lchown(dst, st.st_uid, st.st_gid)) fail("TIMEZONE_PRECREATE_LCHOWN");
+}
+
+static void precreate_timezone_link(const char *source_root, const char *dest) {
+    char src_db[1024], dst_db[1024], src_dir[1024], dst_dir[1024];
+    char src_link[1024], dst_link[1024], target[1024];
+    struct stat st;
+    ssize_t target_len;
+
+    if (snprintf(src_db, sizeof(src_db), "%s/db", source_root) >= (int)sizeof(src_db) ||
+        snprintf(dst_db, sizeof(dst_db), "%s/db", dest) >= (int)sizeof(dst_db) ||
+        snprintf(src_dir, sizeof(src_dir), "%s/%s", source_root, TIMEZONE_DIR_REL) >= (int)sizeof(src_dir) ||
+        snprintf(dst_dir, sizeof(dst_dir), "%s/%s", dest, TIMEZONE_DIR_REL) >= (int)sizeof(dst_dir) ||
+        snprintf(src_link, sizeof(src_link), "%s/%s", source_root, TIMEZONE_LOCALTIME_REL) >= (int)sizeof(src_link) ||
+        snprintf(dst_link, sizeof(dst_link), "%s/%s", dest, TIMEZONE_LOCALTIME_REL) >= (int)sizeof(dst_link))
+        fail_rc("TIMEZONE_PRECREATE_PATH", 0);
+
+    precreate_timezone_directory(src_db, dst_db, "TIMEZONE_PRECREATE_DB_MKDIR");
+    printf("DVM_SEED_TIMEZONE_PRECREATE_DB_RC=0\n"); fflush(stdout);
+    precreate_timezone_directory(src_dir, dst_dir, "TIMEZONE_PRECREATE_DIR_MKDIR");
+    printf("DVM_SEED_TIMEZONE_PRECREATE_DIR_RC=0\n"); fflush(stdout);
+
+    if (lstat(src_link, &st)) fail("TIMEZONE_PRECREATE_SOURCE_LINK_LSTAT");
+    if (!S_ISLNK(st.st_mode)) fail_rc("TIMEZONE_PRECREATE_SOURCE_NOT_SYMLINK", 0);
+    target_len = readlink(src_link, target, sizeof(target) - 1);
+    if (target_len < 0 || target_len >= (ssize_t)sizeof(target) - 1)
+        fail("TIMEZONE_PRECREATE_READLINK");
+    target[target_len] = '\0';
+    if (symlink(target, dst_link)) fail("TIMEZONE_PRECREATE_SYMLINK");
+    if (lchown(dst_link, st.st_uid, st.st_gid)) fail("TIMEZONE_PRECREATE_LINK_LCHOWN");
+    printf("DVM_SEED_TIMEZONE_PRECREATE_LINK_RC=0 target=%s\n", target); fflush(stdout);
+    printf("DVM_SEED_TIMEZONE_PRECREATE_RC=0\n"); fflush(stdout);
+}
+
+/* tzinit needs the template's localtime link.  Comparing lstat metadata and
+ * readlink text is intentionally narrower than a tree hash: it proves the
+ * symlink survived recursive COPYFILE_ALL without following either endpoint,
+ * and makes an absent db/timezone hierarchy fail at the copy boundary. */
+static void verify_timezone_symlink(const char *source_root, const char *dest) {
+    char src[1024], dst[1024], src_link[1024], dst_link[1024];
+    struct stat src_st, dst_st;
+    ssize_t src_len, dst_len;
+
+    if (snprintf(src, sizeof(src), "%s/%s", source_root, TIMEZONE_LOCALTIME_REL) >= (int)sizeof(src) ||
+        snprintf(dst, sizeof(dst), "%s/%s", dest, TIMEZONE_LOCALTIME_REL) >= (int)sizeof(dst))
+        fail_rc("TIMEZONE_PATH", 0);
+    if (lstat(src, &src_st)) fail("TIMEZONE_SOURCE_LSTAT");
+    if (lstat(dst, &dst_st)) fail("TIMEZONE_DEST_LSTAT");
+    if (!S_ISLNK(src_st.st_mode)) fail_rc("TIMEZONE_SOURCE_NOT_SYMLINK", 0);
+    if (!S_ISLNK(dst_st.st_mode)) fail_rc("TIMEZONE_DEST_NOT_SYMLINK", 0);
+    src_len = readlink(src, src_link, sizeof(src_link) - 1);
+    if (src_len < 0 || src_len >= (ssize_t)sizeof(src_link) - 1) fail("TIMEZONE_SOURCE_READLINK");
+    dst_len = readlink(dst, dst_link, sizeof(dst_link) - 1);
+    if (dst_len < 0 || dst_len >= (ssize_t)sizeof(dst_link) - 1) fail("TIMEZONE_DEST_READLINK");
+    src_link[src_len] = '\0';
+    dst_link[dst_len] = '\0';
+    if (src_len != dst_len || memcmp(src_link, dst_link, (size_t)src_len))
+        fail_rc("TIMEZONE_LINK_TARGET", 0);
+    if ((src_st.st_mode & 07777) != (dst_st.st_mode & 07777) ||
+        src_st.st_uid != dst_st.st_uid || src_st.st_gid != dst_st.st_gid ||
+        src_st.st_size != dst_st.st_size) {
+        printf("DVM_SEED_TIMEZONE_SYMLINK_METADATA=src_mode=%o dst_mode=%o src_uid=%u dst_uid=%u src_gid=%u dst_gid=%u src_size=%lld dst_size=%lld\n",
+               src_st.st_mode & 07777, dst_st.st_mode & 07777,
+               src_st.st_uid, dst_st.st_uid, src_st.st_gid, dst_st.st_gid,
+               (long long)src_st.st_size, (long long)dst_st.st_size);
+        fflush(stdout);
+        fail_rc("TIMEZONE_SYMLINK_METADATA", 0);
+    }
+    printf("DVM_SEED_TIMEZONE_SYMLINK=src=%s dst=%s target=%s mode=%o uid=%u gid=%u\n",
+           src, dst, src_link, src_st.st_mode & 07777, src_st.st_uid, src_st.st_gid);
+    printf("DVM_SEED_TIMEZONE_SYMLINK_RC=0\n");
+    fflush(stdout);
 }
 
 static unsigned long long fnv1a_file(const char *path, unsigned long long *bytes) {
@@ -483,13 +667,57 @@ static void run_full(const struct apis *a, const char *source, const char *dest,
         fail_rc("UML", 0);
     a->cf_release(root); a->cf_release(mobile);
     printf("DVM_SEED_UML_RC=0\n");
+    /* The volume root is writable on a just-seeded Data volume; root/ is
+     * subject to the restore sandbox's directory creation policy.  Stage
+     * witnesses are flushed before every syscall so a post-UML termination
+     * cannot be mistaken for a successful marker. */
+    printf("DVM_SEED_MARKER_STAGE=OPEN path=%s\n", COMPLETE_MARKER);
+    fflush(stdout);
     fd = open(COMPLETE_MARKER, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) fail("MARKER_OPEN");
+    printf("DVM_SEED_MARKER_STAGE=WRITE\n");
+    fflush(stdout);
     if (write(fd, "dvm data seed complete\n", 23) != 23) fail("MARKER_WRITE");
+    printf("DVM_SEED_MARKER_STAGE=FSYNC\n");
+    fflush(stdout);
     if (fsync(fd)) fail("MARKER_FSYNC");
+    printf("DVM_SEED_MARKER_STAGE=CLOSE\n");
+    fflush(stdout);
     if (close(fd)) fail("MARKER_CLOSE");
     printf("DVM_SEED_MARKER_RC=0\n");
     fflush(stdout);
+}
+
+static void run_copy_data(const struct apis *a, const char *source, const char *dest) {
+    struct copy_context ctx;
+    precreate_timezone_link(source, dest);
+    initialise_data(a, dest);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.skip_source = "/private/var/hardware/private/var/hardware";
+    ctx.skip_timezone_source = SOURCE_ROOT "/" TIMEZONE_LOCALTIME_REL;
+    ctx.tag = "copy-data";
+    ctx.abort_on_error = 1;
+    ctx.allow_sandbox_errors = 1;
+    if (copy_tree_contents(source, dest, &ctx)) fail("COPY");
+    verify_timezone_symlink(source, dest);
+    if (!ctx.files) fail_rc("COPY_FILES", 0);
+    printf("DVM_SEED_ALLOWED_COPY_ERRORS=%lu\n", ctx.allowed_errors);
+    printf("DVM_SEED_COPY_FILES=%lu\nDVM_SEED_COPY_DATA_RC=0\n", ctx.files);
+    fflush(stdout);
+}
+
+static void final_marker(void) {
+    int fd;
+    printf("DVM_SEED_MARKER_STAGE=OPEN path=%s\n", COMPLETE_MARKER); fflush(stdout);
+    fd=open(COMPLETE_MARKER,O_WRONLY|O_CREAT|O_EXCL,0600); if(fd<0) fail("MARKER_OPEN");
+    printf("DVM_SEED_MARKER_STAGE=WRITE\n"); fflush(stdout);
+    if(write(fd,"dvm data seed complete\n",23)!=23) fail("MARKER_WRITE");
+    printf("DVM_SEED_MARKER_STAGE=FSYNC\n"); fflush(stdout);
+    if(fsync(fd)) fail("MARKER_FSYNC");
+    printf("DVM_SEED_MARKER_STAGE=CLOSE\n"); fflush(stdout);
+    if(close(fd)) fail("MARKER_CLOSE");
+    if(access(COMPLETE_MARKER,R_OK)) fail("MARKER_STAT");
+    printf("DVM_SEED_MARKER_RC=0\n"); fflush(stdout);
 }
 
 /* Run just the destructive-to-an-empty-volume initialisation boundary.  It is
@@ -500,6 +728,108 @@ static void run_init_only(const struct apis *a, const char *dest) {
     initialise_data(a, dest);
     printf("DVM_SEED_INIT_ONLY_RC=0\n");
     fflush(stdout);
+}
+
+static void user_manifest(const struct apis *a) {
+    struct attrlist attrs = {0};
+    struct { unsigned int length; unsigned char uuid[16]; } reply = {0};
+    char uuid[37];
+    void *objc, *(*look_up)(const char *), *(*sel)(const char *);
+    void *raw_send;
+    objc_send0_fn send0;
+    objc_send_create_fn send_create;
+    objc_send_update_fn send_update;
+    objc_id manager, user;
+    CFStringRef data, device, uuid_string, name;
+    CFErrorRef error = NULL;
+    int i;
+    struct statfs fs;
+
+    attrs.bitmapcount = ATTR_BIT_MAP_COUNT;
+    attrs.volattr = ATTR_VOL_UUID;
+    if (statfs(USER_MOUNT, &fs) || strcmp(fs.f_mntfromname, USER_DEVICE)) fail("USER_MOUNT_SOURCE");
+    printf("DVM_SEED_USER_MOUNT_SOURCE=%s\n", fs.f_mntfromname); fflush(stdout);
+    printf("DVM_SEED_USER_STAGE=UUID_QUERY path=%s\n", USER_MOUNT); fflush(stdout);
+    if (getattrlist(USER_MOUNT, &attrs, &reply, sizeof(reply), 0) || reply.length < sizeof(reply))
+        fail("USER_UUID");
+    for (i = 0; i < 16; i++) if (reply.uuid[i]) break;
+    if (i == 16) fail_rc("USER_UUID_ZERO", 0);
+    snprintf(uuid, sizeof(uuid),
+        "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        reply.uuid[0],reply.uuid[1],reply.uuid[2],reply.uuid[3],reply.uuid[4],reply.uuid[5],reply.uuid[6],reply.uuid[7],
+        reply.uuid[8],reply.uuid[9],reply.uuid[10],reply.uuid[11],reply.uuid[12],reply.uuid[13],reply.uuid[14],reply.uuid[15]);
+    printf("DVM_SEED_USER_UUID=%s device=%s mount=%s\n", uuid, USER_DEVICE, USER_MOUNT); fflush(stdout);
+    objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!objc) fail("USER_OBJC_DLOPEN");
+    look_up = dlsym(objc, "objc_lookUpClass"); sel = dlsym(objc, "sel_registerName"); raw_send = dlsym(objc, "objc_msgSend");
+    if (!look_up || !sel || !raw_send) fail("USER_OBJC_SYMBOL");
+    send0=(objc_send0_fn)raw_send; send_create=(objc_send_create_fn)raw_send; send_update=(objc_send_update_fn)raw_send;
+    manager = send0(look_up("UMLManager"), sel("sharedManager"));
+    if (!manager) fail_rc("USER_MANAGER", 0);
+    data=a->cf_string(NULL,DATA_MOUNT,CF_STRING_ENCODING_UTF8); device=a->cf_string(NULL,USER_DEVICE,CF_STRING_ENCODING_UTF8);
+    uuid_string=a->cf_string(NULL,uuid,CF_STRING_ENCODING_UTF8); name=a->cf_string(NULL,"User",CF_STRING_ENCODING_UTF8);
+    if (!data||!device||!uuid_string||!name) fail_rc("USER_CFSTRING",0);
+    printf("DVM_SEED_USER_STAGE=LOOKUP_PRIMARY\n"); fflush(stdout);
+    error = NULL;
+    user=send_create(manager,sel("primaryUserOnSharedDataVolumePath:withError:"),data,&error);
+    if (user) {
+        printf("DVM_SEED_USER_LOOKUP_FOUND=1\nDVM_SEED_USER_EXISTING=1\n"); fflush(stdout);
+    } else {
+        printf("DVM_SEED_USER_LOOKUP_FOUND=0\n"); fflush(stdout);
+        report_nserror("USER_LOOKUP_PRIMARY", error, raw_send, sel);
+        /* The accessor is diagnostic only: the production create selector is
+         * authoritative for a freshly made User volume.  Preserve the error
+         * witness, then clear it rather than conflating absence with a failed
+         * create. */
+        error = NULL;
+    }
+    if (!user) {
+        printf("DVM_SEED_USER_STAGE=CREATE_PRIMARY\n"); fflush(stdout);
+        error = NULL;
+        user=send_create(manager,sel("createPrimaryUserOnSharedDataVolumePath:withError:"),data,&error);
+        if (!user || error) {
+            report_nserror("USER_CREATE_PRIMARY", error, raw_send, sel);
+            fail_rc("USER_CREATE_PRIMARY",0);
+        }
+        printf("DVM_SEED_USER_CREATED=1\n"); fflush(stdout);
+    }
+    printf("DVM_SEED_USER_STAGE=UPDATE_PRIMARY\n"); fflush(stdout);
+    error = NULL;
+    if (!send_update(manager,sel("updatePrimaryUser:onSharedDataVolumePath:withDiskNode:withVolumeuuid:withVolumeName:withError:"),user,data,device,uuid_string,name,&error) || error) {
+        report_nserror("USER_UPDATE_PRIMARY", error, raw_send, sel);
+        fail_rc("USER_UPDATE_PRIMARY",0);
+    }
+    /* Do not run ObjC/CF teardown after this opaque private call. */
+    if (write(STDOUT_FILENO, "DVM_SEED_USER_MANIFEST_RC=0\n", 28) != 28) _exit(1);
+    _exit(0);
+}
+
+static void user_layout(const struct apis *a) {
+    void *objc, *(*look_up)(const char *), *(*sel)(const char *);
+    void *raw_send;
+    objc_send0_fn send0;
+    objc_send_layout_fn send_layout;
+    objc_id manager;
+    CFStringRef user_mount, system_mount;
+    CFErrorRef error = NULL;
+    struct statfs fs;
+    if (statfs(USER_MOUNT, &fs) || strcmp(fs.f_mntfromname, USER_DEVICE)) fail("USER_MOUNT_SOURCE");
+    objc = dlopen("/usr/lib/libobjc.A.dylib", RTLD_NOW | RTLD_LOCAL);
+    if (!objc) fail("USER_OBJC_DLOPEN");
+    look_up=dlsym(objc,"objc_lookUpClass"); sel=dlsym(objc,"sel_registerName"); raw_send=dlsym(objc,"objc_msgSend");
+    if (!look_up||!sel||!raw_send) fail("USER_OBJC_SYMBOL");
+    send0=(objc_send0_fn)raw_send; send_layout=(objc_send_layout_fn)raw_send;
+    manager=send0(look_up("UMLManager"),sel("sharedManager"));
+    user_mount=a->cf_string(NULL,USER_MOUNT,CF_STRING_ENCODING_UTF8); system_mount=a->cf_string(NULL,SYSTEM_MOUNT,CF_STRING_ENCODING_UTF8);
+    if (!manager||!user_mount||!system_mount) fail_rc("USER_LAYOUT_ARGS",0);
+    printf("DVM_SEED_USER_STAGE=POPULATE\n"); fflush(stdout);
+    error = NULL;
+    if (!send_layout(manager,sel("createPrimaryUserLayoutWithOnUserVolumePath:fromSystemVolumePath:withError:"),user_mount,system_mount,&error) || error) {
+        report_nserror("USER_POPULATE", error, raw_send, sel);
+        fail_rc("USER_POPULATE",0);
+    }
+    if (write(STDOUT_FILENO, "DVM_SEED_USER_LAYOUT_RC=0\n", 26) != 26) _exit(1);
+    _exit(0);
 }
 
 /* First identify the actual source that makes COPYFILE_ALL fail.  A template
@@ -604,7 +934,6 @@ int main(int argc, char **argv) {
         require_layout(argv[3], argv[4]);
         require_empty_data(argv[4]);
         a = load_apis();
-        remove_staging_helper();
         run_probe(&a, argv[3], argv[4], argv[2]);
         return 0;
     }
@@ -612,15 +941,17 @@ int main(int argc, char **argv) {
         require_layout(argv[2], argv[3]);
         require_empty_data(argv[3]);
         a = load_apis();
-        remove_staging_helper();
         run_full(&a, argv[2], argv[3], 0);
         return 0;
+    }
+    if (argc == 4 && exact(argv[1], "--copy-data")) {
+        require_layout(argv[2], argv[3]); require_empty_data(argv[3]);
+        a=load_apis(); run_copy_data(&a,argv[2],argv[3]); return 0;
     }
     if (argc == 4 && exact(argv[1], "--full-aks-setup")) {
         require_layout(argv[2], argv[3]);
         require_empty_data(argv[3]);
         a = load_apis();
-        remove_staging_helper();
         run_full(&a, argv[2], argv[3], 1);
         return 0;
     }
@@ -628,15 +959,29 @@ int main(int argc, char **argv) {
         require_layout(argv[2], argv[3]);
         require_empty_data(argv[3]);
         a = load_apis();
-        remove_staging_helper();
         run_init_only(&a, argv[3]);
         return 0;
+    }
+    if (argc == 4 && exact(argv[1], "--user-manifest")) {
+        if (!exact(argv[3], DATA_MOUNT)) { fprintf(stderr,"DVM_SEED_REFUSED=manifest Data path\n"); return 2; }
+        a = load_apis();
+        user_manifest(&a);
+        return 0;
+    }
+    if (argc == 4 && exact(argv[1], "--user-layout")) {
+        if (!exact(argv[3], DATA_MOUNT)) { fprintf(stderr,"DVM_SEED_REFUSED=layout System path\n"); return 2; }
+        a = load_apis();
+        user_layout(&a);
+        return 0;
+    }
+    if (argc == 4 && exact(argv[1], "--final-marker")) {
+        require_layout(argv[2], argv[3]);
+        final_marker(); remove_staging_helper(); return 0;
     }
     if (argc == 4 && exact(argv[1], "--diagnose")) {
         require_layout(argv[2], argv[3]);
         require_empty_data(argv[3]);
         a = load_apis();
-        remove_staging_helper();
         run_diagnose(&a, argv[2], argv[3]);
         return 0;
     }
@@ -644,16 +989,15 @@ int main(int argc, char **argv) {
         require_layout(argv[3], argv[4]);
         require_empty_data(argv[4]);
         a = load_apis();
-        remove_staging_helper();
         run_diagnose_file(&a, argv[3], argv[4], argv[2]);
         return 0;
     }
     {
-        fprintf(stderr, "usage: %s --probe REL %s %s | --diagnose %s %s | --diagnose-file REL %s %s | --full %s %s | --full-aks-setup %s %s | --init-only %s %s\n",
+        fprintf(stderr, "usage: %s --probe REL %s %s | --diagnose %s %s | --diagnose-file REL %s %s | --full %s %s | --full-aks-setup %s %s | --init-only %s %s | --user-manifest %s %s | --user-layout %s %s\n",
                 argv[0], SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT,
                 SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT,
                 SOURCE_ROOT, DATA_MOUNT,
-                SOURCE_ROOT, DATA_MOUNT);
+                SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT);
         return 2;
     }
 }
