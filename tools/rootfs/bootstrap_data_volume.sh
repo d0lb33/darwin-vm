@@ -116,16 +116,38 @@ phase_format() {
     }
     say "[format] guest shell up after ${waited}s"
 
+    local before after
+    before=$(stat -f%z "$OVL")
     say "[format] newfs_apfs -E on the Data slot (iOS makes the keys, not us)"
     python3 "$REPO/tools/serial.py" "$sock" send \
-        'newfs_apfs -E -W -v Data -R D /dev/disk1s2; echo FMT_RC=$?' --secs 120 \
+        'newfs_apfs -E -W -v Data -R D /dev/disk1s2; echo FMT_RC=$?' --secs 180 \
         | tail -5
-    python3 "$REPO/tools/serial.py" "$sock" send 'diskutil list; echo LIST_RC=$?' --secs 30 \
+
+    # VERIFY, do not assert. The first version of this phase printed "done"
+    # unconditionally: newfs_apfs never ran, FMT_RC came back as the literal
+    # string, the overlay never grew, and the phase still reported success --
+    # the exact "a silent no-op looks like success" failure this project keeps
+    # being bitten by. Two independent witnesses now have to agree.
+    local clog="$WORK/fmt.console.log" rc="" waited=0
+    while (( waited < 180 )); do
+        rc=$(grep -ao 'FMT_RC=[0-9]\+' "$clog" 2>/dev/null | tail -1 | cut -d= -f2)
+        [ -n "$rc" ] && break
+        perl -e 'sleep 5'; waited=$((waited+5))
+    done
+    after=$(stat -f%z "$OVL")
+
+    python3 "$REPO/tools/serial.py" "$sock" send 'diskutil list; echo LIST_RC=$?' --secs 60 \
         | grep -iE "disk1s|Data" | head -6
 
-    kill $probe_pid 2>/dev/null
+    # Reap the guest by its own tag: killing probe.sh leaves the qemu it spawned
+    # in a subshell running, which is how this script leaked a VM on its first run.
+    pkill -f "BOOTSTRAP_FMT" 2>/dev/null
     pkill -f "unix:$sock" 2>/dev/null
-    say "[format] done; the encrypted volume now lives in $OVL"
+
+    say "[format] newfs_apfs rc=${rc:-<never reported>}  overlay ${before} -> ${after} bytes"
+    [ "$rc" = "0" ] || die "newfs_apfs did not report success (rc=${rc:-none}); see $clog"
+    (( after > before )) || die "newfs_apfs reported success but wrote nothing to $OVL -- a real format writes a superblock"
+    say "[format] verified: the encrypted Data volume is in $OVL"
 }
 
 # ---------------------------------------------------------------- phase 3 ----
