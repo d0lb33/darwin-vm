@@ -48,12 +48,32 @@ boot, `PERSIST_NVME_CLEAN_BOOT4.serial.log`, repeats those mounts at
 `panic(cpu` line.
 
 These boots prove persistent volume mounting and the no-recopy path. They do
-not prove a complete iOS graphical boot or a Welcome/Hello frame. A later
-display-frontier run fixed the class-2 SKS issue far enough for the UI path to
-be investigated, but SpringBoard-triggered restart ended in the known
-`Halt/Restart Timed Out @IOPlatformExpert.cpp:900` consequence in
-`PERSIST_NVME_ROLES_PREINIT_TZ1_CLASS2_BOOT2.serial.log:1072`; this is not a
-Welcome-screen result.
+not prove a complete iOS graphical boot or a Welcome/Hello frame. Subsequent
+SKS work also completed the protected-file bootstrap: `SKS_OP09_COMPLETE_1`
+mounts User at line 561 and reaches `Early boot complete` at line 617;
+`SKS_OP09_COMPLETE_2` repeats those milestones at lines 568 and 637. Neither
+log contains `fext_ek`, `apfs_unwrap_key`, `Copying `, or `panic(cpu` (zero
+matches in each log). The first run's SEP witness is
+`/tmp/dvm/probe/SKS_OP09_COMPLETE_1.stderr.log:681–684`: the guest's first
+128-byte authenticated op09 reply was accepted and decoded as three blobs
+(16-byte file key, 16-byte IV, empty third blob) plus scalar zero.
+
+The call-chain capture `/tmp/dvm/FEXT_LLDB_1C.lldb.log:47–59,65–94,99–126`
+puts the fext return at runtime `0xfffffff02957b5f0` (unslid
+`0xfffffff00957b5f0`), with the caller chain through runtime
+`0xfffffff02954b1b4`/`0xfffffff02a95d9d8` (unslid addresses are runtime minus
+the `0x200000000` kernel slide). The decoder capture
+`/tmp/dvm/SKS_OP09_DECODE_1.lldb.log:17–28,90–150,1032–1060` identifies the
+native op09 call at runtime `0xfffffff029547544` (unslid
+`0xfffffff009547544`) and its authenticated reply-buffer decoder; the failing
+return was `0xe00002bc` only in the pre-fix capture, not in either completion
+boot. This establishes the three-blob-plus-scalar contract rather than merely
+correlating SEP log messages.
+
+The protected-file/NVMe milestone is therefore complete: the persistent child
+can be cold-booted twice without reseeding or protected-file unwrap failures.
+It still does not prove a complete iOS graphical boot or a Welcome/Hello frame;
+that is the separate display goal.
 
 ## Repeatable stages
 
@@ -116,3 +136,23 @@ WORK="$RUN/work" PARENT="$RUN/boot1.qcow2" \
 The `copy-data`, `manifest`, `layout`, and `marker` phases require numeric
 guest return-code witnesses and `sync` success before accepting a stage
 (`bootstrap_data_volume.sh:416–456`).
+
+For a fast persistent-storage regression, use the verified parent and two fresh
+qcow2 children (the second boot is the no-recopy check):
+
+```
+REPO=/Users/jdolbe1/Downloads/darwin-vm
+WORK=/tmp/dvm/data-seed/repro-persistent-1
+BASE=/tmp/dvm/data-seed/roles-normal-preinit-tz1-class2-boot2.qcow2
+cd "$REPO"
+WORK="$WORK/work" PARENT="$BASE" OUT_OVL="$WORK/boot1.qcow2" \
+  TAG=SKS_OP09_COMPLETE_REPRO1 NORMAL_BOOT_SECS=45 \
+  tools/rootfs/bootstrap_data_volume.sh normal
+WORK="$WORK/work" PARENT="$WORK/boot1.qcow2" OUT_OVL="$WORK/boot2.qcow2" \
+  TAG=SKS_OP09_COMPLETE_REPRO2 NORMAL_BOOT_SECS=45 \
+  tools/rootfs/bootstrap_data_volume.sh normal
+```
+
+The parent already contains the formatted, seeded, manifested, laid-out and
+marked volumes; `normal` creates only derived children. The commands require
+the locally built QEMU containing the corresponding ANS/SEP changes.
