@@ -61,6 +61,7 @@ SITE_ORDER = tuple(RUNTIME_ADDRESSES)
 DEFAULT_SITE_CAP = 8
 MAX_MEMORY_READ = 0x80
 MAX_STATE_RECORDS = 64
+MAX_CALLBACK_ERRORS = 8
 
 # `SBBreakpoint` only offers the script-callback API on Apple's LLDB; it does
 # not expose the C++/Python `SetCallback` convenience method.  The registered
@@ -222,6 +223,7 @@ class CallTracer:
         self.caps = caps
         self.hits = defaultdict(int)
         self.emitted = defaultdict(int)
+        self.callback_errors = defaultdict(int)
         self.breakpoint_ids = []
 
     @staticmethod
@@ -344,6 +346,31 @@ class CallTracer:
                 self.emitted[site] += 1
         return False  # LLDB breakpoint callback convention: auto-continue.
 
+    def callback_error(self, site, frame, exc):
+        """Make callback-dispatch failures visible without stopping the guest."""
+        self.callback_errors[site] += 1
+        if self.callback_errors[site] > MAX_CALLBACK_ERRORS:
+            return
+        try:
+            pc = _hex(frame.GetPC()) if frame else None
+        except Exception:
+            pc = None
+        rec = {
+            "event": "callback_error",
+            "site": site,
+            "count": self.callback_errors[site],
+            "error": "%s:%s" % (type(exc).__name__, str(exc)[:160]),
+        }
+        if pc:
+            rec["pc"] = pc
+        try:
+            self.stream.write(json.dumps(rec, sort_keys=True) + "\n")
+            self.stream.flush()
+        except Exception:
+            # The trace stream itself can be gone while LLDB is tearing down.
+            # Do not turn that into a guest stop.
+            pass
+
     def install(self, target):
         for site in SITE_ORDER:
             bp = target.BreakpointCreateByAddress(self.addresses[site])
@@ -372,13 +399,21 @@ def lldb_breakpoint_callback(frame, bp_loc, internal_dict):
     stale location guarantees a trace clean-up cannot accidentally stop XNU.
     """
     del internal_dict
+    owner = None
     try:
         owner = _BREAKPOINT_OWNERS.get(bp_loc.GetBreakpoint().GetID())
         if owner is not None:
             tracer, site = owner
             return tracer.handle_hit(site, frame, bp_loc, None)
-    except Exception:
-        pass
+    except Exception as exc:
+        if owner is not None:
+            tracer, site = owner
+            tracer.callback_error(site, frame, exc)
+        else:
+            # There is no session stream to write to if LLDB invoked a stale
+            # location after clean-up.  Do not hide it completely.
+            print("iomfb-calltrace callback dispatch error: %s" % exc,
+                  file=sys.stderr)
     return False
 
 
@@ -417,7 +452,7 @@ def _is_terminal_state(lldb, state):
     return state in (lldb.eStateExited, lldb.eStateDetached)
 
 
-def run_live(args, addresses, caps, lldb):
+def run_live(args, addresses, caps, lldb, debugger=None):
     """Attach, event-pump LLDB, trace a bounded period, then detach.
 
     QEMU's gdbstub reports an intermediate ``invalid``/``connected`` process
@@ -427,11 +462,14 @@ def run_live(args, addresses, caps, lldb):
     but never considered terminal.
     """
     error = lldb.SBError()
-    debugger = lldb.SBDebugger.Create()
+    owns_debugger = debugger is None
+    if owns_debugger:
+        debugger = lldb.SBDebugger.Create()
     debugger.SetAsync(True)
     target = debugger.CreateTargetWithFileAndArch("", "arm64")
     if not target or not target.IsValid():
-        lldb.SBDebugger.Destroy(debugger)
+        if owns_debugger:
+            lldb.SBDebugger.Destroy(debugger)
         raise RuntimeError("LLDB could not create an arm64 target")
 
     # Use the debugger's listener, not an unpumped side listener.  ConnectRemote
@@ -441,7 +479,8 @@ def run_live(args, addresses, caps, lldb):
     process = target.ConnectRemote(listener, "connect://%s:%d" %
                                    (args.host, args.port), "gdb-remote", error)
     if not error.Success() or not process or not process.IsValid():
-        lldb.SBDebugger.Destroy(debugger)
+        if owns_debugger:
+            lldb.SBDebugger.Destroy(debugger)
         raise RuntimeError("gdb-remote connect failed: %s" %
                            (error.GetCString() or "unknown error"))
 
@@ -551,6 +590,8 @@ def run_live(args, addresses, caps, lldb):
             "a401_hits": tracer.hits["a401"],
             "emitted": {site: tracer.emitted[site] for site in SITE_ORDER},
             "hits": {site: tracer.hits[site] for site in SITE_ORDER},
+            "callback_errors": {site: tracer.callback_errors[site]
+                                for site in SITE_ORDER},
             "reason": end_reason,
             "state_records": state_records,
             "state_records_dropped": state_dropped,
@@ -571,7 +612,8 @@ def run_live(args, addresses, caps, lldb):
         tracer.clear_callbacks()
         if stream is not sys.stdout:
             stream.close()
-        lldb.SBDebugger.Destroy(debugger)
+        if owns_debugger:
+            lldb.SBDebugger.Destroy(debugger)
 
 
 def _command_result_error(result, message):
@@ -587,7 +629,7 @@ def _command_result_error(result, message):
 
 def lldb_command(debugger, command, exe_ctx, result, internal_dict):
     """The ``iomfb-calltrace`` LLDB command registered at module import."""
-    del debugger, exe_ctx, internal_dict
+    del exe_ctx, internal_dict
     try:
         # LLDB hands us one shell-like string.  Preserve quoted output/map
         # paths instead of assuming every workspace path lacks spaces.
@@ -597,7 +639,11 @@ def lldb_command(debugger, command, exe_ctx, result, internal_dict):
             return
         args, addresses, caps = parsed
         import lldb
-        run_live(args, addresses, caps, lldb)
+        # The callback function was imported into *this* debugger's script
+        # interpreter.  Creating another SBDebugger here lets gdb-remote hit
+        # the address but leaves its callback name unresolved, a silent miss
+        # in the first two live runs.
+        run_live(args, addresses, caps, lldb, debugger=debugger)
         result.PutCString("iomfb-calltrace: A401 positive control hit")
     except Exception as exc:
         _command_result_error(result, "iomfb-calltrace: %s" % exc)
