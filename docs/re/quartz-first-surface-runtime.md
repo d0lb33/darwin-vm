@@ -63,7 +63,8 @@ therefore covered launchd startup and the later UI-daemon launch period.
 
 Correction: the zero-hit table below is not a valid runtime localization.
 The LLDB 21 command-file form hid 69 matching breakpoint stops; see
-`docs/re/lldb-breakpoint-command-trap.md`.  The same-boot slide proof,
+`docs/re/lldb-breakpoint-command-trap.md`.  The corrected rerun is documented
+in `docs/re/quartz-corrected-runtime.md`.  The same-boot slide proof,
 independent RPC/black-frame/storage witnesses, and the recorded absence of
 the expected downstream trace records remain valid.  The claim that the
 missing producer gate is upstream of QuartzCore must be rerun with the
