@@ -93,14 +93,28 @@ phase_format() {
         -- -drive "if=none,id=ans,file=$OVL,format=qcow2" >/dev/null 2>&1 &
     local probe_pid=$!
 
-    # Wait for the restore ramdisk's shell rather than sleeping a fixed time.
+    # Wait for the restore ramdisk's shell by watching the ACCUMULATING serial
+    # log, not by reading the socket. serial.py *drains* the stream into its own
+    # log, so polling it with `read` consumes the prompt and the next poll finds
+    # nothing -- the first version of this script searched for evidence it had
+    # already eaten, and declared "guest console never appeared" on a boot that
+    # had reached the shell with 0 panics. --uart-socket still writes the serial
+    # log (the chardev carries logfile=), so the log is the reliable witness.
+    local slog=/tmp/dvm/probe/BOOTSTRAP_FMT.serial.log
     local waited=0
-    while (( waited < 200 )); do
+    while (( waited < 300 )); do
         perl -e 'sleep 5'; waited=$((waited+5))
-        [ -S "$sock" ] && python3 "$REPO/tools/serial.py" "$sock" read --secs 2 2>/dev/null \
-            | grep -q "can't access tty" && break
+        grep -qa "can't access tty" "$slog" 2>/dev/null && break
+        grep -qa 'panic(cpu' "$slog" 2>/dev/null && {
+            kill $probe_pid 2>/dev/null
+            die "guest panicked before the shell; see $slog"
+        }
     done
-    [ -S "$sock" ] || { kill $probe_pid 2>/dev/null; die "guest console never appeared"; }
+    grep -qa "can't access tty" "$slog" 2>/dev/null || {
+        kill $probe_pid 2>/dev/null
+        die "no shell after ${waited}s; see $slog"
+    }
+    say "[format] guest shell up after ${waited}s"
 
     say "[format] newfs_apfs -E on the Data slot (iOS makes the keys, not us)"
     python3 "$REPO/tools/serial.py" "$sock" send \
