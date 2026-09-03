@@ -76,12 +76,62 @@ While HMP still reported `VM status: running`, a screendump was captured near
 The guest was then stopped by the exact
 `unix:/tmp/dvm/UI_NO_D575_SWAP1.sock` tag; no QEMU process was left behind.
 
+## Paired D575 trailing-Boolean-zero control
+
+`UI_D575_BOOL0_1` repeated the same 180-second boot with a fresh child
+`/tmp/dvm/data-seed/ui-d575-bool0-1.qcow2`.  Its callback sequence was:
+
+```
+D120::4,D586:9b040000fc090000:4,@A385,D575:01000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000001000000:76
+```
+
+The hex decodes to an 88-byte D575 input, not a 76-byte input: only offsets
+`+0` and `+0x54` are one.  Thus event remains one, the trailing Boolean at
+`+0x53` is zero, and the optional-null flag at `+0x54` remains one.  The final
+`:76` is the callback output length.
+
+The first A385 request and barrier release appear at
+`/tmp/dvm/probe/UI_D575_BOOL0_1.stderr.log:2227-2232`.  D575 was then sent and
+transport-completed with status zero at lines 2233-2237.  This is only a
+transport witness.  LLDB armed the concrete hotplug target
+`0xfffffff02a0bcad8`, assertion post-latch edge `0xfffffff02a0bcb94`, and
+Boolean-zero edge `0xfffffff02a0bcba0`, followed by the same 15 swap/map
+breakpoints, at `/tmp/dvm/UI_D575_BOOL0_1.lldb.log:14-71`.  None hit.  The
+debugger's only subsequent stop was the probe's HMP SIGINT at lines 77-80.
+Consequently this run did not provide a value for `self+0x430`; callback
+completion must not be reported as proof that the concrete hotplug target
+latched or preserved that byte.
+
+There were independently zero A407, A408, D589, D591, or `surface_map`
+records.  A385 continued through occurrence 6779 at stderr lines 36962-36965.
+Persistent storage and boot remained healthy: Preboot, Data, Hardware, and
+User mounted at `/tmp/dvm/probe/UI_D575_BOOL0_1.serial.log:428`, `:488`,
+`:496`, and `:588`; Early Boot completed at line 639; display type zero mapped
+at line 648; and searches found zero `panic(cpu` and zero `Copying` lines.  The
+fresh overlay grew from 197,120 to 19,398,656 bytes.
+
+The live screendump near 179 seconds was again entirely black and
+byte-identical to the no-D575 control:
+
+| Artifact | SHA-256 | Pixel result |
+|---|---|---|
+| `/tmp/dvm/UI_D575_BOOL0_1-live.ppm` | `43d418d35e149ea7e071c60ecb4ce967addd0aa4fc2eff4c6b0276403ed3f7fb` | all 9,048,240 RGB bytes are zero |
+| `/tmp/dvm/UI_D575_BOOL0_1-live.png` | `751b436d4a028fa873ce9bbc5bbac0d943765aff73631917b3b48230117798ed` | PNG conversion of the same black frame |
+
+The full paired logs are
+`/tmp/dvm/probe/UI_D575_BOOL0_1.serial.log`,
+`/tmp/dvm/probe/UI_D575_BOOL0_1.stderr.log`, and
+`/tmp/dvm/UI_D575_BOOL0_1.lldb.log`.  The guest was stopped by the exact
+`unix:/tmp/dvm/UI_D575_BOOL0_1.sock` tag.
+
 ## Conclusion
 
 Omitting D575 prevents the known false external-display assertion without
 regressing persistent storage or boot health, but it does not create the
 missing producer event.  The blank display in this control occurs before
 H17P `swap_submit`, not in the D575-selected cancellation block, generic
-surface mapping, or A407/A408 submission.  A D575 variant with only its
-trailing Boolean cleared can test hotplug state safely, but cannot by itself be
-treated as a fix for the absent upstream swap producer.
+surface mapping, or A407/A408 submission.  The paired trailing-Boolean-zero
+callback also produced no swap and the same black framebuffer.  Because its
+concrete hotplug target did not hit, it rules out that exact scripted transport
+as a sufficient producer stimulus but does not establish the post-callback
+value of the external-display byte.
