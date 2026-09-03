@@ -88,13 +88,13 @@ evidence.
 
 ## Ranked next experiment
 
-1. Run the identical delayed-D575 / `A412=1` harness with **only** an `A485`
-   output override of `01 00 00 00`.  Capture the first occurrence of runtime
-   `0xfffffff02a0cc560` and its return address, then require an independent
-   result: first hits at `0xfffffff02a0c8f8c` (`A407`) or
-   `0xfffffff02a0c91d8` (`A408`), followed by `0xfffffff02a0b9600`
-   (surface-map path).  A mere different A385 count is not success.
-2. If no submission wrapper hits, repeat with breakpoints at the post-RPC
+1. `UI_A485_ONE1` ran the identical delayed-D575 / `A412=1` harness with only
+   `A485=01 00 00 00`. The override is applied at stderr lines 12951-12955,
+   D575 completes at lines 12987-12991, and the run then enters the same A385
+   poll loop. It reaches 140 seconds with zero panics and no A407, A408, D589,
+   D591, or surface-map line. This is a negative control: A485's Boolean is
+   not the missing render-submission gate.
+2. Repeat with breakpoints at the post-RPC
    sites `0xfffffff02a0c9670` (`A415`), `0xfffffff02a0cb5b8` (`A458`),
    `0xfffffff02a0c95b8` (`A414`), and `0xfffffff02a0cc4e8` (`A484`).  Record
    `x30`/a backtrace and the reply bytes before their copyback/status reads;
@@ -108,7 +108,7 @@ evidence.
 
 | Question | Observation that settles it |
 |---|---|
-| Does `A485`'s Boolean control a path relevant to submission? | A single-variable `A485=1` run which either hits `A407`/`A408` and surface-map or repeats the existing A385-only result, with no other reply changes. |
+| Does `A485`'s Boolean control a path relevant to submission? | `UI_A485_ONE1` answered no for this boot path: it repeated the A385-only result with no submission or surface map. |
 | Which caller consumes `A415`/`A458`/`A414`/`A484` copyback data? | A runtime post-wrapper breakpoint recording `x30` and a stack trace for each call. |
 | What does the 27-word A030 record configure? | A caller trace plus pre-call memory dump of its argument; the current wrapper only proves the length and write-only transfer. |
 | Is any callback required before A407/A408? | A run showing first ordering among an A407/A408 hit, D589/D591, and `0xfffffff02a0b9600`; this log contains none of those events. |
