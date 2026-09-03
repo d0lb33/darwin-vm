@@ -22,8 +22,12 @@ the guest opens an `IOMobileFramebufferUserClient`, makes further IOMFB RPCs,
 and launchd ultimately reports repeated SpringBoard crashes.  Therefore the
 display is on the blocked path, but the current zero-output IOMFB stubs are not
 a solution.  The next measured display gap remains the input-carrying D-series
-callbacks described in `docs/re/iomfb-dseries.md:443-466`; no semantics for
-those callbacks are guessed here.
+callbacks described in `docs/re/iomfb-dseries.md`; no semantics for those
+callbacks are guessed here. The corrected `D120` control proves a real nested
+callback-context transaction and AP-generated completion
+(`/tmp/dvm/probe/IOMFB_NESTED_D120_FIX1.stderr.log:111-176`), superseding the
+earlier synthetic “reflection/kick” interpretation. It still does not produce
+a framebuffer or establish `default_fb_gated`.
 
 The last console line is not a termination record.  It is the constraint
 failure at `/tmp/dvm/probe/XARTFIX.serial.log:42078`; the preserved RAM scan
