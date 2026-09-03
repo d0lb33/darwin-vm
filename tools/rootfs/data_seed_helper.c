@@ -36,6 +36,7 @@
 #define STAGING_HELPER "/private/var/.dvm-data-seed/data_seed_helper"
 #define COMPLETE_MARKER "/private/var/root/.dvm-data-seed-complete"
 #define CF_STRING_ENCODING_UTF8 0x08000100U
+#define DIAG_XATTR_FLAGS (XATTR_NOFOLLOW | XATTR_SHOWCOMPRESSION)
 
 typedef const void *CFStringRef;
 typedef void *CFErrorRef;
@@ -57,6 +58,17 @@ struct apis {
 
 struct copy_context {
     const char *skip_source;
+    const char *tag;
+    int diagnostic;
+    int abort_on_error;
+    int saw_error;
+    int error_what;
+    int error_stage;
+    int error_errno;
+    char last_source[1024];
+    char last_destination[1024];
+    char error_source[1024];
+    char error_destination[1024];
     unsigned long files;
 };
 
@@ -166,14 +178,96 @@ static void initialise_data(const struct apis *a, const char *dest) {
 static int copy_status(int what, int stage, copyfile_state_t state,
                        const char *src, const char *dst, void *opaque) {
     struct copy_context *ctx = opaque;
+    if (ctx->diagnostic) {
+        /* COPYFILE_RECURSE_ERROR/COPYFILE_ERR are the only guest-visible
+         * attribution copyfile offers for a failed named stream. */
+        printf("DVM_SEED_DIAG_CB=%s what=%d stage=%d errno=%d src=%s dst=%s\n",
+               ctx->tag, what, stage, errno, src ? src : "-", dst ? dst : "-");
+    }
     (void)state;
-    (void)dst;
+    if (src && strlen(src) < sizeof(ctx->last_source))
+        strcpy(ctx->last_source, src);
+    if (dst && strlen(dst) < sizeof(ctx->last_destination))
+        strcpy(ctx->last_destination, dst);
     if (src && exact(src, ctx->skip_source)) {
         printf("DVM_SEED_SKIP_HARDWARE=1\n");
         return COPYFILE_SKIP;
     }
+    if (stage == COPYFILE_ERR && ctx->abort_on_error) {
+        if (ctx->saw_error) return COPYFILE_QUIT;
+        ctx->saw_error = 1;
+        ctx->error_what = what;
+        ctx->error_stage = stage;
+        ctx->error_errno = errno;
+        if (src && strlen(src) < sizeof(ctx->error_source))
+            strcpy(ctx->error_source, src);
+        if (dst && strlen(dst) < sizeof(ctx->error_destination))
+            strcpy(ctx->error_destination, dst);
+        printf("DVM_SEED_DIAG_FIRST_ERROR=%s what=%d stage=%d errno=%d src=%s dst=%s last_src=%s last_dst=%s\n",
+               ctx->tag, what, stage, errno, src ? src : "-", dst ? dst : "-",
+               ctx->last_source[0] ? ctx->last_source : "-",
+               ctx->last_destination[0] ? ctx->last_destination : "-");
+        return COPYFILE_QUIT;
+    }
     if (what == COPYFILE_RECURSE_FILE && stage == COPYFILE_START) ctx->files++;
     return COPYFILE_CONTINUE;
+}
+
+static unsigned long long fnv1a_bytes(const void *data, size_t size) {
+    const unsigned char *p = data;
+    unsigned long long h = 1469598103934665603ULL;
+    size_t i;
+    for (i = 0; i < size; i++) { h ^= p[i]; h *= 1099511628211ULL; }
+    return h;
+}
+
+static void report_xattrs(const char *tag, const char *path) {
+    ssize_t n = listxattr(path, NULL, 0, DIAG_XATTR_FLAGS);
+    char *names, *p;
+    if (n < 0) fail("DIAG_XATTR_LIST");
+    printf("DVM_SEED_DIAG_XATTR_LIST=%s bytes=%zd flags=0x%x path=%s\n",
+           tag, n, DIAG_XATTR_FLAGS, path);
+    if (!n) return;
+    names = malloc((size_t)n);
+    if (!names) fail("DIAG_XATTR_ALLOC");
+    if (listxattr(path, names, (size_t)n, DIAG_XATTR_FLAGS) != n) fail("DIAG_XATTR_NAMES");
+    for (p = names; p < names + n; p += strlen(p) + 1) {
+        ssize_t size = getxattr(path, p, NULL, 0, 0, DIAG_XATTR_FLAGS);
+        void *data;
+        if (size < 0) fail("DIAG_XATTR_SIZE");
+        data = malloc((size_t)size ?: 1);
+        if (!data) fail("DIAG_XATTR_ALLOC");
+        if (size && getxattr(path, p, data, (size_t)size, 0, DIAG_XATTR_FLAGS) != size)
+            fail("DIAG_XATTR_READ");
+        printf("DVM_SEED_DIAG_XATTR=%s name=%s bytes=%zd fnv1a64=%016llx\n",
+               tag, p, size, fnv1a_bytes(data, (size_t)size));
+        free(data);
+    }
+    free(names);
+}
+
+static void report_file(const char *tag, const char *path) {
+    struct stat st;
+    int fd, protection;
+    if (lstat(path, &st)) fail("DIAG_STAT");
+    fd = open(path, O_RDONLY);
+    if (fd < 0) fail("DIAG_OPEN");
+    protection = fcntl(fd, F_GETPROTECTIONCLASS);
+    close(fd);
+    printf("DVM_SEED_DIAG_FILE=%s path=%s uid=%u gid=%u mode=%o protection=%d\n",
+           tag, path, st.st_uid, st.st_gid, st.st_mode & 07777, protection);
+    report_xattrs(tag, path);
+}
+
+static void report_parent(const char *tag, const char *path) {
+    char parent[1024];
+    char *slash;
+    if (snprintf(parent, sizeof(parent), "%s", path) >= (int)sizeof(parent))
+        fail_rc("DIAG_PARENT_PATH", 0);
+    slash = strrchr(parent, '/');
+    if (!slash || slash == parent) fail_rc("DIAG_PARENT_PATH", 0);
+    *slash = '\0';
+    report_file(tag, parent);
 }
 
 static int copy_tree(const char *src, const char *dst, struct copy_context *ctx) {
@@ -188,6 +282,32 @@ static int copy_tree(const char *src, const char *dst, struct copy_context *ctx)
     }
     rc = copyfile(src, dst, state, COPYFILE_RECURSIVE | COPYFILE_ALL);
     copyfile_state_free(state);
+    return rc;
+}
+
+/* copyfile(source_root, data_mount) creates data_mount/var because source_root
+ * itself is named "var".  Apple /sbin/mount copies the contents of the
+ * System template into the existing Data mountpoint instead.  Enumerating the
+ * immediate children is deliberately boring but makes the mapping auditable:
+ * source_root/foo always becomes data_mount/foo, never data_mount/var/foo. */
+static int copy_tree_contents(const char *source_root, const char *dest,
+                              struct copy_context *ctx) {
+    DIR *dir = opendir(source_root);
+    struct dirent *entry;
+    int rc = 0;
+    if (!dir) fail("COPY_SOURCE_OPEN");
+    while ((entry = readdir(dir))) {
+        char src[1024], dst[1024];
+        if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+        if (snprintf(src, sizeof(src), "%s/%s", source_root, entry->d_name) >= (int)sizeof(src) ||
+            snprintf(dst, sizeof(dst), "%s/%s", dest, entry->d_name) >= (int)sizeof(dst)) {
+            closedir(dir);
+            fail_rc("COPY_PATH", 0);
+        }
+        rc = copy_tree(src, dst, ctx);
+        if (rc) break;
+    }
+    if (closedir(dir)) fail("COPY_SOURCE_CLOSE");
     return rc;
 }
 
@@ -259,6 +379,31 @@ static void make_dir(const char *path) {
     if (mkdir(path, 0700) && errno != EEXIST) fail("MKDIR");
 }
 
+static void make_parent_dirs(const char *path) {
+    char parent[1024], *p;
+    if (snprintf(parent, sizeof(parent), "%s", path) >= (int)sizeof(parent))
+        fail_rc("DIAG_PARENT_PATH", 0);
+    p = strrchr(parent, '/');
+    if (!p || p == parent) fail_rc("DIAG_PARENT_PATH", 0);
+    *p = '\0';
+    for (p = parent + 1; *p; p++) {
+        if (*p != '/') continue;
+        *p = '\0';
+        if (mkdir(parent, 0755) && errno != EEXIST) fail("DIAG_MKDIR");
+        *p = '/';
+    }
+    if (mkdir(parent, 0755) && errno != EEXIST) fail("DIAG_MKDIR");
+}
+
+static void make_relative_path(const char *source, const char *relative,
+                               char *path, size_t path_size) {
+    if (!relative || !*relative || relative[0] == '/' || strstr(relative, "..") ||
+        snprintf(path, path_size, "%s/%s", source, relative) >= (int)path_size) {
+        fprintf(stderr, "DVM_SEED_REFUSED=unsafe diagnostic relative path\n");
+        exit(2);
+    }
+}
+
 static void run_probe(const struct apis *a, const char *source, const char *dest,
                       const char *relative) {
     char src[1024], dst[1024];
@@ -285,7 +430,7 @@ static void run_full(const struct apis *a, const char *source, const char *dest)
     int fd;
     initialise_data(a, dest);
     memset(&ctx, 0, sizeof(ctx)); ctx.skip_source = "/private/var/hardware/private/var/hardware";
-    if (copy_tree(source, dest, &ctx)) fail("COPY");
+    if (copy_tree_contents(source, dest, &ctx)) fail("COPY");
     if (!ctx.files) fail_rc("COPY_FILES", 0);
     printf("DVM_SEED_COPY_FILES=%lu\n", ctx.files);
     root = a->cf_string(NULL, "/", CF_STRING_ENCODING_UTF8);
@@ -298,6 +443,102 @@ static void run_full(const struct apis *a, const char *source, const char *dest)
     if (fd < 0) fail("MARKER_OPEN");
     if (write(fd, "dvm data seed complete\n", 23) != 23 || fsync(fd) || close(fd)) fail("MARKER_WRITE");
     printf("DVM_SEED_MARKER_RC=0\n");
+}
+
+/* First identify the actual source that makes COPYFILE_ALL fail.  A template
+ * named stream can be materialized through com.apple.decmpfs rather than
+ * appearing as a directly enumerable ResourceFork xattr, so this deliberately
+ * aborts at the first copyfile error instead of guessing a source from a
+ * pre-scan.  A second, single-file diagnostic is only valid after this one
+ * gives us an exact source path. */
+static void run_diagnose(const struct apis *a, const char *source, const char *dest) {
+    const char *ordinary_rel = "MobileAsset/PreinstalledAssetsV2/InstallWithOs/"
+        "com_apple_MobileAsset_SoundScapesPickerAssets/"
+        "76ac0db885bfc20859eb82059482f5b2c1c439a9.asset/Info.plist";
+    char ordinary[1024], ordinary_dst[1024];
+    struct copy_context ctx;
+    if (snprintf(ordinary, sizeof(ordinary), "%s/%s", source, ordinary_rel) >= (int)sizeof(ordinary) ||
+        snprintf(ordinary_dst, sizeof(ordinary_dst), "%s/ordinary-info.plist", PROBE_DIR) >= (int)sizeof(ordinary_dst))
+        fail_rc("DIAG_PATH", 0);
+    make_dir(PROBE_DIR);
+    initialise_data(a, dest);
+    report_file("ordinary-source", ordinary);
+    report_parent("ordinary-source-parent", ordinary);
+    memset(&ctx, 0, sizeof(ctx)); ctx.skip_source = ""; ctx.tag = "ordinary"; ctx.diagnostic = 1;
+    errno = 0;
+    if (copy_tree(ordinary, ordinary_dst, &ctx)) fail("DIAG_ORDINARY_COPY");
+    report_file("ordinary-dest", ordinary_dst);
+    report_parent("ordinary-dest-parent", ordinary_dst);
+    verify_probe(ordinary, ordinary_dst);
+    printf("DVM_SEED_DIAG_ORDINARY_RC=0\n");
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.skip_source = "/private/var/hardware/private/var/hardware";
+    ctx.tag = "first-error";
+    ctx.diagnostic = 1;
+    ctx.abort_on_error = 1;
+    errno = 0;
+    if (!copy_tree_contents(source, dest, &ctx)) fail_rc("DIAG_EXPECTED_COPY_ERROR", 0);
+    if (!ctx.saw_error) {
+        printf("DVM_SEED_DIAG_COPY_FAILED_WITHOUT_CALLBACK=1 last_src=%s last_dst=%s\n",
+               ctx.last_source[0] ? ctx.last_source : "-",
+               ctx.last_destination[0] ? ctx.last_destination : "-");
+        fail_rc("DIAG_ERROR_CALLBACK", 0);
+    }
+    printf("DVM_SEED_DIAG_FIRST_ERROR_RC=0\n");
+}
+
+/* Copy one source leaf to its real Data-relative target after the ordinary
+ * control.  This is the follow-up to --diagnose: it never changes a source
+ * xattr and it does not claim success unless the data, metadata, and every
+ * xattr compare equal. */
+static void run_diagnose_file(const struct apis *a, const char *source,
+                              const char *dest, const char *relative) {
+    const char *ordinary_rel = "MobileAsset/PreinstalledAssetsV2/InstallWithOs/"
+        "com_apple_MobileAsset_SoundScapesPickerAssets/"
+        "76ac0db885bfc20859eb82059482f5b2c1c439a9.asset/Info.plist";
+    char ordinary_src[1024], ordinary_dst[1024], named_src[1024], named_dst[1024];
+    struct copy_context ctx;
+    ssize_t xattr_bytes;
+
+    make_relative_path(source, ordinary_rel, ordinary_src, sizeof(ordinary_src));
+    make_relative_path(dest, ordinary_rel, ordinary_dst, sizeof(ordinary_dst));
+    make_relative_path(source, relative, named_src, sizeof(named_src));
+    make_relative_path(dest, relative, named_dst, sizeof(named_dst));
+    make_dir(PROBE_DIR);
+    initialise_data(a, dest);
+
+    printf("DVM_SEED_DIAG_ORDINARY_TARGET=%s\n", ordinary_dst);
+    report_file("ordinary-source", ordinary_src);
+    report_parent("ordinary-source-parent", ordinary_src);
+    make_parent_dirs(ordinary_dst);
+    report_parent("ordinary-dest-parent", ordinary_dst);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.skip_source = ""; ctx.tag = "ordinary"; ctx.diagnostic = 1;
+    if (copy_tree(ordinary_src, ordinary_dst, &ctx)) fail("DIAG_ORDINARY_COPY");
+    report_file("ordinary-dest", ordinary_dst);
+    verify_probe(ordinary_src, ordinary_dst);
+    printf("DVM_SEED_DIAG_ORDINARY_RC=0\n");
+
+    xattr_bytes = listxattr(named_src, NULL, 0, DIAG_XATTR_FLAGS);
+    if (xattr_bytes <= 0) fail_rc("DIAG_NAMED_SOURCE_XATTR_BYTES", (int)xattr_bytes);
+    printf("DVM_SEED_DIAG_NAMED_TARGET=%s\n", named_dst);
+    report_file("named-source", named_src);
+    report_parent("named-source-parent", named_src);
+    make_parent_dirs(named_dst);
+    report_parent("named-dest-parent", named_dst);
+    memset(&ctx, 0, sizeof(ctx));
+    ctx.skip_source = ""; ctx.tag = "named"; ctx.diagnostic = 1;
+    ctx.abort_on_error = 1;
+    errno = 0;
+    if (copy_tree(named_src, named_dst, &ctx)) {
+        if (!ctx.saw_error) fail("DIAG_NAMED_COPY");
+        if (!lstat(named_dst, &(struct stat){0})) report_file("named-dest-partial", named_dst);
+        printf("DVM_SEED_DIAG_NAMED_EXPECTED_ERROR_RC=0\n");
+        return;
+    }
+    report_file("named-dest", named_dst);
+    verify_probe(named_src, named_dst);
+    printf("DVM_SEED_DIAG_NAMED_RC=0\n");
 }
 
 int main(int argc, char **argv) {
@@ -318,8 +559,26 @@ int main(int argc, char **argv) {
         run_full(&a, argv[2], argv[3]);
         return 0;
     }
+    if (argc == 4 && exact(argv[1], "--diagnose")) {
+        require_layout(argv[2], argv[3]);
+        require_empty_data(argv[3]);
+        a = load_apis();
+        remove_staging_helper();
+        run_diagnose(&a, argv[2], argv[3]);
+        return 0;
+    }
+    if (argc == 5 && exact(argv[1], "--diagnose-file")) {
+        require_layout(argv[3], argv[4]);
+        require_empty_data(argv[4]);
+        a = load_apis();
+        remove_staging_helper();
+        run_diagnose_file(&a, argv[3], argv[4], argv[2]);
+        return 0;
+    }
     {
-        fprintf(stderr, "usage: %s --probe REL %s %s | --full %s %s\n", argv[0], SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT);
+        fprintf(stderr, "usage: %s --probe REL %s %s | --diagnose %s %s | --diagnose-file REL %s %s | --full %s %s\n",
+                argv[0], SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT,
+                SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT);
         return 2;
     }
 }
