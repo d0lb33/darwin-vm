@@ -55,6 +55,8 @@ RUNTIME_ADDRESSES = {
     "d586_handler": 0xfffffff02a0da804,
     "d586_create_entry": 0xfffffff02a0c0ecc,
     "d586_local_create": 0xfffffff02a0c0620,
+    "layout_surface_capacity": 0xfffffff02a0c0684,
+    "layout_simple_entry": 0xfffffff02a0c0954,
     "d586_local_create_return": 0xfffffff02a0c1160,
     "d586_surface_store": 0xfffffff02a0c1178,
     "default_fb_public": 0xfffffff02a0c02c0,
@@ -70,6 +72,9 @@ RUNTIME_ADDRESSES = {
     "d120_entry": 0xfffffff02919b338,
     "d120_boot_call": 0xfffffff02919b384,
     "boot_vtable_call": 0xfffffff02918837c,
+    "d120_layout_gate": 0xfffffff029188074,
+    "d120_layout_writer": 0xfffffff029187e24,
+    "d120_layout_writer_exit": 0xfffffff029188030,
     "unified_pipeline2_target": 0xfffffff029189a68,
     "unified_pipeline2_pre_check": 0xfffffff029189a9c,
     "unified_pipeline2_post_check": 0xfffffff029189aa0,
@@ -372,18 +377,26 @@ class CallTracer:
                 # can independently prove whether that prerequisite changed.
                 memory["self_layout_state"] = self._memory(x0 + 0x3c0, 0x78)
         elif site == "d586_local_create":
-            # x0 is the candidate IOSurface, w1/w2 are dimensions, and x3/x4
-            # carry the bounded layout/backing descriptors assembled by the
-            # caller.  These reads distinguish a malformed descriptor from a
-            # later mapping failure without dumping the IOSurface object.
+            # x0 is the candidate IOSurface, w1/w2 are dimensions, x3 is the
+            # bounded layout descriptor, and x4 is a scalar backing length.
             add("x0", "w1", "w2", "x3", "x4", "x5")
-            x0, x3, x4 = r("x0"), r("x3"), r("x4")
+            x0, x3 = r("x0"), r("x3")
             if x0:
                 memory["surface_head"] = self._memory(x0, 0x20)
             if x3:
                 memory["layout_descriptor"] = self._memory(x3, 0x70)
-            if x4:
-                memory["backing_descriptor"] = self._memory(x4, 0x40)
+        elif site == "layout_surface_capacity":
+            # The preceding IOSurface getter returns its capacity in x0;
+            # x19 retains the scalar backing length computed by the caller.
+            add("x0", "x19", "x20", "w8")
+            x20 = r("x20")
+            if x20:
+                memory["layout_descriptor"] = self._memory(x20, 0x70)
+        elif site == "layout_simple_entry":
+            add("x0", "x19", "x20", "w22", "w28")
+            x20 = r("x20")
+            if x20:
+                memory["layout_descriptor"] = self._memory(x20, 0x70)
         elif site == "d586_local_create_return":
             # Return from the local creator.  x19 retains the IOMFB object
             # and x22 the candidate IOSurface; w0 is the first independent
@@ -443,6 +456,21 @@ class CallTracer:
             x4, x5 = r("x4"), r("x5")
             if x4 and x5:
                 memory["d120_out_buffer"] = self._memory(x4, x5)
+        elif site == "d120_layout_gate":
+            # A454 returns a Boolean capability.  A true result enters the
+            # current display-format/layout initializer immediately after
+            # this site; retain the owning IOMFB object in x19.
+            add("w0", "x19")
+        elif site == "d120_layout_writer":
+            add("x0")
+            x0 = r("x0")
+            if x0:
+                memory["self_layout_before"] = self._memory(x0 + 0x3c0, 0x70)
+        elif site == "d120_layout_writer_exit":
+            add("x19")
+            x19 = r("x19")
+            if x19:
+                memory["self_layout_after"] = self._memory(x19 + 0x3c0, 0x70)
         elif site == "boot_vtable_call":
             # The call at +0x837c is a vtable dispatch on the boot object's
             # x19 self; LR identifies the only immediate post-call branch.
