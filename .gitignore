@@ -7,3 +7,4 @@ mnt
 *.dmg
 __pycache__/
 .claude/worktrees/
+.codex/
