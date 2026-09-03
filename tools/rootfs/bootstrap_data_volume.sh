@@ -57,8 +57,14 @@ say() { echo "==> $*"; }
 mkdir -p "$WORK"
 [ -f "$SRC" ] || die "missing source image: $SRC"
 [ -f "$TC" ]  || die "missing trustcache: $TC (boots fail with 'code signature registration for shared cache failed')"
-NVRAM=$(ls "$REPO"/.claude/worktrees/*/nvram.bin 2>/dev/null | head -1)
-[ -n "$NVRAM" ] || die "no nvram.bin found; dt_fixup.py requires -nvram"
+# The canonical tracked NVRAM blob lives at the repository root.  Older
+# worktree-only invocations left a private copy under .claude/worktrees, but
+# bootstrap deliberately works in the shared checkout too.
+NVRAM=${NVRAM:-$REPO/nvram.bin}
+if [ ! -f "$NVRAM" ]; then
+    NVRAM=$(ls "$REPO"/.claude/worktrees/*/nvram.bin 2>/dev/null | head -1)
+fi
+[ -f "${NVRAM:-}" ] || die "no nvram.bin found; dt_fixup.py requires -nvram"
 
 # ---------------------------------------------------------------- phase 1 ----
 # Add the Data / Preboot / Hardware volume slots. Host-side, no mounting.
