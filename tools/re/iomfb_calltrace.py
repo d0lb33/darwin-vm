@@ -358,14 +358,32 @@ class CallTracer:
                 memory["dimensions_0x08"] = self._memory(x2, 8)
             if x4:
                 memory["result_0x04"] = self._memory(x4, 4)
-        elif site in ("d586_create_entry", "d586_local_create"):
+        elif site == "d586_create_entry":
             # The handler passes width and height in w1/w2.  Preserve the
-            # surface object and immediate creation arguments at both the
-            # public semantic entry and its local allocation/layout call.
-            add("x0", "w1", "w2", "w3", "w4", "x5")
+            # IOMFB object and immediate creation arguments at the public
+            # semantic entry.
+            add("x0", "w1", "w2", "x3", "x4", "x5")
             x0 = r("x0")
             if x0:
                 memory["self_head"] = self._memory(x0, 0x20)
+                # create_default_fb_surface copies this layout state into the
+                # descriptor passed to layout_buffers.  Include the adjacent
+                # hot-plug latch at +0x430 so a D575-before-D586 experiment
+                # can independently prove whether that prerequisite changed.
+                memory["self_layout_state"] = self._memory(x0 + 0x3c0, 0x78)
+        elif site == "d586_local_create":
+            # x0 is the candidate IOSurface, w1/w2 are dimensions, and x3/x4
+            # carry the bounded layout/backing descriptors assembled by the
+            # caller.  These reads distinguish a malformed descriptor from a
+            # later mapping failure without dumping the IOSurface object.
+            add("x0", "w1", "w2", "x3", "x4", "x5")
+            x0, x3, x4 = r("x0"), r("x3"), r("x4")
+            if x0:
+                memory["surface_head"] = self._memory(x0, 0x20)
+            if x3:
+                memory["layout_descriptor"] = self._memory(x3, 0x70)
+            if x4:
+                memory["backing_descriptor"] = self._memory(x4, 0x40)
         elif site == "d586_local_create_return":
             # Return from the local creator.  x19 retains the IOMFB object
             # and x22 the candidate IOSurface; w0 is the first independent
