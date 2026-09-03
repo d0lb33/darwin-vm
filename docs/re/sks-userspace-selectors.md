@@ -21,20 +21,23 @@ but its returned scalar has not satisfied that caller.
 
 | Public selector | Static path and externally checked shape | SEP wire operation | Confirmed request/reply layout | Evidence |
 |---|---|---|---|---|
-| 7 | Switch index 6 at `0xfffffff009555038`; requires one input scalar and one output scalar (`...5058-506c`). It calls `fcn.fffffff009547360` at `...50b0` with variant/state argument zero. | `0x19` | **Confirmed framing:** 96-byte IPC-v1 request: `u32 body_size=0x48` at `+0`, opaque 76-byte header, then `u32 request_selector=0` at `+0x4c`, `u64 context` at `+0x50`, `i32 requested_state` at `+0x58`, `u32 zero` at `+0x5c`. The current reply shape is 84 bytes: 76-byte header + `{u32 selector=2,u32 scalar}`. **The required scalar value is unverified.** | The off-by-one dispatch is explicit at `0xfffffff009552aa0` and the table base/index at `...2b1c-3c`; case 6 call at `...5058-50b0`; opcode literal at `0xfffffff00957c3d8-3e0`. Field offsets and live accepted frame are `darwin_sep.c:539-547`, `1380-1412`, and `PERSIST_DCP_OP09_CLASS3_1.stderr.log:529-532`. |
-| 17 | Switch index 16 at `0xfffffff009554c5c`. It accepts zero or one scalar (`...4c6c-4c90`); both paths join `0xfffffff009556e24-3c` and call the same `fcn.fffffff009547360`. | `0x19` | Same IPC frame and scalar-union reply as selector 7. Variant/input state differs; do not collapse it to selector 7 semantically. | Case 16, join, and call addresses above; `fcn.fffffff009547360` invokes generated codec `fcn.fffffff00957c36c` at `0xfffffff009547404-420`, which emits `w1=0x19` at `0xfffffff00957c3d8-3e0`. |
-| 35 | Switch index 34 starts at `0xfffffff009554c54`, clears `w27`, and falls through into index 16 at `...4c5c`. | `0x19` | Same IPC frame and scalar-union reply as selector 7; its public method has no independent wire codec. | Fall-through is adjacent instructions at `0xfffffff009554c54-5c`; shared operation proof is the selector-17 path above. |
+| 7 | Switch index 6 at `0xfffffff009555038`; requires one input scalar and one output scalar (`...5058-506c`). It calls `fcn.fffffff009547360` at `...50b0` with variant/state argument zero. | `0x19` | **Confirmed framing:** 96-byte IPC-v1 request: `u32 body_size=0x48` at `+0`, opaque 76-byte header, then `u32 request_selector=0` at `+0x4c`, `u64 context` at `+0x50`, `i32 requested_state` at `+0x58`, `u32 zero` at `+0x5c`. **Confirmed result kind:** the generated operation receives `blob_ptr*` and `blob_len*`; normal success must therefore supply a bounded blob, not the current 8-byte scalar response. | Dispatch is explicit at `0xfffffff009552aa0`, `...2b1c-3c`, and `...5038-50b0`. The generated call receives the two output addresses at `0xfffffff009547418-420`; the caller reloads them at `...744c-454` and the consumer copies the blob at `0xfffffff00956e770-794`. |
+| 17 | Switch index 16 at `0xfffffff009554c5c`. It accepts zero or one scalar (`...4c6c-4c90`); both paths join `0xfffffff009556e24-3c` and call the same `fcn.fffffff009547360`. | `0x19` | Same request framing and blob-result contract as selector 7. Variant/input state differs; do not collapse it to selector 7 semantically. | Case 16, join, and call addresses above; `fcn.fffffff009547360` invokes generated codec `fcn.fffffff00957c36c` at `0xfffffff009547404-420`, which emits `w1=0x19` at `0xfffffff00957c3d8-3e0`; the shared blob result is proved by `...7418-420` and `...744c-454`. |
+| 35 | Switch index 34 starts at `0xfffffff009554c54`, clears `w27`, and falls through into index 16 at `...4c5c`. | `0x19` | Same request framing and blob-result contract as selector 17; its public method has no independent wire codec. | Fall-through is adjacent instructions at `0xfffffff009554c54-5c`; shared operation and output pair proof are as above. |
 | 68 | Switch index 67 at `0xfffffff009554458`; it requires one input scalar and no structure output (`...445c-46c`). | `0x3d` | **Not yet decoded. Do not send a status-only reply.** The generated codec construction at `0xfffffff0095545b0-5dc` calls `fcn.fffffff00957dd54`, which invokes wire opcode `0x3d` at `0xfffffff00957ddc0-28`. Its payload and response union require a live capture. | The public selector appeared once as `sel:68` in `/tmp/dvm/probe/PERSIST_DCP_D120_OP09_1.serial.log:587`; static chain addresses above. A prior QEMU trace records unknown `0x3d` as status-only, which is not a positive control. |
 
 ### What the existing `0x19` evidence does and does not establish
 
-`fcn.fffffff009547360` supplies a callback to the generated codec and later
-uses its decoded output (`0xfffffff0095473f4-420`, `...742c-4c8`).  Thus an
-authenticated response and a syntactically accepted IPC frame are insufficient
-evidence that the public method succeeded.  The current model documents and
-returns `{selector=2, scalar=0}` at `qemu-sptm/hw/arm/darwin_sep.c:532-547`
-and `1643-1652`, yet the current full boot still returns `e00002bc` from all
-three public operations.
+`fcn.fffffff009547360` supplies a callback to the generated codec and gives
+it writable `blob_ptr*`/`blob_len*` outputs (`0xfffffff009547418-420`).  Only
+after the generated call returns zero does it reload the pair
+(`...744c-454`) and pass it to `fcn.fffffff00956e6ac`, which rejects a null
+pointer or length above `0x144`, copies the bytes, and records their decoded
+type (`0xfffffff00956e6e8-720`, `...770-794`).  Thus an authenticated response
+and a syntactically accepted IPC frame are insufficient: the present
+`{selector=2, scalar=0}` implementation at `qemu-sptm/hw/arm/darwin_sep.c:532-547`
+and `1643-1652` does not supply the normal success output at all and returns
+`e00002bc` from all three public operations.
 
 The causal witness is stronger for selector 7 than for the other selectors:
 after selector failures, ACMTRM's `_currentDeviceStateFromKeybag` fails for
@@ -60,20 +63,26 @@ that the bad argument originates in the guest's op-19 codec/callback decode,
 not in the serial path, an endpoint timeout, or an unobserved request shape.
 
 There is a useful but **non-authoritative** comparison in the checked-out
-reference `sep-sim.c:919-950`: its older `0x19` reply is a 16-byte payload
-`{u32 selector=0, u32 blob_length=8, byte blob[8]}` and its source labels that
-blob as a guessed DER value.  That is evidence that a selector-0 blob union is
-a plausible alternate arm; it is not an implementable iOS-27 value until the
-iOS-27 decoder is observed accepting it.
+reference `sep-sim.c:919-950`: its older `0x19` reply uses
+`{u32 selector=0, u32 blob_length=N, byte blob[N]}`.  That layout matches the
+iOS-27 caller's independently recovered pointer/length contract and is the
+implementable **candidate wire arm**: retain the observed 76-byte header,
+place selector zero at `+0x4c`, little-endian length at `+0x50`, and its bytes
+at `+0x54` (total reply length `0x54+N`).  The reference labels its particular
+eight-byte blob as guessed DER, so neither its contents nor selector zero is an
+established iOS-27 fact until a candidate reaches the post-call success path.
 
 ## Implementation boundary
 
 An implementer may retain the existing authenticated IPC-v1 envelope and the
-`0x19` request parser, but must remove the claim that `{selector=2,scalar=0}`
-is a valid response: the dynamic return witness disproves it.  Instrument the generated response callback beginning at
-`0xfffffff009547544` (runtime address plus the kernel slide), log the decoded
-selector and scalar, and run a two-value response sweep only on an isolated
-child.  For `0x3d`, first capture the request body and stop in
+`0x19` request parser, but must remove `{selector=2,scalar=0}` from the normal
+success path: both the dynamic return witness and the iOS-27 blob outputs
+disprove it.  The minimum candidate is the selector-zero length-prefixed blob
+layout above; first try an empty blob, then separately and visibly label any
+DER candidates as a hypothesis.  Instrument the generated response callback
+beginning at `0xfffffff009547544` (runtime address plus the kernel slide), log
+the decoded selector, blob pointer and length, and run a bounded isolated-child
+sweep.  For `0x3d`, first capture the request body and stop in
 `0xfffffff00957dd54` plus its response decoder; a guessed empty/status-only
 reply would repeat the already disproved no-op pattern.
 
@@ -81,6 +90,6 @@ reply would repeat the already disproved no-op pattern.
 
 | Question | Observation that would settle it |
 |---|---|
-| Which response-union arm and payload make selector 7 succeed? | Break after the `0x19` response is decoded in `fcn.fffffff009547360`/its callback, record the union discriminator and decoded value for a candidate, then show `ACMTRM: _currentDeviceStateFromKeybag` succeeds in the serial log. The present selector-2/scalar-zero arm is ruled out by `SKS_USERSEL_OP19_DYN_1.lldb.log`. |
+| Which response-union arm and payload make selector 7 succeed? | First try the derived candidate `{selector=0, length=N, bytes[N]}` and break at runtime `0xfffffff029547544` and `...7424`; record selector, blob pointer/length, and return value, then show `ACMTRM: _currentDeviceStateFromKeybag` succeeds in the serial log. The present selector-2/scalar-zero arm is ruled out by `SKS_USERSEL_OP19_DYN_1.lldb.log`. |
 | Are selectors 17 and 35 independently required for SpringBoard/Welcome? | With selector 7 cleared, compare a reproducible boot where each public-method error disappears against process evidence for `SpringBoard`/Setup Assistant and a rendered frame. |
 | What is the exact `0x3d` payload and reply union for selector 68? | Run one `DARWIN_SEP_DEBUG=1` isolated child and record the raw authenticated request, then break at the codec's response decoder; require both an echoed wire capture and a successful public selector-68 return. |
