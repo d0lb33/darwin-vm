@@ -175,6 +175,79 @@ def send_command(s, command, char_delay):
     send_paced(s, b': :; ' + command.encode() + b'\n', char_delay)
 
 
+def send_command_batch(s, commands, char_delay):
+    """Send several independently guarded shell lines without an idle gap.
+
+    A batch is deliberately just a sequence of normal, short shell lines: it
+    does not make a larger shell input record.  Keeping the ``: :;`` guard on
+    *each* line means an unusual receiver which drops a byte after a command
+    response still cannot turn a payload command into a different command.
+    The caller must use an independent guest witness for every line.
+    """
+    wire = b''.join(b': :; ' + command.encode() + b'\n'
+                    for command in commands)
+    send_paced(s, wire, char_delay)
+
+
+def wait_for_markers(s, markers, secs, drop_re, log, echo=True):
+    """Wait until every marker appears in one post-send console stream.
+
+    ``wait_for_text`` intentionally returns as soon as a single regex matches.
+    That is unsuitable for a batch because one recv() can contain several
+    cksum witnesses; returning after the first would discard the rest from the
+    caller's point of view.  This helper preserves the same logging behaviour
+    while proving that every command in a batch completed with its own marker.
+    """
+    wanted = {marker: re.compile(re.escape(marker)) for marker in markers}
+    seen = set()
+    deadline = time.time() + secs
+    line_buf = b''
+    text_buf = ''
+    while time.time() < deadline:
+        try:
+            chunk = s.recv(65536)
+        except BlockingIOError:
+            time.sleep(0.02)
+            continue
+        except (ConnectionResetError, OSError):
+            return False
+        if not chunk:
+            return False
+
+        line_buf += chunk
+        text_buf = (text_buf + chunk.decode('utf-8', 'replace'))[-16384:]
+        for marker, pattern in wanted.items():
+            if pattern.search(text_buf):
+                seen.add(marker)
+        while b'\n' in line_buf:
+            line, line_buf = line_buf.split(b'\n', 1)
+            text = line.decode('utf-8', 'replace').rstrip('\r')
+            if log:
+                log.write(text + '\n')
+            if not (drop_re and drop_re.search(text)) and echo:
+                print(text, flush=True)
+        if len(seen) == len(wanted):
+            if line_buf:
+                text = line_buf.decode('utf-8', 'replace')
+                if log:
+                    log.write(text)
+                if not (drop_re and drop_re.search(text)) and echo:
+                    print(text, end='', flush=True)
+            if log:
+                log.flush()
+            return True
+
+    if line_buf:
+        text = line_buf.decode('utf-8', 'replace')
+        if log:
+            log.write(text)
+        if not (drop_re and drop_re.search(text)) and echo:
+            print(text, end='', flush=True)
+    if log:
+        log.flush()
+    return False
+
+
 def remote_path_is_safe(path):
     """Limit uploads to disposable Data/User staging namespaces."""
     roots = ('/private/var/.dvm-data-seed/',
@@ -233,6 +306,35 @@ def upload(s, local_path, remote_path, char_delay, prompt_re, args,
                 drain(s, 0.5, 0.2, drop_re, log, echo=False)
         sys.exit('serial: upload completion marker did not arrive')
 
+    def checked_batch(entries, attempts=1):
+        """Run short, idempotent writes under one prompt handshake.
+
+        Each entry retains a guest cksum witness.  If any witness is absent,
+        retry the whole batch after restoring a shell boundary.  The writes use
+        ``>``, so overwriting an already accepted part cannot append or make a
+        good transfer look complete.  Batches are only used for transport part
+        files; setup and final verification remain individually witnessed.
+        """
+        commands = [command for command, _ in entries]
+        markers = [marker for _, marker in entries]
+        for attempt in range(1, attempts + 1):
+            if not wait_for_prompt(s, prompt_re, args.prompt_timeout,
+                                   char_delay, drop_re, log):
+                if attempt != attempts:
+                    continue
+                sys.exit('serial: shell prompt did not arrive before upload batch')
+            send_command_batch(s, commands, char_delay)
+            if wait_for_markers(s, markers, args.echo_timeout, drop_re, log):
+                drain(s, 0.10, 0.05, drop_re, log)
+                return
+            if attempt != attempts:
+                # A truncated line can leave the shell consuming continuation
+                # input.  The identical recovery used by checked() restores a
+                # boundary before idempotently replacing every part in batch.
+                send_paced(s, b'\x03\n', char_delay)
+                drain(s, 0.5, 0.2, drop_re, log, echo=False)
+        sys.exit('serial: upload batch completion markers did not all arrive')
+
     # mkdir is intentionally only the unique parent created by this tool.
     remote_dir = os.path.dirname(remote_path)
     encoded_path = remote_path + '.b64'
@@ -271,6 +373,7 @@ def upload(s, local_path, remote_path, char_delay, prompt_re, args,
     chunk_bytes = min(120, ((252 - line_overhead) // 4) * 4)
     if chunk_bytes <= 0:
         sys.exit('serial: upload target leaves no room for a safe chunk line')
+    entries = []
     for number, off in enumerate(range(0, len(encoded), chunk_bytes), 1):
         chunk = encoded[off:off + chunk_bytes]
         part_path = '%s/%06d' % (part_dir, number)
@@ -280,8 +383,13 @@ def upload(s, local_path, remote_path, char_delay, prompt_re, args,
         except (OSError, subprocess.CalledProcessError) as e:
             sys.exit(f'serial: cannot calculate chunk cksum: {e}')
         marker = '%s %d %s' % (chunk_cksum, len(chunk), part_path)
-        checked("printf '%%s' '%s' > %s; /bin/cksum %s" %
-                (chunk, part_path, part_path), marker, attempts=8)
+        entries.append(("printf '%%s' '%s' > %s; /bin/cksum %s" %
+                        (chunk, part_path, part_path), marker))
+        if len(entries) == args.upload_batch:
+            checked_batch(entries, attempts=8)
+            entries = []
+    if entries:
+        checked_batch(entries, attempts=8)
 
     witness = 'DVM_UPLOAD_FINAL_RC=0 DVM_UPLOAD_BYTES=%d' % len(blob)
     try:
@@ -325,11 +433,16 @@ def main():
                    help='seconds to wait for the command echo')
     p.add_argument('--char-delay', type=float, default=0.01,
                    help='seconds between transmitted UART bytes')
+    p.add_argument('--upload-batch', type=int, default=4,
+                   help='independently checksummed upload part lines per prompt')
     p.add_argument('--no-handshake', action='store_true',
                    help='send directly; only for consoles that are not shells')
     p.add_argument('--remote-path',
                    help='guest destination in an allowed .dvm-data-seed staging namespace')
     args = p.parse_args()
+
+    if args.upload_batch < 1:
+        p.error('--upload-batch must be at least one')
 
     if not os.path.exists(args.sock):
         sys.exit(f'serial: no such socket: {args.sock}')
