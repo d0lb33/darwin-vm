@@ -154,7 +154,15 @@ def wait_for_prompt(s, prompt_re, timeout, char_delay, drop_re, log):
     # chance to install its chardev watches before the sacrificial input.
     time.sleep(0.05)
     send_paced(s, b'\n\n', char_delay)
-    return wait_for_text(s, prompt_re, timeout, drop_re, log)
+    if not wait_for_text(s, prompt_re, timeout, drop_re, log):
+        return False
+    # If neither sacrificial newline was dropped, the shell emits two prompts.
+    # wait_for_text returns as soon as it sees the first one; sending the real
+    # command immediately lets the second prompt bisect the terminal echo
+    # (for example ``mount_# apfs``).  Drain that bounded remainder and require
+    # a quiet prompt boundary before transmitting bytes whose echo we verify.
+    drain(s, 0.5, 0.10, drop_re, log, echo=False)
+    return True
 
 
 def send_command(s, command, char_delay):
@@ -181,14 +189,15 @@ def upload(s, local_path, remote_path, char_delay, prompt_re, args,
 
     This deliberately does not add a binary to an image on the host.  Each
     shell command is handshake/echo checked like ordinary serial commands,
-    while the final byte count is a guest-side witness that the decoder did
-    work.  Chunks are written to fixed-width numbered files by the shell
-    builtin; one guest decoder runs only after the complete text has arrived.
-    A missing completion marker can therefore retry the same chunk without
-    duplicating bytes.  This also avoids repeatedly spawning base64 (and
-    flooding the console with policy logs).
-    The target namespaces are intentionally narrow: callers must have mounted
-    disposable Data at /private/var or User at /private/var/hardware.
+    while the final byte count and checksum witness that the decoder did work.
+    Chunks are written to fixed-width numbered files by the shell builtin, then
+    checked with the guest's cksum before they are accepted; a shell RC alone
+    only proves printf ran and does not detect a dropped payload byte.  One
+    guest decoder runs after every chunk is proven.  A missing or mismatched
+    chunk witness can therefore retry that fixed path without duplicating data.
+    The target namespaces are intentionally narrow.  Protected staging files
+    must be uploaded, executed, and removed in the same guest keybag session;
+    their file keys are not reusable by a later restore boot.
     """
     if not remote_path_is_safe(remote_path):
         sys.exit('serial: upload target must be in a supported .dvm-data-seed namespace')
@@ -227,10 +236,24 @@ def upload(s, local_path, remote_path, char_delay, prompt_re, args,
     # mkdir is intentionally only the unique parent created by this tool.
     remote_dir = os.path.dirname(remote_path)
     encoded_path = remote_path + '.b64'
-    part_glob = encoded_path + '.part.*'
-    checked("mkdir -p %s && /bin/rm -f %s %s; echo DVM_UPLOAD_SETUP_RC=$?" %
-            (remote_dir, encoded_path, part_glob),
-            'DVM_UPLOAD_SETUP_RC=0', attempts=3)
+    old_part_glob = encoded_path + '.part.*'
+    # Keep each checksummed write line below the restore shell's observed
+    # roughly-256-byte safe envelope.  The former target-derived part names
+    # left no room for a content witness on the same line.
+    part_dir = remote_dir + '/.upload-parts'
+    part_glob = part_dir + '/*'
+    # Remove an earlier decoded target as well as transport fragments.  A
+    # protected APFS inode from a prior restore boot may no longer be
+    # unwrap-able in the current key state; truncating that inode makes a
+    # byte-perfect upload look corrupt even though unlinking it and creating a
+    # fresh staging inode is valid inside this disposable namespace.
+    checked("mkdir -p %s %s; echo DVM_UPLOAD_SETUP_DIR_RC=$?" %
+            (remote_dir, part_dir), 'DVM_UPLOAD_SETUP_DIR_RC=0', attempts=3)
+    checked("/bin/rm -f %s %s; echo DVM_UPLOAD_SETUP_TARGET_RC=$?" %
+            (remote_path, encoded_path),
+            'DVM_UPLOAD_SETUP_TARGET_RC=0', attempts=3)
+    checked("/bin/rm -f %s %s; echo DVM_UPLOAD_SETUP_RC=$?" %
+            (old_part_glob, part_glob), 'DVM_UPLOAD_SETUP_RC=0', attempts=3)
     # Keep an individual line comfortably below the shell's and UART's input
     # limits.  Base64 has no quoting metacharacters, so single quotes are safe.
     encoded = base64.b64encode(blob).decode('ascii')
@@ -239,24 +262,48 @@ def upload(s, local_path, remote_path, char_delay, prompt_re, args,
     # that visibly ring its bell.  Keep the complete shell line below 256 B.
     # It is slower, but every accepted chunk must be exact before a trust-cache
     # controlled guest executable is allowed to run.
-    for number, off in enumerate(range(0, len(encoded), 128), 1):
-        chunk = encoded[off:off + 128]
-        marker = 'DVM_UPLOAD_CHUNK_%d_RC' % number
-        part_path = '%s.part.%06d' % (encoded_path, number)
-        checked("printf '%%s' '%s' > %s; echo %s=$?" %
-                (chunk, part_path, marker), marker + '=0', attempts=3)
+    sample_part = '%s/%06d' % (part_dir, 1)
+    line_overhead = len((": :; printf '%%s' '' > %s; /bin/cksum %s\n" %
+                         (sample_part, sample_part)).encode('ascii'))
+    # Reserve a four-byte-aligned Base64 payload inside a 252-byte transmitted
+    # line.  User staging has a longer prefix than Data staging, so a fixed
+    # payload size that is safe for one is not necessarily safe for the other.
+    chunk_bytes = min(120, ((252 - line_overhead) // 4) * 4)
+    if chunk_bytes <= 0:
+        sys.exit('serial: upload target leaves no room for a safe chunk line')
+    for number, off in enumerate(range(0, len(encoded), chunk_bytes), 1):
+        chunk = encoded[off:off + chunk_bytes]
+        part_path = '%s/%06d' % (part_dir, number)
+        try:
+            chunk_cksum = subprocess.check_output(
+                ['cksum'], input=chunk.encode('ascii')).decode().split()[0]
+        except (OSError, subprocess.CalledProcessError) as e:
+            sys.exit(f'serial: cannot calculate chunk cksum: {e}')
+        marker = '%s %d %s' % (chunk_cksum, len(chunk), part_path)
+        checked("printf '%%s' '%s' > %s; /bin/cksum %s" %
+                (chunk, part_path, part_path), marker, attempts=8)
 
     witness = 'DVM_UPLOAD_FINAL_RC=0 DVM_UPLOAD_BYTES=%d' % len(blob)
     try:
         cksum = subprocess.check_output(['cksum', local_path], text=True).split()[0]
     except (OSError, subprocess.CalledProcessError) as e:
         sys.exit(f'serial: cannot calculate host cksum: {e}')
-    # The restore ramdisk deliberately has a very small userland; avoid awk
-    # here and let POSIX sh split cksum's "sum bytes filename" output.
-    checked("/bin/cat %s > %s; joined=$?; test \"$joined\" -eq 0 && /bin/base64 -d %s > %s; dec=$?; test \"$joined\" -eq 0 && test \"$dec\" -eq 0 && test \"$(wc -c < %s)\" -eq %d && set -- $(cksum %s) && test \"$1\" = %s; rc=$?; test \"$rc\" -ne 0 || /bin/rm -f %s %s; echo DVM_UPLOAD_FINAL_RC=$rc DVM_UPLOAD_BYTES=%d" %
-            (part_glob, encoded_path, encoded_path, remote_path, remote_path,
-             len(blob), remote_path, cksum, encoded_path, part_glob,
-             len(blob)), witness, final=True, attempts=3)
+    # Keep the join/decode/verification lines independently witnessed and below
+    # the UART's safe input length too.  A former all-in-one final command was
+    # itself long enough to be corrupted, making good chunks look bad.
+    checked("/bin/cat %s > %s; echo DVM_UPLOAD_JOIN_RC=$?" %
+            (part_glob, encoded_path), 'DVM_UPLOAD_JOIN_RC=0', attempts=3)
+    checked("/bin/base64 -d %s > %s; echo DVM_UPLOAD_DECODE_RC=$?" %
+            (encoded_path, remote_path), 'DVM_UPLOAD_DECODE_RC=0', attempts=3)
+    checked("test \"$(wc -c < %s)\" -eq %d; echo DVM_UPLOAD_SIZE_RC=$?" %
+            (remote_path, len(blob)), 'DVM_UPLOAD_SIZE_RC=0', attempts=3)
+    # The restore ramdisk deliberately has a small userland; let POSIX sh split
+    # cksum's "sum bytes filename" output instead of depending on awk.
+    checked("set -- $(cksum %s); test \"$1\" = %s; echo DVM_UPLOAD_CKSUM_RC=$?" %
+            (remote_path, cksum), 'DVM_UPLOAD_CKSUM_RC=0', attempts=3)
+    checked("/bin/rm -f %s %s; /bin/rmdir %s; echo DVM_UPLOAD_FINAL_RC=$? DVM_UPLOAD_BYTES=%d" %
+            (encoded_path, part_glob, part_dir, len(blob)), witness,
+            final=True, attempts=3)
 
 
 def main():
@@ -281,7 +328,7 @@ def main():
     p.add_argument('--no-handshake', action='store_true',
                    help='send directly; only for consoles that are not shells')
     p.add_argument('--remote-path',
-                   help='guest destination in the Data/User .dvm-data-seed staging namespace')
+                   help='guest destination in an allowed .dvm-data-seed staging namespace')
     args = p.parse_args()
 
     if not os.path.exists(args.sock):
