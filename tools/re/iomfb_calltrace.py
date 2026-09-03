@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Bounded live IOMFB call tracing through QEMU's gdb-remote stub.
 
-This is deliberately a *trace*, not a debugger front end: every breakpoint
-callback records a small, fixed set of registers, makes only small read-only
-guest-memory reads, and immediately continues the guest.  The addresses below
+This is deliberately a *trace*, not a debugger front end: by default every
+breakpoint callback records a small, fixed set of registers, makes only small
+read-only guest-memory reads, and immediately continues the guest.  One
+explicit diagnostic option can force a single post-D120 capability result;
+its before/after register values are recorded in JSONL.  The addresses below
 are the iOS 27 iPhone17,3 runtime addresses with the measured +0x20000000
 kernel slide already applied.  Do not apply a second slide.
 
@@ -26,8 +28,11 @@ Evidence for the sites: A401's wrapper is documented in
 docs/re/iomfb-link.md:649-677; D575's handler and its hot-plug-shaped vtable
 call are documented in docs/re/boot-idle.md:145-153; the default-framebuffer
 and A482 control flow was disassembled at /tmp/dvm/defaultfb.dis during the
-display-runtime trace plan.  ``surface_map_dcp`` is the DART/swap boundary
-identified in docs/re/ca-software-path.md:331-340.
+display-runtime trace plan.  The current iOS 27 D586 handler and its direct
+default-surface callees were disassembled from ``firmware/bootkc`` after the
+current D582 target's panic strings proved that older callback numbering is
+not reusable.  ``surface_map_dcp`` is the DART/swap boundary identified in
+docs/re/ca-software-path.md:331-340.
 """
 
 import argparse
@@ -47,6 +52,11 @@ RUNTIME_ADDRESSES = {
     "hotplug_entry": 0xfffffff02a0bcad8,
     "d575_handler": 0xfffffff02a0d9e4c,
     "d575_callsite": 0xfffffff02a0d9f7c,
+    "d586_handler": 0xfffffff02a0da804,
+    "d586_create_entry": 0xfffffff02a0c0ecc,
+    "d586_local_create": 0xfffffff02a0c0620,
+    "d586_local_create_return": 0xfffffff02a0c1160,
+    "d586_surface_store": 0xfffffff02a0c1178,
     "default_fb_public": 0xfffffff02a0c02c0,
     "default_fb_gated": 0xfffffff02a0c03e8,
     "default_local_create_return": 0xfffffff02a0c04ec,
@@ -61,7 +71,14 @@ RUNTIME_ADDRESSES = {
     "d120_boot_call": 0xfffffff02919b384,
     "boot_vtable_call": 0xfffffff02918837c,
     "unified_pipeline2_target": 0xfffffff029189a68,
+    "unified_pipeline2_pre_check": 0xfffffff029189a9c,
+    "unified_pipeline2_post_check": 0xfffffff029189aa0,
+    "unified_pipeline2_dispatch": 0xfffffff029189ac4,
     "iomfg_bridge": 0xfffffff02a0d5490,
+    "iomfg_bridge_dispatch": 0xfffffff02a0d54d0,
+    "d120_pre_signal_stub": 0xfffffff02919e030,
+    "d120_stage_signal_stub": 0xfffffff02919e180,
+    "d120_stage_finish_stub": 0xfffffff02919e1d0,
     "hotplug_post_latch": 0xfffffff02a0bcb94,
     "default_dimension_query_return": 0xfffffff02a0c047c,
 }
@@ -182,6 +199,8 @@ def make_parser(prog=None):
                         help="validate a complete JSON map and exit")
     parser.add_argument("--dry-run", action="store_true",
                         help="validate inputs and print the proposed trace without LLDB")
+    parser.add_argument("--force-unified-pipeline-ready", action="store_true",
+                        help="diagnostic: after D120, force the +0x78 readiness result to one")
     return parser
 
 
@@ -216,6 +235,7 @@ def offline_main(argv=None):
             "endpoint": "%s:%d" % (args.host, args.port),
             "output": args.output,
             "site_caps": caps,
+            "force_unified_pipeline_ready": args.force_unified_pipeline_ready,
         }, indent=2, sort_keys=True))
         return 0
     return args, addresses, caps
@@ -224,7 +244,8 @@ def offline_main(argv=None):
 class CallTracer:
     """LLDB callback state.  Every callback returns False to auto-continue."""
 
-    def __init__(self, lldb, process, stream, addresses, caps):
+    def __init__(self, lldb, process, stream, addresses, caps,
+                 force_unified_pipeline_ready=False):
         self.lldb = lldb
         self.process = process
         self.stream = stream
@@ -234,6 +255,8 @@ class CallTracer:
         self.emitted = defaultdict(int)
         self.callback_errors = defaultdict(int)
         self.breakpoint_ids = []
+        self.force_unified_pipeline_ready = force_unified_pipeline_ready
+        self.d120_seen = False
 
     @staticmethod
     def _register(frame, name):
@@ -324,6 +347,41 @@ class CallTracer:
             x2 = r("x2")
             if site == "d575_handler" and x2:
                 memory["input_0x58"] = self._memory(x2, 0x58)
+        elif site == "d586_handler":
+            # Current rpc_callee_gated ABI: D586 consumes two little-endian
+            # u32 dimensions and returns a four-byte Boolean slot.  This is
+            # the current handler that calls create_default_fb_surface; D582
+            # is swap_complete_head_of_line_gated in this firmware.
+            add("x0", "x1", "x2", "w3", "x4", "w5")
+            x2, x4 = r("x2"), r("x4")
+            if x2:
+                memory["dimensions_0x08"] = self._memory(x2, 8)
+            if x4:
+                memory["result_0x04"] = self._memory(x4, 4)
+        elif site in ("d586_create_entry", "d586_local_create"):
+            # The handler passes width and height in w1/w2.  Preserve the
+            # surface object and immediate creation arguments at both the
+            # public semantic entry and its local allocation/layout call.
+            add("x0", "w1", "w2", "w3", "w4", "x5")
+            x0 = r("x0")
+            if x0:
+                memory["self_head"] = self._memory(x0, 0x20)
+        elif site == "d586_local_create_return":
+            # Return from the local creator.  x19 retains the IOMFB object
+            # and x22 the candidate IOSurface; w0 is the first independent
+            # success witness before the surface pointer is published.
+            add("w0", "x19", "x22")
+            x19 = r("x19")
+            if x19:
+                memory["self_plus_0x168_before"] = self._memory(x19 + 0x168, 8)
+        elif site == "d586_surface_store":
+            # Instruction at this site stores x22 to [x19+0x168].  Capture
+            # both values immediately before publication; a later readback
+            # can then prove the store survived beyond the breakpoint.
+            add("x0", "x19", "x22")
+            x19 = r("x19")
+            if x19:
+                memory["self_plus_0x168_before"] = self._memory(x19 + 0x168, 8)
         elif site in ("default_fb_public", "default_fb_gated"):
             add("x0", "w1", "w2")
             x0 = r("x0")
@@ -378,6 +436,26 @@ class CallTracer:
             x0 = r("x0")
             if x0:
                 memory["self_plus_0x5e88"] = self._memory(x0 + 0x5e88, 8)
+        elif site == "unified_pipeline2_pre_check":
+            # Immediately before the authenticated vtable +0x78 call: x0 is
+            # the peer object and x8 is the resolved method.  Capturing both
+            # turns the following Boolean failure into an exact callee.
+            add("x0", "x8", "x16", "x17")
+            x0 = r("x0")
+            if x0:
+                memory["peer_object_head"] = self._memory(x0, 0x20)
+        elif site == "unified_pipeline2_post_check":
+            # The preceding vtable +0x78 call returns a Boolean in w0.  A
+            # false result exits immediately; a true result next requires
+            # the published peer at the retained UnifiedPipeline2 self+0x438.
+            add("w0", "x19")
+            x19 = r("x19")
+            if x19:
+                memory["self_plus_0x438"] = self._memory(x19 + 0x438, 8)
+        elif site == "unified_pipeline2_dispatch":
+            # Both gates passed.  x0 is the peer sent through the import-stub
+            # tail dispatch at 0xfffffff00919e374.
+            add("x0", "x19", "w0")
         elif site == "iomfg_bridge":
             # IOMobileGraphicsFamily-DCP bridge entry stores x0 in x19 and
             # directly reads its +0x30 peer (iomfg_dcp.r2dis.txt:36103+).
@@ -385,6 +463,20 @@ class CallTracer:
             x0 = r("x0")
             if x0:
                 memory["self_plus_0x30"] = self._memory(x0 + 0x30, 8)
+        elif site == "iomfg_bridge_dispatch":
+            # Immediately before the authenticated tail call through the
+            # bridge peer's vtable +0x580.  x0 is the peer, x16/x8 its
+            # resolved method, and x19 retains the bridge object.
+            add("x0", "x8", "x16", "x17", "x19")
+            x0 = r("x0")
+            if x0:
+                memory["bridge_peer_head"] = self._memory(x0, 0x20)
+        elif site in ("d120_pre_signal_stub", "d120_stage_signal_stub",
+                      "d120_stage_finish_stub"):
+            # Import-stub tail boundary, after loading the signed destination
+            # from the AppleMobileDisp GOT.  The signal call carries x1=1;
+            # the finish call takes only the retained UnifiedPipeline2 self.
+            add("x0", "x1", "x2", "x3", "x16", "x17")
         elif site == "hotplug_post_latch":
             # The preceding instructions latch +0x38a and +0x430, then the
             # site reads +0x384.  Record exactly the fields that distinguish
@@ -417,9 +509,23 @@ class CallTracer:
 
     def handle_hit(self, site, frame, bp_loc, _internal_dict):
         self.hits[site] += 1
+        if site == "d120_entry":
+            self.d120_seen = True
         if self.emitted[site] < self.caps[site]:
             try:
                 rec = self._capture(site, frame, bp_loc)
+                if (site == "unified_pipeline2_post_check" and
+                        self.force_unified_pipeline_ready and self.d120_seen):
+                    reg = frame.FindRegister("w0")
+                    before = reg.GetValueAsUnsigned() if reg and reg.IsValid() else None
+                    success = bool(reg and reg.IsValid() and
+                                   reg.SetValueFromCString("0x1"))
+                    rec["diagnostic_mutation"] = {
+                        "register": "w0",
+                        "before": _hex(before or 0, 8),
+                        "after": "0x00000001",
+                        "success": success,
+                    }
                 self.stream.write(json.dumps(rec, sort_keys=True) + "\n")
                 self.stream.flush()
                 self.emitted[site] += 1
@@ -591,7 +697,8 @@ def run_live(args, addresses, caps, lldb, debugger=None):
                            (error.GetCString() or "unknown error"))
 
     stream = _open_output(args.output)
-    tracer = CallTracer(lldb, process, stream, addresses, caps)
+    tracer = CallTracer(lldb, process, stream, addresses, caps,
+                        args.force_unified_pipeline_ready)
     state_records = 0
     state_dropped = 0
     end_reason = "duration"
@@ -657,6 +764,7 @@ def run_live(args, addresses, caps, lldb, debugger=None):
             "address_map": _json_map(addresses),
             "endpoint": "%s:%d" % (args.host, args.port),
             "site_caps": caps,
+            "force_unified_pipeline_ready": args.force_unified_pipeline_ready,
         }, sort_keys=True) + "\n")
         stream.flush()
 
