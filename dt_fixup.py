@@ -547,6 +547,12 @@ def fixup_sptm(d):
     'BootArgs', 'slide',
     'CL4-rx', 'CL4-ro', 'CL4-rw', 'CL4-le', 'CL4-dummypage', 'CL4-entry', 'CL4-virt', 'CL4-dummypage',
     'RAMDisk',
+    # iBoot publishes the reserved display-memory range under this name.
+    # IOMobileFramebufferAP's current create_default_fb_surface path panics
+    # if it is absent (IOMobileFramebufferAP.cpp:3290).  Keep the placeholder
+    # uninitialized here; xnuboot_sptm fills it from the already-reserved -fb
+    # carveout so the DT cannot claim ordinary guest RAM as display memory.
+    'PurpleGfxMem',
   ]:
     # iBoot sets uninitialized regions to (-1, -1)
     m.props[i] = struct.pack("<QQ", 0xffffffffffffffff, 0xffffffffffffffff)
@@ -776,4 +782,3 @@ def main():
 
 if __name__=="__main__":
   main()
-
