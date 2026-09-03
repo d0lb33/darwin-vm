@@ -8,6 +8,7 @@ starts qemu, polls the serial log for a marker, and prints the elapsed time.
 usage:
   tools/time_boot.py --qemu <path> --dtree <file> [--marker "can't access tty"]
                      [--timeout 120] [--tag NAME] [--repeat N]
+                     [-- QEMU_ARGS...]
 
 Written for docs/re/hvf-acceleration.md, where the TCG boot time is the
 denominator of every speedup number.
@@ -15,6 +16,7 @@ denominator of every speedup number.
 import argparse
 import os
 import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -44,6 +46,7 @@ def one_run(args, i):
     if os.path.exists(os.path.join(REPO, "firmware/sptm")):
         cmd += ["-sptm", os.path.join(REPO, "firmware/sptm"),
                 "-txm", os.path.join(REPO, "firmware/txm")]
+    cmd += args.qemu_args
 
     marker = args.marker.encode()
     with open(err, "wb") as ef:
@@ -85,7 +88,14 @@ def main():
     ap.add_argument("--timeout", type=float, default=120)
     ap.add_argument("--tag", default="timeboot")
     ap.add_argument("--repeat", type=int, default=1)
+    ap.add_argument("qemu_args", nargs=argparse.REMAINDER,
+                    help="arguments after -- are passed directly to QEMU")
     args = ap.parse_args()
+
+    # argparse.REMAINDER normally consumes the separator, but accepting an
+    # explicit leading one keeps this robust when called through wrappers.
+    if args.qemu_args[:1] == ["--"]:
+        args.qemu_args = args.qemu_args[1:]
 
     times = []
     for i in range(args.repeat):
@@ -96,8 +106,9 @@ def main():
             print(f"run {i}: {t:.2f} s to \"{args.marker}\"")
             times.append(t)
     if times:
-        print(f"min {min(times):.2f} s  mean {sum(times)/len(times):.2f} s  "
-              f"max {max(times):.2f} s  ({len(times)} runs)")
+        print(f"min {min(times):.2f} s  median {statistics.median(times):.2f} s  "
+              f"mean {statistics.fmean(times):.2f} s  max {max(times):.2f} s  "
+              f"({len(times)} runs)")
     return 0 if times else 1
 
 
