@@ -28,10 +28,12 @@
 # currently spends every boot writing into an -ephemeral-data tmpfs. Pointed at
 # a real Data volume it pays that cost once, and every later boot mounts an
 # already-populated volume. Ownership is set by iOS as root, which sidesteps
-# the no-sudo problem entirely.
+# the no-sudo problem entirely. Preboot and Hardware also need empty slots:
+# the disk fstab resolves *every* remaining entry by APFS role before it will
+# mount Data, so a Data-only container leaves /private/var read-only.
 #
 # Host filesystem churn here: one APFS clone (instant, copy-on-write), one
-# image resize, one addVolume. No file deletions at all.
+# image resize, three addVolume calls. No file deletions at all.
 #
 # Usage:
 #   tools/rootfs/build_data_volume.sh [out.dmg] [grow_gb]
@@ -98,6 +100,17 @@ diskutil apfs resizeContainer "$OURDEV" 0 >/dev/null || die "resizeContainer fai
 echo "==> add an empty case-sensitive volume '$VOLNAME' with role D"
 diskutil apfs addVolume "$OURDEV" APFSX "$VOLNAME" -role D -nomount >/dev/null \
     || die "addVolume failed"
+
+# `dt_fixup.py` drops only the three roles macOS cannot create (xART,
+# Baseband-Data, Update).  It keeps these two, and DT_get_fstab_entries rejects
+# the entire table at the first missing role before mount-phase-2 can mount Data.
+for spec in 'Preboot:B' 'Hardware:H'; do
+    name=${spec%%:*}
+    role=${spec##*:}
+    echo "==> add empty case-sensitive volume '$name' with role $role"
+    diskutil apfs addVolume "$OURDEV" APFSX "$name" -role "$role" -nomount >/dev/null \
+        || die "addVolume $name failed"
+done
 
 echo "==> resulting volume layout"
 diskutil apfs list "$OURDEV" | grep -E "APFS Volume|Role|Name:|Capacity" | sed 's/^/    /'
