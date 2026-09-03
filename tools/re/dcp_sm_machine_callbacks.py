@@ -26,6 +26,8 @@ RETURNS = {}
 HITS = {}
 STAGE2_PENDING = {}
 STAGE2_SEQUENCE = {}
+TAIL_TARGETS = {}
+TAIL_TARGET_BY_ADDRESS = {}
 
 
 def _reg(frame, name):
@@ -81,6 +83,95 @@ def _dump_stage2_operation(process, operation):
     vtable = _u64(process, operation) if operation else None
     print("stage2-operation-vtable=0x%x words=%s" %
           (vtable or 0, _words(process, vtable, 8)))
+
+
+def _dump_tail_object(process, dynamic):
+    """Dump the object supplying the stage-2 tail-call virtual method."""
+    _dump_object(process, "tail-dynamic", dynamic,
+                 (0x0, 0x8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40,
+                  0x88, 0x100, 0x108, 0x110, 0x118, 0x150))
+    vtable_raw = _u64(process, dynamic) if dynamic else None
+    vtable = _kptr(vtable_raw)
+    entry = _u64(process, vtable + 0x100) if vtable else None
+    print("tail-dynamic-vtable raw=0x%x canonical=0x%x words=%s" %
+          (vtable_raw or 0, vtable, _words(process, vtable, 0x21)))
+    print("tail-dynamic-vtable-entry+0x100 raw=0x%x canonical=0x%x" %
+          (entry or 0, _kptr(entry)))
+
+
+def _install_tail_target(process, target_address, source):
+    """Install the read-only entry witness for a just-resolved tail target."""
+    target = process.GetTarget()
+    existing = TAIL_TARGET_BY_ADDRESS.get(target_address)
+    if existing is not None:
+        return existing
+    before = target.GetNumBreakpoints()
+    breakpoint = target.BreakpointCreateByAddress(target_address)
+    if target.GetNumBreakpoints() != before + 1:
+        raise RuntimeError("failed dynamic tail target breakpoint at 0x%x" % target_address)
+    breakpoint.SetScriptCallbackFunction("dcp_sm_machine_callbacks.on_tail_target")
+    TAIL_TARGETS[breakpoint.GetID()] = {"address": target_address, "source": source}
+    TAIL_TARGET_BY_ADDRESS[target_address] = breakpoint.GetID()
+    print("DYNAMIC_BREAKPOINT_PROOF id=%d label=SMMACHINE_TAIL_TARGET address=0x%x "
+          "source-thread=0x%x" % (breakpoint.GetID(), target_address, source["thread"]))
+    return breakpoint.GetID()
+
+
+def on_tail_boundary(frame, bp_loc, _dict):
+    """Resolve and witness the virtual tail call in AFK's stage-2 action."""
+    breakpoint = bp_loc.GetBreakpoint()
+    hit = HITS.get(breakpoint.GetID(), 0) + 1
+    HITS[breakpoint.GetID()] = hit
+    process = frame.GetThread().GetProcess()
+    thread = frame.GetThread().GetThreadID()
+    tp = _reg(frame, "tpidr_el1")
+    x0, x1, x2, x16, x17 = (_reg(frame, name) for name in
+                             ("x0", "x1", "x2", "x16", "x17"))
+    target = _kptr(x16)
+    if not target:
+        raise RuntimeError("tail boundary has no authenticated x16 target")
+    print("=== SMMACHINE_TAIL_BOUNDARY hit=%d/8 ===" % hit)
+    print("thread=0x%x tpidr_el1=0x%x x0(dynamic)=0x%x x1(context)=0x%x "
+          "w2=0x%x x16(auth-target)=0x%x x16-canonical=0x%x x17(pac-context)=0x%x" %
+          (thread, tp or 0, x0 or 0, x1 or 0, (x2 or 0) & 0xffffffff,
+           x16 or 0, target, x17 or 0))
+    _dump_tail_object(process, x0)
+    dynamic_id = _install_tail_target(process, target,
+                                      {"thread": thread, "tp": tp, "dynamic": x0,
+                                       "context": x1, "w2": (x2 or 0) & 0xffffffff})
+    print("PROBE_EVENT event=smmachine-tail-boundary thread=0x%x dynamic=0x%x "
+          "context=0x%x w2=0x%x target=0x%x breakpoint=%d" %
+          (thread, x0 or 0, x1 or 0, (x2 or 0) & 0xffffffff, target, dynamic_id),
+          flush=True)
+    if hit >= 8:
+        breakpoint.SetEnabled(False)
+        print("bounded-disabled breakpoint=%d after=%d" % (breakpoint.GetID(), hit))
+    return False
+
+
+def on_tail_target(frame, bp_loc, _dict):
+    """Positive control: the resolved tail target was actually entered."""
+    breakpoint = bp_loc.GetBreakpoint()
+    hit = HITS.get(breakpoint.GetID(), 0) + 1
+    HITS[breakpoint.GetID()] = hit
+    cfg = TAIL_TARGETS[breakpoint.GetID()]
+    process = frame.GetThread().GetProcess()
+    thread = frame.GetThread().GetThreadID()
+    tp = _reg(frame, "tpidr_el1")
+    x0, x1, x2, lr = (_reg(frame, name) for name in ("x0", "x1", "x2", "lr"))
+    print("=== SMMACHINE_TAIL_TARGET hit=%d/8 ===" % hit)
+    print("thread=0x%x tpidr_el1=0x%x pc=0x%x lr=0x%x x0=0x%x x1=0x%x w2=0x%x" %
+          (thread, tp or 0, _reg(frame, "pc") or 0, lr or 0, x0 or 0, x1 or 0,
+           (x2 or 0) & 0xffffffff))
+    _dump_tail_object(process, x0)
+    print("PROBE_EVENT event=smmachine-tail-target-entry thread=0x%x target=0x%x "
+          "dynamic=0x%x context=0x%x w2=0x%x" %
+          (thread, cfg["address"], x0 or 0, x1 or 0, (x2 or 0) & 0xffffffff),
+          flush=True)
+    if hit >= 8:
+        breakpoint.SetEnabled(False)
+        print("bounded-disabled breakpoint=%d after=%d" % (breakpoint.GetID(), hit))
+    return False
 
 
 def on_stage2_pre(frame, bp_loc, _dict):
@@ -238,5 +329,8 @@ def install(debugger, slide):
         # post-call site is the non-heuristic return witness for each action.
         (0xfffffff008b8c4e8, "SMMACHINE_STAGE2_PRE", 8, "on_stage2_pre"),
         (0xfffffff008b8c4ec, "SMMACHINE_STAGE2_RETURN", 8, "on_stage2_return"),
+        # The stage-2 action ends in this authenticated virtual tail call.
+        # Resolve x16 here rather than guessing the dynamic object's vtable.
+        (0xfffffff008b8209c, "SMMACHINE_TAIL_BOUNDARY", 8, "on_tail_boundary"),
     ):
         _install(target, interpreter, static, label, limit, callback)
