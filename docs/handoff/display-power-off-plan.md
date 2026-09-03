@@ -39,6 +39,15 @@ Read `docs/re/setup-launch-runtime.md`, sections "The kernel wait" and
    `DARWIN_DCP_EPIC=all` makes bind; several sit in interface start waiting for
    events our model never sends, and they likely hold AFK power assertions.
 
+## Step 0 — result of the control run (read 2026-09-03 16:30, so Step 1 is already answered)
+
+`UI_NOEPIC2` (`DARWIN_DCP_EPIC=off`) still hangs: 39 `IOCONNECT_CALL_METHOD`
+entries, 38 returns, and the unmatched entry is `x1=0x4f` (selector 79) at
+`elapsed=104.1s` (`/tmp/dvm/UI_NOEPIC2.lldb.log`, hit 38). 0 panics. So the EPIC
+proxies are **not** what the AFK state machine waits for. **Start at Step 2** on the
+guest that run left frozen at `/tmp/dvm/UI_NOEPIC2.sock`; if the host has rebooted
+since, rerun the boot as described in Step 1 and then do Step 2.
+
 ## Step 1 — read the control run that was already started
 
 Run tag `UI_NOEPIC2` booted with `DARWIN_DCP_EPIC=off` (no EPIC services announced).
