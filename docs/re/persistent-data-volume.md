@@ -29,11 +29,15 @@ The corrected copy run is `/tmp/dvm/probe/BOOTSTRAP_COPY_ROLES_PREINIT_TZ1.seria
 4755 DVM_COPY_SHELL_RC=0 DVM_COPY_SYNC_RC=0
 ```
 
-The manifest, layout, and marker stages independently completed in
-`BOOTSTRAP_MANIFEST_ROLES_CKSUM1.serial.log:4663–4681`,
-`BOOTSTRAP_LAYOUT_ROLES_CKSUM1.serial.log:5475–5483`, and
-`BOOTSTRAP_MARKER_ROLES_CKSUM1.serial.log:4656–4666`. The marker stage also
-checks `/private/var/.dvm-data-seed-complete`.
+The host-injected helper was independently verified before each of these
+stages: `DVM_HELPER_SOURCE_RC=0 DVM_HELPER_BYTES=74544` appears at line 520
+in `BOOTSTRAP_MANIFEST_ROLES_RAMDISK1.serial.log`, line 510 in
+`BOOTSTRAP_LAYOUT_ROLES_RAMDISK1.serial.log`, and line 512 in
+`BOOTSTRAP_MARKER_ROLES_RAMDISK1.serial.log`. The corresponding guest stages
+then report manifest `DVM_SEED_USER_MANIFEST_RC=0` and shell/sync RC 0 at
+lines 540–542, layout `DVM_SEED_USER_LAYOUT_RC=0` and shell/sync RC 0 at
+lines 520–522, and marker shell/sync/stat RC 0 at lines 526. The marker stage
+also checks `/private/var/.dvm-data-seed-complete`.
 
 The first clean boot, `/tmp/dvm/probe/PERSIST_NVME_CLEAN_BOOT3.serial.log`,
 mounts System (`:287–303`), Preboot (`:396`), Data at `/private/var`
@@ -68,10 +72,39 @@ tools/rootfs/bootstrap_data_volume.sh normal
 tools/rootfs/bootstrap_data_volume.sh verify
 ```
 
-Set `PARENT`, `OUT_OVL`, `TAG`, `OVL`, `WORK`, and (for the guest helper)
-`RESTORE_RAMDISK`/`RESTORE_HELPER_SOURCE` as shown by the script's phase
-headers and environment section (`bootstrap_data_volume.sh:40–78`). The
-`copy-data`, `manifest`, `layout`, and `marker` phases require numeric guest
-return-code witnesses and `sync` success before accepting a stage
-(`bootstrap_data_volume.sh:416–456`).
+Here is the actual derived chain used for the two clean boots. Each command is
+run after the preceding command has completed, and each output image is a
+derived artifact rather than a repository file:
 
+```
+REPO=/Users/jdolbe1/Downloads/darwin-vm
+BASE=/tmp/dvm/data-seed/roles-fresh-format-033500.qcow2
+RAMDISK=/tmp/dvm/data-seed/ramdisk-data-seed.dmg
+HELPER=/libexec/dvm_data_seed_helper
+RESTORE_RAMDISK="$RAMDISK" RESTORE_HELPER_SOURCE="$HELPER" \
+  OVL="$BASE" OUT_OVL=/tmp/dvm/data-seed/roles-manifest-ramdisk1.qcow2 \
+  TAG=BOOTSTRAP_MANIFEST_ROLES_RAMDISK1 \
+  tools/rootfs/bootstrap_data_volume.sh manifest
+RESTORE_RAMDISK="$RAMDISK" RESTORE_HELPER_SOURCE="$HELPER" \
+  OVL=/tmp/dvm/data-seed/roles-manifest-ramdisk1.qcow2 \
+  OUT_OVL=/tmp/dvm/data-seed/roles-layout-ramdisk1.qcow2 \
+  TAG=BOOTSTRAP_LAYOUT_ROLES_RAMDISK1 \
+  tools/rootfs/bootstrap_data_volume.sh layout
+RESTORE_RAMDISK="$RAMDISK" RESTORE_HELPER_SOURCE="$HELPER" \
+  OVL=/tmp/dvm/data-seed/roles-layout-ramdisk1.qcow2 \
+  OUT_OVL=/tmp/dvm/data-seed/roles-marker-ramdisk1.qcow2 \
+  TAG=BOOTSTRAP_MARKER_ROLES_RAMDISK1 \
+  tools/rootfs/bootstrap_data_volume.sh marker
+PARENT=/tmp/dvm/data-seed/roles-marker-ramdisk1.qcow2 \
+  OUT_OVL=/tmp/dvm/data-seed/roles-normal-persist-boot3.qcow2 \
+  TAG=PERSIST_NVME_CLEAN_BOOT3 NORMAL_BOOT_SECS=45 \
+  tools/rootfs/bootstrap_data_volume.sh normal
+PARENT=/tmp/dvm/data-seed/roles-normal-persist-boot3.qcow2 \
+  OUT_OVL=/tmp/dvm/data-seed/roles-normal-persist-boot4.qcow2 \
+  TAG=PERSIST_NVME_CLEAN_BOOT4 NORMAL_BOOT_SECS=45 \
+  tools/rootfs/bootstrap_data_volume.sh normal
+```
+
+The `copy-data`, `manifest`, `layout`, and `marker` phases require numeric
+guest return-code witnesses and `sync` success before accepting a stage
+(`bootstrap_data_volume.sh:416–456`).
