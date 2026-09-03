@@ -258,20 +258,29 @@ class CallTracer:
                     "error": error.GetCString() or "read-failed"}
         return {"address": _hex(address), "size": len(data), "hex": bytes(data).hex()}
 
-    def _base_record(self, site, frame):
+    def _base_record(self, site, frame, bp_loc=None):
         pc = frame.GetPC()
         lr = self._register(frame, "lr")
-        return {
+        record = {
             "event": site,
             "hit": self.hits[site],
             "pc": _hex(pc),
+            "expected_pc": _hex(self.addresses[site]),
+            "pc_matches_expected": pc == self.addresses[site],
             "lr": _hex(lr or 0),
             "timestamp_ns": time.time_ns(),
         }
+        if bp_loc is not None:
+            try:
+                record["breakpoint_id"] = bp_loc.GetBreakpoint().GetID()
+                record["location_id"] = bp_loc.GetID()
+            except Exception:
+                pass
+        return record
 
-    def _capture(self, site, frame):
+    def _capture(self, site, frame, bp_loc=None):
         """Per-site evidence required by the display-runtime trace plan."""
-        rec = self._base_record(site, frame)
+        rec = self._base_record(site, frame, bp_loc)
         r = lambda name: self._register(frame, name)
         regs = {}
         memory = {}
@@ -285,7 +294,17 @@ class CallTracer:
             add("x0", "x1", "x2", "x3")
         elif site == "hotplug_entry":
             add("x0", "x1", "x2", "w3")
+            x0 = r("x0")
             x2 = r("x2")
+            if x0:
+                # These are the only object-state ranges read or updated by
+                # hotPlug_notify_gated in the iOS 27 routine at
+                # 0xfffffff00a0bcad8..0xfffffff00a0bcd44.  Keep the reads
+                # disjoint and bounded instead of dumping the large object.
+                memory["self_plus_0x180"] = self._memory(x0 + 0x180, 0x28)
+                memory["self_plus_0x380"] = self._memory(x0 + 0x380, 0x18)
+                memory["self_plus_0x430"] = self._memory(x0 + 0x430, 0x10)
+                memory["self_plus_0x5858"] = self._memory(x0 + 0x5858, 8)
             if x2:
                 # IOMFB_TiledDisplayInfo is 0x4c bytes at x2.  Read that
                 # bounded object, not an invented field at x2+0x4c.
@@ -298,6 +317,11 @@ class CallTracer:
                 memory["input_0x58"] = self._memory(x2, 0x58)
         elif site in ("default_fb_public", "default_fb_gated"):
             add("x0", "w1", "w2")
+            x0 = r("x0")
+            if x0:
+                memory["self_plus_0x180"] = self._memory(x0 + 0x180, 0x28)
+                memory["self_plus_0x380"] = self._memory(x0 + 0x380, 0x18)
+                memory["self_plus_0x430"] = self._memory(x0 + 0x430, 0x10)
         elif site == "default_local_create_return":
             add("w0", "x19")
             x19 = r("x19")
@@ -326,11 +350,11 @@ class CallTracer:
             rec["memory"] = memory
         return rec
 
-    def handle_hit(self, site, frame, _bp_loc, _internal_dict):
+    def handle_hit(self, site, frame, bp_loc, _internal_dict):
         self.hits[site] += 1
         if self.emitted[site] < self.caps[site]:
             try:
-                rec = self._capture(site, frame)
+                rec = self._capture(site, frame, bp_loc)
                 self.stream.write(json.dumps(rec, sort_keys=True) + "\n")
                 self.stream.flush()
                 self.emitted[site] += 1
@@ -385,6 +409,23 @@ class CallTracer:
             _BREAKPOINT_OWNERS[bp_id] = (self, site)
             bp.SetScriptCallbackFunction(__name__ + ".lldb_breakpoint_callback")
             self.breakpoint_ids.append(bp_id)
+            locations = []
+            for index in range(bp.GetNumLocations()):
+                location = bp.GetLocationAtIndex(index)
+                address = location.GetAddress()
+                locations.append({
+                    "location_id": location.GetID(),
+                    "load_address": _hex(address.GetLoadAddress(target)),
+                    "file_address": _hex(address.GetFileAddress()),
+                })
+            self.stream.write(json.dumps({
+                "event": "breakpoint_installed",
+                "site": site,
+                "breakpoint_id": bp_id,
+                "requested_address": _hex(self.addresses[site]),
+                "locations": locations,
+            }, sort_keys=True) + "\n")
+            self.stream.flush()
 
     def clear_callbacks(self):
         for bp_id in self.breakpoint_ids:
