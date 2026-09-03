@@ -5,28 +5,30 @@ Source: iOS 27.0 beta (24A5430a), iPhone17,3 (t8140/H17P), kernelcache
 device tree `/tmp/dvm/dtree_raw` (unpatched) and `firmware/dtree` (patched),
 `firmware/sptm`; extracted 2026-09-02.
 
-Userspace evidence comes from two builds of the *same* QuartzCore source that
-are readable on this host without mounting anything:
+Userspace evidence, in order of authority:
 
-| build | file | why it is a proxy, and how far the proxy goes |
+| build | file | role |
 |---|---|---|
-| iOS 27.0 **Simulator** runtime 24A5355p (`ProductBuildVersion` from its `SystemVersion.plist`) | `/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/.../RuntimeRoot/System/Library/Frameworks/QuartzCore.framework/QuartzCore` (5,902,128 bytes, arm64, 19,416 symbols, unstripped) and `.../RuntimeRoot/usr/libexec/backboardd` | same major version as the device build, iOS-flavoured, but compiled for the simulator platform; it has no IOMobileFramebuffer server class |
-| **macOS 27** host, from `/System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e` | `ipsw dyld extract ... QuartzCore` (6,883,560 bytes, 23,957 symbols) | Apple-silicon macOS drives its panel through the same IOMobileFramebuffer/DCP stack, so it *does* have the IOMFB-backed server class the phone must use |
+| **iPhone 24A5430a (the device build)** | `~/dvm-artifacts/extract/dyld/dyld_shared_cache_arm64e` (+ subcaches, `.symbols`), extracted with `ipsw dyld extract ... QuartzCore Metal IOMobileFramebuffer --stubs` (QuartzCore 6,796,976 B, 22,379 symbols; Metal 5,419,968 B); `~/dvm-artifacts/extract/bin/backboardd` (801,488 B, arm64e) | **the binary that matters; every claim below is now made against it** |
+| iOS 27.0 Simulator 24A5355p | `/Library/Developer/CoreSimulator/Volumes/iOS_24A5355p/.../RuntimeRoot/System/Library/Frameworks/QuartzCore.framework/QuartzCore` (5,902,128 B, 19,416 symbols) | first read; retained as corroboration |
+| macOS 27 host | `ipsw dyld extract /System/Cryptexes/OS/System/Library/dyld/dyld_shared_cache_arm64e QuartzCore` (6,883,560 B, 23,957 symbols) | corroboration; shares the IOMFB server classes |
 
-**The iPhone build of QuartzCore and backboardd was not examined** -- they live
-inside the system-volume DMG, which this task forbade mounting. Every
-userspace claim below is therefore "true of the codebase in two sibling builds"
-and is labelled with which build it was read from. The closing section lists
-exactly what to extract and what to check in it.
+Addresses are unslid cache VAs (`0x18...`/`0x1a...`/`0x1e...`) for the two
+caches and `0x1000...` for backboardd. Device-build addresses are marked
+**[dev]**, simulator **[sim]**, macOS **[mac]**.
 
 ## Summary
 
-CoreAnimation's window server has a CPU compositor, `CA::OGL::SWContext`, and
-its concrete IOMFB-backed server class uses it automatically whenever
+**Confirmed on the device build.** CoreAnimation's window server has a CPU
+compositor, `CA::OGL::SWContext`, and the class the iPhone's panel actually
+instantiates -- `CA::WindowServer::AccelServer`, built by
+`AppleDisplay::new_server()` -- uses it automatically whenever
 `MTLCreateSystemDefaultDevice()` returns nil: `AccelServer::render_update()`
 calls the virtual `renderer()`, and if that is NULL tail-calls
 `Server::render_update()`, which composites the whole tree with the software
-renderer. Nothing has to be enabled; the trigger is the absence of any
+renderer. `MTLCreateSystemDefaultDevice()` on this iOS build returns nil, with
+no failure report, when `IOServiceMatching("IOAcceleratorES")` finds nothing.
+Nothing has to be enabled; the trigger is the absence of any
 `IOAcceleratorES` service, which is our current state because
 `dt_fixup.py:558` deletes `/arm-io/sgx`, the only node `AGXAcceleratorG17P`
 matches. What a QEMU model must provide is therefore **not a GPU** but the
@@ -35,88 +37,113 @@ model) so that the software-composited IOSurface reaches the panel.
 
 ## 1. Is there a software compositing path? (Q1)
 
-### 1.1 The backend classes exist
+### 1.1 The backend classes exist -- confirmed on device
 
-Simulator QuartzCore, from `nm | c++filt`:
+Device QuartzCore **[dev]**, from `nm | c++filt` on the `.symbols`-restored
+extraction:
 
 | backend | factory (local symbol) | vtable | evidence |
 |---|---|---|---|
-| software | `sw_new_context(void*, void*, unsigned)` at `0x120958` | `vtable for CA::OGL::SWContext` at `0x373fe0` | `nm QuartzCore.sim`; namespace `CA::OGL::SW` has 972 symbols (`SamplerData`, `Format`, `image_sampler`, `Blend`, `Poly`, `scanline`, `scan_convert`, `Texture`, ...): a rasteriser, not a stub |
-| Metal | `metal_new_context` at `0x120c20` | `CA::OGL::MetalContext` at `0x375178` | ditto |
-| GLES | `gles_new_context` at `0x120ab4` | `CA::OGL::GLESContext` at `0x36f880` | ditto |
-| null | `new_null_context` at `0x120c38` | `CA::OGL::NullContext` at `0x3729a0` | ditto |
+| **software** | `sw_new_context(void*, void*, unsigned)` at `0x1846a04a4` | `vtable for CA::OGL::SWContext` at `0x1e9050118` | `CA::OGL::SW::` 379 symbols, `CA::OGL::SWContext::` 41 symbols; strings `%d by %d image is too large for software renderer, ignoring`, `software-temp-surface` |
+| Metal | `metal_new_context` at `0x1846a084c` | `CA::OGL::MetalContext` at `0x1e9051270` | ditto |
+| GLES | `gles_new_context` at `0x1846a061c` | (no vtable symbol) | ditto |
+| null | `new_null_context` at `0x1846a0864` | `CA::OGL::NullContext` at `0x1e904ec58` | ditto |
 
-macOS 27 QuartzCore has `sw_new_context`, `metal_new_context`,
-`new_null_context` (no GLES) and the strings
-`%d by %d image is too large for software renderer, ignoring`,
-`CA_NO_ACCEL`, `CA_FORCE_LOCAL_SERVER`, `CA_ENABLE_TEST_DISPLAY`
-(`strings -n 6 macqc/QuartzCore`). So the software backend is a
-codebase-wide feature, not a simulator-only one.
+Same four factories in the Simulator **[sim]** (`sw_new_context` `0x120958`,
+`CA::OGL::SW` 972 symbols, SWContext vtable `0x373fe0`) and three of them in
+macOS **[mac]** (no GLES). The software backend is a codebase-wide feature and
+the iPhone build ships it.
 
 `SWContext` can target the display's surfaces: it has
 `create_surface_from_iosurface`, `set_destination`, `set_surface`,
-`copy_destination`, `finalize_surface` (sim `nm`, `CA::OGL::SWContext::*`).
-`SWContext::function_supported()` (sim `0x141e18`) declines shader function
-types outside a fixed bitmask (`0x141e2c`-`0x141e3c`), so some filters are
-skipped rather than rendered; the composite itself is not gated.
+`copy_destination`, `finalize_surface` (**[dev]** and **[sim]** `nm`,
+`CA::OGL::SWContext::*`). `SWContext::function_supported()` (**[sim]**
+`0x141e18`) declines shader function types outside a fixed bitmask
+(`0x141e2c`-`0x141e3c`), so some filters are skipped rather than rendered;
+the composite itself is not gated.
 
 ### 1.2 The window server falls back to it when there is no Metal device
 
-Base class, identical in both builds:
+Base class, identical in all three builds:
 
-| function | sim | macOS | what it does |
-|---|---|---|---|
-| `CA::WindowServer::Server::renderer()` | `0x26c800`: `mov x0, 0; ret` | vtable `0x1e893a280` slot 59 | base returns **no** accelerated renderer |
-| `CA::WindowServer::Server::sw_renderer()` | `0x266558` | `0x18b2eafcc` | lazily allocates a `0x52c0`-byte `CA::OGL::Context`, installs vtable `0x373ff0` = SWContext vtable + 0x10 (`str x8, [x20]` at `0x2665c4`), wraps it in a `CA::OGL::Renderer` |
-| `CA::WindowServer::Server::render_update()` | `0x266740`: `bl sw_renderer` at `0x266754`, then `b Display::render_display(Renderer&, Update*)` at `0x266780` | `0x18b2eb200`: `bl sw_renderer` at `0x18b2eb218`, `b Display::render_display` at `0x18b2eb254` | **composites the display with the software renderer** |
-| `CA::WindowServer::Server::render_surface()` | `0x2666a4`: `bl sw_renderer` at `0x2666d4` | -- | same for offscreen surfaces |
+| function | **device [dev]** | sim | macOS | what it does |
+|---|---|---|---|---|
+| `CA::WindowServer::Server::renderer()` | `0x1847786f0` (vtable `0x1e9056978` slot 58) | `0x26c800`: `mov x0, 0; ret` | vtable `0x1e893a280` slot 59 | base returns **no** accelerated renderer |
+| `CA::WindowServer::Server::sw_renderer()` | `0x184775ef0` | `0x266558` | `0x18b2eafcc` | lazily allocates a `0x52c0`-byte `CA::OGL::Context`, installs the SWContext vtable (sim: `str x8, [x20]` at `0x2665c4` with `x8 = 0x373ff0` = vtable + 0x10), wraps it in a `CA::OGL::Renderer` |
+| `CA::WindowServer::Server::render_update()` | `0x184776174`: `bl sw_renderer` at `0x18477618c`, `b Display::render_display(Renderer&, Update*)` at `0x1847761c8` | `0x266740` (`0x266754`, `0x266780`) | `0x18b2eb200` (`0x18b2eb218`, `0x18b2eb254`) | **composites the display with the software renderer** |
+| `CA::WindowServer::Server::render_surface()` | `0x1847760d4`: `bl sw_renderer` at `0x184776108` | `0x2666a4` (`0x2666d4`) | -- | same for offscreen surfaces |
 
 Concrete server classes override `render_update` and fall back to the base:
 
 | build | class | `renderer()` | `render_update()` |
 |---|---|---|---|
-| sim | `SimServer` | `0x196450`: `bl _CAMetalContextCreate` at `0x196474`; `cbz x0 -> 0x196574` at `0x19647c`; returns `[x19+0x410]`, still 0 -> **NULL** | `0x196678`: `blraa` vtable slot `0x1d0` (= `renderer()`) at `0x19669c`; `cbz x0 -> 0x1966f4` at `0x1966a0`; `b Server::render_update` at `0x196708` |
-| macOS | `AccelServer` (the IOMFB display server, see 1.3) | `0x18b0c3e38`: `bl _CAMetalContextCreate` at `0x18b0c3e60`; `cbz x0 -> 0x18b0c3f5c` at `0x18b0c3e68`; `mov x0, 0` at `0x18b0c3f64` -> **NULL** | `0x18b0c40a8`: `blraa` slot `0x1d8` at `0x18b0c40e8`; `cbz x0 -> 0x18b0c4150` at `0x18b0c40ec`; `b Server::render_update` at `0x18b0c4174` |
-| sim | `VirtualServer` | `0x473e0`, same shape (`_CAMetalContextCreate` at `0x47418`) | `0x47610` -> `Server::render_update` (xref at `0x476c0`) |
+| **device** | **`AccelServer`** (the IOMFB display server, see 1.3) | `0x18440f824`: `bl _CAMetalContextCreate` at `0x18440f84c`; `str x0, [x20, 0x140]`; `cbz x0 -> 0x18440f99c` at `0x18440f854`; there `ldr x0, [x19, 0x630]` (still 0), `cbnz` not taken, `b 0x18440f990` -> returns **NULL** | `0x184451598`: `blraa` vtable slot `0x1d0` (= `renderer()`) at `0x1844515d8`; `cbz x0 -> 0x184451640` at `0x1844515dc`; `b Server::render_update` at `0x184451664`. `render_surface` (`0x1845ac65c`) likewise ends in `b Server::render_surface` at `0x1845ac770` |
+| macOS | `AccelServer` | `0x18b0c3e38`: `bl _CAMetalContextCreate` at `0x18b0c3e60`; `cbz x0 -> 0x18b0c3f5c` at `0x18b0c3e68`; `mov x0, 0` at `0x18b0c3f64` | `0x18b0c40a8`: `blraa` slot `0x1d8` at `0x18b0c40e8`; `cbz x0 -> 0x18b0c4150`; `b Server::render_update` at `0x18b0c4174` |
+| sim | `SimServer` | `0x196450`: `_CAMetalContextCreate` at `0x196474`; `cbz x0 -> 0x196574` at `0x19647c` -> NULL | `0x196678`: `blraa` slot `0x1d0` at `0x19669c`; `cbz` at `0x1966a0`; `b Server::render_update` at `0x196708` |
+| sim / device | `VirtualServer` | sim `0x473e0`; device `0x184623b00` (`_CAMetalContextCreate` at `0x184623b3c`) | device `0x184623d8c` -> `b Server::render_update` at `0x184623e90` |
 
-`_CAMetalContextCreate` (sim `0x2bee28`) is an autorelease-pool wrapper around
-exactly one call, `MTLCreateSystemDefaultDevice` (`0x2bee3c`); it returns
-whatever that returns. The only other caller of `MTLCreateSystemDefaultDevice`
-in QuartzCore is `-[CAMetalLayer init]` (`0x1c5c20`), i.e. client-side
-`CAMetalLayer`, which UIKit's stock views do not use.
+`_CAMetalContextCreate` (**[dev]** `0x1847bcf94`, **[sim]** `0x2bee28`) is an
+autorelease-pool wrapper around exactly one call, `MTLCreateSystemDefaultDevice`;
+it returns whatever that returns. A raw `bl` scan of the device text lists
+every caller of `_CAMetalContextCreate`: `AccelServer::renderer` (`0x18440f84c`),
+`VirtualServer::renderer` (`0x184623b3c`), `CA::OGL::AsynchronousDispatcher::renderer`
+(`0x18456117c`), `CA::CG::AccelRenderer::acquire` (`0x184586f34`),
+`-[CASDFGenerator init]` (`0x18460b968`), `create_cgimage_from_iosurface`
+(`0x184618b54`), `CACreateFloat16TextureFromTexture` (`0x1846d7f18`),
+`CA::WindowServer::IOSurface::allocate_iosurface` (`0x18471c11c`, `0x18471c1e8`)
+and the `IOMFBDisplay::get_ctx()` block (`0x1847a8c78`). None is on the server
+*construction* path; the three on the display path are NULL-safe (1.4).
 
 So the decision is: **no Metal device -> `renderer()` is NULL -> the
-IOMFB/Sim server's `render_update` tail-calls the base -> `SWContext`
+IOMFB server's `render_update` tail-calls the base -> `SWContext`
 composites.** There is no flag, and nothing to enable.
 
-### 1.3 The IOMFB-backed server inherits exactly this fallback (macOS)
+### 1.3 The IOMFB-backed server inherits exactly this fallback -- confirmed on device
 
-macOS vtables decoded from the extracted dylib (chained-fixup targets resolved
-against `nm`):
+Device vtables **[dev]**, chained-fixup targets resolved against `nm`:
 
-| vtable | slot 59 (`renderer`) | slot 64 (`render_update`) | slot 0 (`shutdown`) |
-|---|---|---|---|
-| `CA::WindowServer::Server` `0x1e893a280` | `Server::renderer` | `Server::render_update` | `Server::shutdown` |
-| `CA::WindowServer::IOMFBServer` `0x1e893a718` | `Server::renderer` | `Server::render_update` | `IOMFBServer::shutdown` |
-| `CA::WindowServer::AccelServer` `0x1e892ed08` | `AccelServer::renderer` | `AccelServer::render_update` | `IOMFBServer::shutdown` |
+| vtable | slot 0 (`shutdown`) | slot 58 (`renderer`) | slot 62 (`immediate_render`) | slot 63 (`render_update`) | slot 64 (`render_surface`) |
+|---|---|---|---|---|---|
+| `CA::WindowServer::Server` `0x1e9056978` | `Server::shutdown` | `Server::renderer` | `Server::immediate_render` | `Server::render_update` | `Server::render_surface` |
+| `CA::WindowServer::IOMFBServer` `0x1e9056e08` | `IOMFBServer::shutdown` | `Server::renderer` | `IOMFBServer::immediate_render` | `Server::render_update` | `Server::render_surface` |
+| `CA::WindowServer::AccelServer` `0x1e904b218` | `IOMFBServer::shutdown` | `AccelServer::renderer` | `IOMFBServer::immediate_render` | `AccelServer::render_update` | `AccelServer::render_surface` |
 
-`AccelServer` inherits `IOMFBServer::shutdown` and `immediate_render`, and
-`AccelServer::AccelServer(IOMFBDisplay*, CFString const*)` (`0x18b0c390c`)
-references the `IOMFBServer(IOMFBDisplay*, ...)` constructor block, so the
-hierarchy is `AccelServer : IOMFBServer : Server`. `IOMFBServer` is the
-display plumbing (`vsync_callback`, `need_swap_callback`,
-`try_swap_begin_async`, `req_dcp_reset_callback`, `hotplug_callback`,
-`frame_info_callback`, `relbuf_info_callback`, ...; 99 symbols) and
-`AccelServer` adds the Metal renderer on top. On a Metal-less machine the
-object is still an `AccelServer`; its `render_update` just lands in the
-software path shown in 1.2.
+`AccelServer` inherits `IOMFBServer`'s `shutdown`/`immediate_render` and
+overrides the three render slots, so the hierarchy is
+`AccelServer : IOMFBServer : Server`. The `IOMFBServer` constructor is only
+ever entered from `AccelServer::AccelServer(IOMFBDisplay*, CFString const*)`
+(`0x184629180`; the `IOMFBServer` ctor block is referenced from it at
+`0x18462982c`...`0x184629ae4`), so there is no standalone `IOMFBServer`
+object. macOS **[mac]** has the same three vtables with the same layout
+(`0x1e893a280` / `0x1e893a718` / `0x1e892ed08`).
 
-Inference, labelled: the iPhone build uses the same `AccelServer :
-IOMFBServer` pair (the simulator lacks it only because the simulator has no
-IOMobileFramebuffer; macOS has it because Apple silicon Macs do). This is the
-one link that only the device binary can confirm.
+Who builds it, on device:
 
-### 1.4 Environment variables are not the switch
+| step | address | evidence |
+|---|---|---|
+| backboardd `StartWindowServer` creates the server first | `0x100025918` | `[CAWindowServer serverWithOptions:]` (stub `0x1000631a0`, selref `0x1000a4be0` -> `serverWithOptions:`), *before* any display test (section 2) |
+| the panel display object | `0x1845f7fd4` | block in `CA::WindowServer::AppleInternalDisplay::open(unsigned long)` constructs `CA::WindowServer::AppleDisplay` |
+| `new_server` is a virtual at vtable `+0x720` | slots `0x1e9046dd8` (AppleDisplay), `0x1e9048e10` (AppleInternalDisplay), `0x1e9047880` (AppleExternalDisplay) | all three resolve to `CA::WindowServer::AppleDisplay::new_server()` `0x1845f77f8` (raw `0x80156870045f77f8`) |
+| `AppleDisplay::new_server()` | `0x1845f78d0`-`0x1845f78f4` | `malloc_type_zone_calloc(zone, 1, 0x638, type)`; `cbz x0` at `0x1845f78e4` guards **only the allocation**; then `bl AccelServer::AccelServer` at `0x1845f78f4`. No Metal check. (`AppleWirelessDisplay::new_server` does the same at `0x1845f89bc`.) |
+| the `AccelServer` constructor | `0x184629a94` | calls `AccelServer::renderer()` once, then `0x184629a98`-`0x184629ad0` is the stack-canary check and `retab`: the NULL result is **ignored**, the constructor cannot fail on it |
+
+The only `AccelServer` creators in the device text are the two `new_server`
+functions (raw `bl` scan). Inference, labelled: `AppleInternalDisplay` is the
+class used for the built-in panel (by name and by its `open()` block being one
+of the three `AppleDisplay` constructors); which of the three `open()`s runs is
+not in the disassembly but the vtable makes it irrelevant -- all of them reach
+`AppleDisplay::new_server`.
+
+### 1.4 The other Metal touches on the display path are NULL-safe (device)
+
+| site | what it does with a nil device |
+|---|---|
+| `CA::WindowServer::IOSurface::allocate_iosurface` `0x18471bf38` | surfaces are created by `CA::SurfaceUtil::CAIOSurfaceCreate` (`0x18471bff0`) before Metal is consulted. At `0x18471c118`-`0x18471c124` the cached device (`[display+0x140]`) is created if absent, then `[device supportsFamily:0x3ef]` (stub `0x18801dfa0`) at `0x18471c1b0`; on nil that message returns 0 and `cbz w0 -> 0x18471c2a4` (`0x18471c1b4`) skips the shared-event block (`newSharedEventWithOptions:`/`newSharedEvent`, stubs `0x18801b650`/`0x18801b610`) |
+| `IOMFBDisplay::get_ctx()` once-block `0x1847a8c5c` | `bl _CAMetalContextCreate` `0x1847a8c78`; `cbz x0 -> 0x1847a8ca8` (`0x1847a8c80`) skips `new_metal_context`; the global at `0x1e400fdc8` stays NULL |
+| `IOMFBDisplay::finish_update` `0x18446c5a0` | the only reader of that global (ADRP+LDR scan of the whole text): `ldr x24, [.., 0xdc8]`; `cbz x24 -> 0x18446c668` at `0x18446c5a4` skips the Metal section |
+| `Display::render_display(CA::OGL::Renderer&, Update*)` `0x1844510f0` | backend-agnostic: `ogl_display()`, `set_colorspace`, `prepare_clip_shape`, `CA::OGL::Renderer::render(...)` at `0x1844514bc`; no Metal symbol referenced |
+
+### 1.5 Environment variables are not the switch
 
 | variable | reader (sim) | what it actually controls |
 |---|---|---|
@@ -128,35 +155,72 @@ one link that only the device binary can confirm.
 
 The full `CA_*` list (326 names, `strings -n 4 QuartzCore.sim | grep '^CA_'`)
 contains no "use software renderer" switch; `CA_DISABLE_RENDER` exists but is
-the opposite direction. The software compositor is reached by *absence of
+the opposite direction. The device build carries the same `CA_NO_ACCEL`,
+`CA_FORCE_LOCAL_SERVER`, `CA_ENABLE_TEST_DISPLAY` strings **[dev]**. The software compositor is reached by *absence of
 hardware*, matching the pattern of every other degraded path this project has
 used.
 
-## 2. Is there a headless / no-GPU mode? (Q2)
+## 2. Is there a headless / no-GPU mode? (Q2) -- device backboardd
 
-backboardd (sim, `/usr/libexec/backboardd`, links QuartzCore, Metal,
-IOSurface; hosts `com.apple.CARenderServer` per its LaunchDaemon plist
-`MachServices`):
+Device backboardd **[dev]** (`~/dvm-artifacts/extract/bin/backboardd`,
+arm64e; links `IOMobileFramebuffer`, `QuartzCore`, `Metal`, `IOSurface`,
+`BackBoardServices`). Its **only** Metal imports are `MTLSetShaderCachePath`
+and `MTLMakeShaderCacheWritableByAllUsers` (`nm -u`); it never asks Metal for
+a device itself.
 
 | step | address | evidence |
 |---|---|---|
-| `StartWindowServer` | `sym.func.100013894` | references `StartWindowServer: headless (display:%{BOOL}u/server:%{BOOL}u)` (`0x100068522`) at `0x100013fe0` |
-| creates the server | `0x100013940` | `[CAWindowServer serverWithOptions:]` (selref `0x10008ee60` -> `0x1000606a2`), then `setRendererFlags:` (`0x100013958`, selref `0x10008f318`) |
-| finds the display | `0x100013964` -> x21 | `[CADisplay mainDisplay]` (selref `0x10008e9a8` -> `0x10005f5ca`) |
-| finds the server display | `0x10001397c` -> x22 | `[server displayWithDisplayId:]` (selref `0x10008e330` -> `0x10005de0c`) |
-| headless test | `0x100013a24` `cbz x21`, `0x100013a28` `cbz x22` -> `0x100013e18` | either object nil -> "headless" |
-| headless continuation | `0x100013ebc` | `[CAWindowServer serverIfRunning]` (selref `0x10008ee58` -> `0x100057573`); the function continues and returns normally |
-| `BKDisplayIsHeadless` | block `0x1000137dc` | asserts `please invoke BKDisplayStartWindowServer before BKDisplayIsHeadless` (`0x100063fe4`) -- headlessness is a first-class state |
-| display enumeration | `func.100028ee4` | logs `We seeem to be headless` (`0x10006a3ad`) after walking `CADisplay`s, checking `Wireless` / `TVOut` names |
+| `StartWindowServer` | `sym.func.1000257cc` | references `StartWindowServer: headless (display:%{BOOL}u/server:%{BOOL}u)` (`0x100083db4`) at `0x100026014` |
+| shader cache | `0x1000258a4` `cbz x20` -> `MTLSetShaderCachePath` `0x1000258ac`, `MTLMakeShaderCacheWritableByAllUsers` `0x1000258b0` | only if a cache path was obtained; the only Metal calls in the binary |
+| **creates the window server first** | `0x100025918` | `[CAWindowServer serverWithOptions:]` (stub `0x1000631a0`, selref `0x1000a4be0`), options `kCAWindowServerDisableUpdatesOnMainDisplay` / `kCAWindowServerDisableOutOfProcessDisplayObservation` (relocs `0x1000258c9`-`0x1000258dc`) -- this is what runs `AppleDisplay::new_server()` -> `AccelServer` (1.3) |
+| finds the display | `0x10002593c` -> x21 | `[CADisplay mainDisplay]` (stub `0x100061b40`, selref `0x1000a4648`) |
+| finds the server display | `0x100025948` / `0x100025954` -> x22 | `[x21 displayId]` (stub `0x10005fde0`, selref `0x1000a3ef0`), `[server displayWithDisplayId:]` (stub `0x10005fe80`, selref `0x1000a3f18`) |
+| headless test | `0x1000259fc` `cbz x21`, `0x100025a00` `cbz x22` -> `0x100025df0` | either object nil -> "headless" |
+| headless continuation | `0x100025df0` logs; `0x100025e84` `sym.func.1000395f8`; `0x100025ef0` `[CAWindowServer serverIfRunning]` (stub `0x100063180`, selref `0x1000a4bd8`); `sharedInstance` (stub `0x100064dc0`, selref `0x1000a52e8`); the function then returns normally | headlessness is tolerated, not fatal |
+| `BKDisplayIsHeadless` | block `sym.func.100003da0` (string ref `0x100003e2c`) | asserts `please invoke BKDisplayStartWindowServer before BKDisplayIsHeadless` -- a first-class state |
+| display enumeration | `sym.func.100039984` | logs `We seeem to be headless` (`0x100086388`) at `0x100039c24` |
 
-So backboardd tolerates having no display at all. We do not need that mode:
-`AppleCLCD2` already binds to `/arm-io/disp0` (CLAUDE.md), so `[CADisplay
-mainDisplay]` should exist; what we need is 1.2 (no GPU), which is the other
-axis and is automatic.
+The simulator backboardd has the identical structure (`sym.func.100013894`,
+`serverWithOptions:` at `0x100013940`, `mainDisplay` `0x100013964`,
+`displayWithDisplayId:` `0x10001397c`, `cbz` at `0x100013a24`/`0x100013a28`,
+`serverIfRunning` at `0x100013ebc`) **[sim]**.
 
-## 3. What binds to `sgx`, and what happens when it is absent (Q3)
+Conclusion: the window server is created before backboardd knows whether a
+display exists, no accelerator is consulted at any point, and a missing
+display is logged and tolerated. With `AppleCLCD2` bound to `/arm-io/disp0`
+(CLAUDE.md) we expect the non-headless path; either way the server starts.
 
-### 3.1 The node
+## 3. `MTLCreateSystemDefaultDevice()` returns nil, it does not trap (Q3) -- device Metal
+
+Device Metal.framework **[dev]**, extracted with `--stubs`; objc selector
+stubs resolved with `ipsw dsc disass --vaddr`.
+
+| function | address | behaviour |
+|---|---|---|
+| `MTLCreateSystemDefaultDevice` | `0x1a54bfc28` | `bl MTLDeviceArrayInitialize` (`0x1a54bfc3c`); builds a block-byref result whose value slot is **zeroed** (`stp x16, xzr, [sp+0x50]` at `0x1a54bfc78`; value lives at byref `+0x28` = `sp+0x58`); runs the block through libdispatch (stub `0x1a80d9c90` -> `libdispatch.dylib __TEXT.__text`) at `0x1a54bfcd0`; reads the value back (`ldr x8, [sp+0x38]; ldr x19, [x8, 0x28]` at `0x1a54bfcd4`-`0x1a54bfcd8`) and returns it |
+| `___MTLCreateSystemDefaultDevice_block_invoke` | `0x1a54bfdb4` | `[array count]` on the global device array at `0x1e71d5570` (stub `0x1a8002f20` = `objc_msgSend$count`); **`cbz x0 -> 0x1a54bfe04` at `0x1a54bfdd4`: zero devices -> return without storing -> caller returns nil**; `cmp x0, 1; b.ne 0x1a54bfe10` (`0x1a54bfde0`-`0x1a54bfde4`): more than one device -> `MTLReportFailure(0, "MTLCreateSystemDefaultDevice_block_invoke", 0x380, ...)` (`0x1a54bfe10`-`0x1a54bfe40`); exactly one -> `objectAtIndex:` (stub `0x1a80057f0`), retain, store |
+| `MTLDeviceArrayInitialize` | `0x1a54bf718` | env-gated tooling only (`METAL_CAPTURE_ENABLED` `0x1a56d626b`, `MTL_CAPTURE_ENABLED`, `MTL_CAPTURE_PATH`, `METAL_LOAD_INTERPOSER`, `DYMTL_TOOLS_DYLIB_PATH`, `MTL_HUD_ENABLED`, `ENABLE_METAL_3_ON_4`); its two `MTLReportFailure` calls (`0x1a54bf874`, `0x1a54bfaec`) sit on the GPUToolsCapture / interposer paths; tail-calls `MTLRegisterDevices` at `0x1a54bfc14` |
+| `MTLRegisterDevices` | `0x1a54bfd08` | `objc_alloc_init` of `_MTLIOAccelServiceGlobalContext` (class `0x1e71d30b0`) at `0x1a54bfd54`, stored at `0x1e71d5518`; `[ctx processPendingCreateIOAccelServiceRequests]` (stub `0x1a805c640`) at `0x1a54bfd78` |
+| `-[_MTLIOAccelServiceGlobalContext init]` | `0x1a54fcd48` | `IOMainPort` (`0x1a54fcd94`); `IOServiceMatching("IOAcceleratorES")` (`0x1a54fcdc4`, string `0x1a56e3214`); `IOServiceGetMatchingServices` (`0x1a54fcdd4`; kern failure -> `NSLog` `0x1a54fcdf0` and return); `IOIteratorNext` loop (`0x1a54fce24`), **`cbz w0 -> 0x1a54fce84` on exhaustion -> `IOObjectRelease`, return** -- zero services is the ordinary loop exit; per service `getMetalPluginClassForService` (`0x1a54fce38`), `initWithAcceleratorPort:deviceClass:` (stub `0x1a8059f90`), `addObject:` (stub `0x1a8001ed0`) to `_pendingCreateAccelServiceRequests` (`[self+8]`) |
+| `-[_MTLIOAccelServiceGlobalContext processPendingCreateIOAccelServiceRequests]` | `0x1a54fdde4` | `count` (`0x1a54fde04`), `cbz -> 0x1a54fde5c` (nothing pending); per request create the device object, `cbz x0` skip (`0x1a54fde40`), `MTLAddDevice` (`0x1a54fde48`) |
+| `MTLAddDevice` | `0x1a54ff634` | validates the device (`conformsToProtocol:`, `initLimits`, `initFeatureQueries`, `initWorkarounds`) and appends to the **same** global array `0x1e71d5570` (`ldr x8, [.., 0x570]` at `0x1a54ff698`) |
+| `MTLReportFailure` | `0x1a566ef20` | error mode from `MTLFailureTypeGetErrorModeType` (`0x1a54cda3c`): 1 -> `objc_exception_throw` (`0x1a566f250`), 2 -> `NSLog` (`0x1a566f108`), 3 -> `fprintf` (`0x1a566f144`), 4-7 -> `os_log` (`0x1a566f0ec`, `0x1a566f1bc`), default -> `abort` (`0x1a566f264`). **Not reached on the zero-device path.** |
+
+Plugin loading is service-driven: `getMetalPluginClassForService` reads the
+accelerator personality's `MetalPluginName` (`AGXMetalG17P` in
+`__PRELINK_INFO`, section 4.2) and loads `%s/%s.bundle` under
+`/System/Library/Extensions` (Metal strings). Without an `IOAcceleratorES`
+service none of that runs.
+
+**Result:** with no `IOAcceleratorES` service -- which is exactly what
+deleting `sgx` produces (4.2, 4.3) -- the pending list is empty, the device
+array stays empty, and `MTLCreateSystemDefaultDevice()` returns nil with no
+log, no report and no trap. `AccelServer::renderer()` then returns NULL
+(1.2) and the software compositor runs.
+
+## 4. What binds to `sgx`, and what happens when it is absent
+
+### 4.1 The node
 
 Raw tree `/arm-io/sgx`: `compatible = "gpu,t8140"`, `device_type = "sgx"`,
 26 properties (`reg`, `interrupts` x8, `clock-gates`, `power-gates`,
@@ -166,7 +230,7 @@ children. `dt_fixup.py:558` (`d['arm-io'].remove_child('sgx')`) deletes it;
 the patched `firmware/dtree` still has `gfx-asc`, `gfx1-asc`
 (`iop,ascwrap-v6`) and `mapper-gfx-asc` (`iommu-mapper,gfx`).
 
-### 3.2 What matches it
+### 4.2 What matches it
 
 `__PRELINK_INFO` (`fileoff 70615040`, `IOKitPersonalities`):
 
@@ -180,7 +244,7 @@ the patched `firmware/dtree` still has `gfx-asc`, `gfx1-asc`
 `AGXG17P`'s `OSBundleLibraries` depend on `IOGPUFamily`, `IOSurface`,
 `RTBuddy`; nothing in the display or IOSurface stack depends on AGX.
 
-### 3.3 Absent: nothing binds, nothing waits, nothing panics
+### 4.3 Absent: nothing binds, nothing waits, nothing panics
 
 - `AGXAcceleratorG17P` can only match `gpu,t8140`; with the node gone it never
   probes. Every SpringBoard-era boot log confirms it: `SEPDCP.clean.log`
@@ -193,7 +257,7 @@ the patched `firmware/dtree` still has `gfx-asc`, `gfx1-asc`
   work-interval names (`/tmp/dvm/apple-xnu/iokit/Kernel/IOWorkloadConfig.cpp:207-216`),
   not rendering -- recorded so nobody chases them.
 
-### 3.4 Present but bare: SPTM dies before serial
+### 4.4 Present but bare: SPTM dies before serial
 
 Measured, 2026-09-02, `tools/probe.sh --dtree <tree> --secs 100`:
 
@@ -245,7 +309,7 @@ the same carveouts as RAM: `hw/arm/t8030.c:469-471`, "GFX handoff", "GFX
 shared region", "GPU region"). This is the "iommu init stuff" the
 `dt_fixup.py:557` comment refers to.
 
-## 4. Boot-args and device-tree switches (Q4)
+## 5. Boot-args and device-tree switches
 
 What the binaries actually check, by kext (`strings` over the extracted
 fileset entries in `/private/tmp/claude-501/.../scratchpad/kexts/`):
@@ -262,12 +326,12 @@ There is **no** `gpu=`, `-nogpu`, or "software rendering" boot-arg or
 device-tree property in this kernelcache, and none is needed: the userspace
 fallback keys off the absence of the accelerator service.
 
-## 5. What a non-GPU path costs us
+## 6. What a non-GPU path costs us
 
 The composited frame has to reach the panel through the path we are already
 building:
 
-- `IOSurface` allocation needs only `IOSurfaceRoot` (3.2).
+- `IOSurface` allocation needs only `IOSurfaceRoot` (4.2).
 - The render server's display object drives `IOMobileFramebuffer` swaps:
   `IOMobileFramebufferAP::surface_map_dcp(IOSurface*, IODMACommand**, dva_t*, bool)`,
   `swap_submit`, `swap_wait`, `surface_complete`, `need_swap_notify`
@@ -276,25 +340,26 @@ building:
   requested (CLAUDE.md). That work is unchanged by this finding; it is simply
   the *only* remaining display work rather than one of two.
 - Framebuffer compression: `AccelServer::renderer()` consults
-  `_CADeviceUseFramebufferCompression` (`0x18b0c3ec4`) only on the Metal
-  path, so the software path produces uncompressed surfaces; the DCP side
+  `_CADeviceUseFramebufferCompression` (**[dev]** `0x18440f8dc`, **[mac]**
+  `0x18b0c3ec4`) only on the Metal path, so the software path produces uncompressed surfaces; the DCP side
   logs `IOMFB: Surface %d has cacheMode 0x%x, needs to be 0x%x for display RT
   fetch` and `GP Decompression Error` for the compressed case, which we then
   never enter. Risk, not blocker.
 - Rotation/scaling copies: `CA::WindowServer::Display` has
   `iosurface_accelerator_supports_{scale,size,color_remap}` and the env
-  `CA_FORCE_COPY_SURFACE_{GPU,MSR}` (sim strings). The MSR is
+  `CA_FORCE_COPY_SURFACE_{GPU,MSR}` (**[dev]**/**[sim]** strings). The MSR is
   `AppleM2ScalerCSCDriver`, present in this kernelcache. Whether the software
   path needs it for a portrait phone panel is **unverified**.
 - Speed: CPU compositing under TCG. Not measured.
 
-## 6. If the device build has compiled the software path out
+## 7. For the record: what AGX would have required
 
-Then AGX is unavoidable and the minimum surface is large, because three
-layers gate on it before any pixel: SPTM's UAT bring-up from iBoot-supplied
+The device build has not compiled the software path out (section 1), so this
+is not needed. It is kept because it bounds the alternative: AGX would have
+required three layers before any pixel: SPTM's UAT bring-up from iBoot-supplied
 properties (`gpu-iouat`, UAT handoff, `gfx-shared-region-*`, `gpu-region-base`,
 `gfx-handoff-base`, `uat-enforce-gpu-carveout`, `uat-vaddr-size`; section
-3.4), the GFX RTKit firmware on `gfx-asc`/`gfx1-asc`
+4.4), the GFX RTKit firmware on `gfx-asc`/`gfx1-asc`
 (`AGXFirmwareKextG16RTBuddy`, `AGXArmFirmware::kickFirmware`,
 `AGXFirmware::isGFXBooted`), and `AGXAccelerator::start` /
 `configureDevice` / `IOGPU` command queues feeding a user-space Metal plugin
@@ -303,23 +368,33 @@ emulator, not a device model. Nothing found here suggests that is required.
 
 ## Open questions
 
-1. **The iPhone QuartzCore.** Needs the device `dyld_shared_cache_arm64e`
-   (+ subcaches and the `.symbols` file) from the system volume, then
-   `ipsw dyld extract <cache> QuartzCore`. Check, in this order:
-   `sw_new_context` / `CA::OGL::SWContext` (symbols, or the strings
-   `software renderer` and `software-temp-surface`); an `AccelServer :
-   IOMFBServer` pair; `AccelServer::render_update` with the
-   `cbz` on `renderer()` followed by `b Server::render_update`;
-   `AccelServer::renderer()` returning NULL after `_CAMetalContextCreate`.
-2. **The iPhone Metal.framework.** `MTLCreateSystemDefaultDevice()` must
-   return nil, not abort, when no `IOAcceleratorES` service exists. Same
-   extraction.
-3. **The iPhone backboardd** (`/usr/libexec/backboardd`, a loose file): the
-   `StartWindowServer` headless logic and whether anything else in it
-   hard-requires Metal (`BKSecureRendering`, `IOSurfaceAcceleratorParavirtClient`
-   are the strings to start from).
-4. The exact SPTM panic for a bare `sgx` node (3.4); a `pmemsave` of the SPTM
+Closed on the device build (2026-09-02, second pass):
+
+1. ~~The iPhone QuartzCore~~ -- carries `sw_new_context` (`0x1846a04a4`),
+   `CA::OGL::SWContext` (vtable `0x1e9050118`, 41 methods, `CA::OGL::SW` 379
+   symbols); `AccelServer : IOMFBServer : Server` (vtables `0x1e904b218` /
+   `0x1e9056e08` / `0x1e9056978`); `AccelServer::render_update`
+   `cbz x0` at `0x1844515dc` -> `b Server::render_update` at `0x184451664`;
+   `AccelServer::renderer` returns NULL after `_CAMetalContextCreate`
+   (`0x18440f854`). Section 1.
+2. ~~The iPhone Metal.framework~~ -- `MTLCreateSystemDefaultDevice` returns a
+   zero-initialised result when the `IOAcceleratorES` enumeration adds
+   nothing; no `MTLReportFailure`, no abort. Section 3.
+3. ~~The iPhone backboardd~~ -- creates the server via `serverWithOptions:`
+   before testing for a display, tolerates headless, imports only the two
+   shader-cache Metal calls. Section 2.
+
+Still open:
+
+4. The exact SPTM panic for a bare `sgx` node (4.4); a `pmemsave` of the SPTM
    data pages at the parked PC would settle it. Only worth doing if someone
    wants to keep the node.
 5. Whether the software path needs the M2 scaler for the internal panel
-   (section 5).
+   (section 6). `CA::WindowServer::Display::iosurface_accelerator_supports_*`
+   exist on device; their callers were not read.
+6. Cosmetic: the virtual call site that invokes the `new_server` vtable slot
+   (`+0x720`) was not located by pattern (`mov x17,#0x720`, `ldr [..,#0x720]`,
+   `add ..,#0x720` all miss); the slot contents (1.3) make the answer
+   independent of it.
+7. Not measured: CPU compositing throughput under TCG, and what
+   `SWContext::function_supported` declines on a real SpringBoard tree.
