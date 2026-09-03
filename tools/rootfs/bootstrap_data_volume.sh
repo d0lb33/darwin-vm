@@ -193,33 +193,49 @@ phase_format() {
 phase_seed() {
     [ -f "$OVL" ] || die "no overlay; run the image and format phases first"
     local dt="$WORK/dt_sysvol.bin"
-    say "[seed] device tree: no -ephemeral-data, keybag skipped"
+    say "[seed] device tree: no -ephemeral-data, encrypted Data keybag active"
     python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$dt" -nvram "$NVRAM" \
-        -enable ans -enable smc -enable sep -skip-keybag -dram 12G \
+        -enable ans -enable smc -enable sep -dram 12G \
         || die "dt_fixup failed"
     say "[seed] booting the system volume off the NVMe disk (first boot pays the seed once)"
     "$REPO/tools/probe.sh" --dtree "$dt" --tc "$TC" --mem 12G --secs 1200 \
         --tag BOOTSTRAP_SEED \
         --bootargs "rootdev=disk1s1 $BOOTARGS_COMMON" \
         -- -drive "if=none,id=ans,file=$OVL,format=qcow2" | tail -8
+    # probe.sh intentionally returns after a dead guest so callers can inspect
+    # its logs.  Do not let that make an unseeded Data volume look successful.
+    phase_verify
 }
 
 # ---------------------------------------------------------------- verify -----
 phase_verify() {
     local L=/tmp/dvm/probe/BOOTSTRAP_SEED.serial.log
     [ -f "$L" ] || die "no seed log; run the seed phase first"
+    local root mount2 var copies early unencrypted panics
+    root=$(grep -ao 'BSD root: [a-z0-9]*' "$L" | head -1 | cut -d' ' -f3)
+    mount2=$(grep -ao '(mount-phase-2) <Notice>: [A-Za-z -]*' "$L" | head -1)
+    var=$(grep -ao '/dev/disk1s[0-9]* on /private/var[^\"]*' "$L" | head -1)
+    copies=$(grep -ac 'Copying ' "$L")
+    early=$(grep -ac 'Early boot complete' "$L")
+    unencrypted=$(grep -ac 'unencrypted data volume' "$L")
+    panics=$(grep -ac 'panic(cpu' "$L")
     say "[verify] what the seed boot achieved"
-    printf "    BSD root            : %s\n" "$(grep -ao 'BSD root: [a-z0-9]*' "$L" | head -1 | cut -d' ' -f3)"
-    printf "    mount-phase-2       : %s\n" "$(grep -ao '(mount-phase-2) <Notice>: [A-Za-z -]*' "$L" | head -1)"
-    printf "    Data mounted on var : %s\n" "$(grep -ao '/dev/disk1s[0-9]* on /private/var[^\"]*' "$L" | head -1)"
-    printf "    files seeded        : %s\n" "$(grep -ac 'Copying ' "$L")"
-    printf "    Early boot complete : %s\n" "$(grep -ac 'Early boot complete' "$L")"
-    printf "    unencrypted panic   : %s\n" "$(grep -ac 'unencrypted data volume' "$L")"
-    printf "    xnu panics          : %s\n" "$(grep -ac 'panic(cpu' "$L")"
+    printf "    BSD root            : %s\n" "$root"
+    printf "    mount-phase-2       : %s\n" "$mount2"
+    printf "    Data mounted on var : %s\n" "$var"
+    printf "    files seeded        : %s\n" "$copies"
+    printf "    Early boot complete : %s\n" "$early"
+    printf "    unencrypted panic   : %s\n" "$unencrypted"
+    printf "    xnu panics          : %s\n" "$panics"
     echo
-    echo "    A second run of the seed phase should show 0 'Copying' lines and still"
-    echo "    mount /private/var -- that is the persistence proof, and the point of"
-    echo "    the whole exercise."
+    [ "$root" = "disk1s1" ] || die "seed boot did not root from the ANS System volume"
+    [[ "$mount2" == *"Doing boot task"* ]] || die "mount-phase-2 did not run"
+    [ -n "$var" ] || die "Data volume was not mounted on /private/var"
+    (( early > 0 )) || die "seed boot did not reach Early boot complete"
+    (( unencrypted == 0 )) || die "Data volume was rejected as unencrypted"
+    (( panics == 0 )) || die "seed boot panicked; see first panic(cpu in $L"
+    echo "    Verified: Data mounted on /private/var with no panic. A second seed boot"
+    echo "    should show 0 'Copying' lines while retaining that mount (persistence proof)."
 }
 
 case "$MODE" in
@@ -227,6 +243,6 @@ case "$MODE" in
     format) phase_format ;;
     seed)   phase_seed ;;
     verify) phase_verify ;;
-    all)    phase_image; phase_format; phase_seed; phase_verify ;;
+    all)    phase_image; phase_format; phase_seed ;;
     *) die "usage: $0 [all|image|format|seed|verify]" ;;
 esac
