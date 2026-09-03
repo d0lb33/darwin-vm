@@ -35,6 +35,8 @@
 #define STAGING_DIR "/private/var/.dvm-data-seed"
 #define STAGING_HELPER "/private/var/.dvm-data-seed/data_seed_helper"
 #define COMPLETE_MARKER "/private/var/root/.dvm-data-seed-complete"
+#define SYSTEMBAG_PATH DATA_MOUNT "/keybags/systembag.kb"
+#define SYSTEMBAG_WRITING_PATH DATA_MOUNT "/keybags/systembag.kb.writing"
 #define CF_STRING_ENCODING_UTF8 0x08000100U
 #define DIAG_XATTR_FLAGS (XATTR_NOFOLLOW | XATTR_SHOWCOMPRESSION)
 
@@ -74,11 +76,13 @@ struct copy_context {
 
 static void fail(const char *stage) {
     fprintf(stderr, "DVM_SEED_%s_ERRNO=%d (%s)\n", stage, errno, strerror(errno));
+    fflush(stderr);
     exit(1);
 }
 
 static void fail_rc(const char *stage, int rc) {
     fprintf(stderr, "DVM_SEED_%s_RC=%d\n", stage, rc);
+    fflush(stderr);
     exit(1);
 }
 
@@ -166,13 +170,44 @@ static struct apis load_apis(void) {
     return a;
 }
 
+/* On legacy APFS MKB persists these files.  Enhanced APFS deliberately makes
+ * MKBKeyBagCreateSystemWithACM a no-op success, so absence is evidence about
+ * the active storage mode, not a reason to misreport a failed private call.
+ * In either case record the exact stat result before copy work begins. */
+static int report_keybag_file(const char *stage, const char *path) {
+    struct stat st;
+    if (stat(path, &st)) {
+        int saved_errno = errno;
+        printf("DVM_SEED_%s_PATH=%s EXISTS=0 ERRNO=%d (%s)\n", stage, path,
+                saved_errno, strerror(saved_errno));
+        fflush(stdout);
+        return 0;
+    }
+    printf("DVM_SEED_%s_PATH=%s EXISTS=1 MODE=%o SIZE=%lld\n", stage, path,
+           st.st_mode & 07777, (long long)st.st_size);
+    fflush(stdout);
+    if (!S_ISREG(st.st_mode)) {
+        fprintf(stderr, "DVM_SEED_%s_NOT_REGULAR=1\n", stage);
+        fflush(stderr);
+        exit(1);
+    }
+    return 1;
+}
+
 static void initialise_data(const struct apis *a, const char *dest) {
-    int rc = a->aks_bootstrap_fs(dest, 2);
+    int rc, bag, writing;
+    rc = a->aks_bootstrap_fs(dest, 2);
     printf("DVM_SEED_AKS_RC=%d\n", rc);
+    fflush(stdout);
     if (rc) fail_rc("AKS", rc);
     rc = a->mkb_create(NULL, dest);
     printf("DVM_SEED_MKB_RC=%d\n", rc);
+    fflush(stdout);
     if (rc) fail_rc("MKB", rc);
+    bag = report_keybag_file("SYSTEMBAG", SYSTEMBAG_PATH);
+    writing = report_keybag_file("SYSTEMBAG_WRITING", SYSTEMBAG_WRITING_PATH);
+    printf("DVM_SEED_SYSTEMBAG_FILES_PERSISTED=%d\n", bag || writing);
+    fflush(stdout);
 }
 
 static int copy_status(int what, int stage, copyfile_state_t state,
@@ -441,8 +476,21 @@ static void run_full(const struct apis *a, const char *source, const char *dest)
     printf("DVM_SEED_UML_RC=0\n");
     fd = open(COMPLETE_MARKER, O_WRONLY | O_CREAT | O_EXCL, 0600);
     if (fd < 0) fail("MARKER_OPEN");
-    if (write(fd, "dvm data seed complete\n", 23) != 23 || fsync(fd) || close(fd)) fail("MARKER_WRITE");
+    if (write(fd, "dvm data seed complete\n", 23) != 23) fail("MARKER_WRITE");
+    if (fsync(fd)) fail("MARKER_FSYNC");
+    if (close(fd)) fail("MARKER_CLOSE");
     printf("DVM_SEED_MARKER_RC=0\n");
+    fflush(stdout);
+}
+
+/* Run just the destructive-to-an-empty-volume initialisation boundary.  It is
+ * deliberately passed the same exact mount paths as --full: callers cannot
+ * point a private API at an arbitrary volume, and staging cleanup still
+ * happens before AKS/MKB. */
+static void run_init_only(const struct apis *a, const char *dest) {
+    initialise_data(a, dest);
+    printf("DVM_SEED_INIT_ONLY_RC=0\n");
+    fflush(stdout);
 }
 
 /* First identify the actual source that makes COPYFILE_ALL fail.  A template
@@ -559,6 +607,14 @@ int main(int argc, char **argv) {
         run_full(&a, argv[2], argv[3]);
         return 0;
     }
+    if (argc == 4 && exact(argv[1], "--init-only")) {
+        require_layout(argv[2], argv[3]);
+        require_empty_data(argv[3]);
+        a = load_apis();
+        remove_staging_helper();
+        run_init_only(&a, argv[3]);
+        return 0;
+    }
     if (argc == 4 && exact(argv[1], "--diagnose")) {
         require_layout(argv[2], argv[3]);
         require_empty_data(argv[3]);
@@ -576,9 +632,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     {
-        fprintf(stderr, "usage: %s --probe REL %s %s | --diagnose %s %s | --diagnose-file REL %s %s | --full %s %s\n",
+        fprintf(stderr, "usage: %s --probe REL %s %s | --diagnose %s %s | --diagnose-file REL %s %s | --full %s %s | --init-only %s %s\n",
                 argv[0], SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT,
-                SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT);
+                SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT,
+                SOURCE_ROOT, DATA_MOUNT);
         return 2;
     }
 }
