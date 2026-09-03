@@ -98,7 +98,7 @@ stderr lines 680-714. This distinction is important: opcode `0x0f` returns the
 40-byte wrapped record; opcode `0x32` unwraps that record into the 64-byte CPX
 key.
 
-## Follow-on opcode 0x10 requirement
+## Follow-on opcode 0x10 requirements
 
 Acceptance of `0x0f` exposed a later, separate `apfs_crypto_state_init` panic.
 The existing opcode-`0x10` status reply encoded five empty blobs. Static APFS
@@ -114,11 +114,79 @@ first two outputs to contain 16-byte keys:
 - APFS enforces the two 16-byte lengths at
   `0xfffffff00a915158..0xfffffff00a915174`
 
-The model therefore returns deterministic 16-byte file and IV keys in the first
-two blobs, then three zero-length blobs and two zero scalars. This is the
-smallest runtime-supported response and does not claim persistent SEP secrets.
+The two keys alone are sufficient for the 112-byte class-availability request,
+but not for the 140-byte protected-object request later issued by
+`get_new_crypto_id`.  The latter request is the variant-2 IPC v1 shape captured
+at `/tmp/dvm/probe/DATA_SEED_VISIBLE.stderr.log:1573-1585`.  Its requested class
+is a little-endian u32 at absolute request offset `+0x60`; class 4 is visible in
+that capture.  The remainder of the validated shape is:
 
-## Final acceptance
+| Absolute offset | Size | Captured value | Treatment |
+| --- | ---: | --- | --- |
+| `+0x4c` | 4 | selector `2` | require |
+| `+0x50` | 4 | `1` | require |
+| `+0x54` | 4 | `0` | require |
+| `+0x58` | 4 | `UINT32_MAX` | require |
+| `+0x5c` | 4 | `0` | require |
+| `+0x60` | 4 | requested class `3` or `4` | return in both output scalars |
+| `+0x64` | 4 | tag `2` | require |
+| `+0x68` | 4 | size `0x1c` | require |
+| `+0x6c` | 4 | varying opaque value | preserve opaque semantics |
+| `+0x70` | 4 | `0` | require |
+| `+0x74` | 24 | fixed captured object tail | require byte-for-byte |
+
+The complete protected-object request is exactly 140 bytes.  The shorter
+availability form is exactly 112 bytes, requests class 1, and has zeroes after
+`+0x60`.  Other lengths, fixed fields, selectors, and classes are rejected with
+a distinct log and no reply; an unsupported request must not become a silent
+success.
+
+The variant-2 reply remains the 140-byte authenticated message established by
+the key-length controls: five length-prefixed blobs of lengths
+`{16,16,0,0,0}`, followed by two little-endian u32 outputs at payload offsets
+`+56` and `+60`.  The protected-object response must place the requested class
+in both trailing outputs.  Before this change both were zero, so APFS compared
+returned class 0 with requested class 4 at runtime
+`0xfffffff02a91c200` and reached the EPERM paths at
+`0xfffffff02a915300` and `0xfffffff02a915344`; the resulting failures are
+`get_new_crypto_id returned error 1` and named-stream creation failure at
+`/tmp/dvm/probe/DATA_SEED_VISIBLE.serial.log:2901-2902`.  The 112-byte request
+retains zero output scalars because no runtime evidence requires class echo for
+that form.
+
+The implementation therefore returns deterministic 16-byte file and IV keys
+in the first two blobs, three zero-length blobs, and—only for the validated
+140-byte form—two copies of the requested class.  This is the smallest
+runtime-supported response and does not claim persistent SEP secrets.
+
+### Opcode 0x10 runtime acceptance
+
+A fresh disposable overlay verifies the formerly failing ordinary-file and
+named-stream copies without relaxing `COPYFILE_ALL`, xattrs, cprotect, or the
+helper's fail-closed checks:
+
+- the class-3 and class-4 protected-object requests are accepted and receive
+  matching output scalars in
+  `/tmp/dvm/probe/DATA_SEED_OP10_CLASSFIX2.stderr.log:712-715,1763-1766,1800-1803`
+- the ordinary decmpfs file has matching bytes, metadata, and decmpfs xattr at
+  `.serial.log:3507-3512`
+- the 3,802-byte ResourceFork is byte-identical at lines 3516 and 3530; the
+  containing file's bytes, metadata, and protection witnesses pass at lines
+  3532-3537, and the helper exits zero at line 3538
+- neither log contains `get_new_crypto_id`, `dstream xattr`, or a first panic
+
+The child overlay grew from 197,016 bytes to 3,276,800 bytes, independently
+showing that the guest wrote the Data filesystem.
+
+A fresh full-seed child then reports `AKS=0`, `MKB=0`, 5,993 copied files, and
+`UML=0` at
+`/tmp/dvm/probe/DATA_SEED_FULL_CLASSFIX.serial.log:2866-2880`, with no named-
+stream or `get_new_crypto_id` failure.  The overlay grew from 197,016 bytes to
+more than 783 MB.  The helper nevertheless exits 1 at line 2881 before its own
+marker witness; a guest shell can create the marker and sync it at line 2898.
+This latter result is recorded as incomplete, not promoted to helper success.
+
+## Media-key acceptance
 
 1. The accepted boot logs request length 176, variant 3, class 14, record length
    40, capacity 64, and an authenticated 128-byte reply
@@ -135,22 +203,35 @@ smallest runtime-supported response and does not claim persistent SEP secrets.
    without a transport digest, keystore timeout, invalid-key-length, or invalid
    IV-key-length failure.
 
-## Remaining blocker
+## Current persistent-Data blocker
 
-The SKS migration and key lengths are no longer the first failure. The seed
-phase reaches mount-phase-2 with the real encrypted Data volume mounted, but
-copies zero template files. Early userspace then panics with:
+The file-copy blocker is resolved: a normal system-volume boot uses
+`disk1s1` as root, mounts encrypted/protected `disk1s2` on `/private/var`, and
+runs mount-phase-2 without a `Copying` line
+(`/tmp/dvm/probe/PERSIST_DATA_BOOT1.serial.log:285,406,441-448`).  That proves
+the populated Data filesystem is being consumed rather than re-seeded.
 
-```
-Creating classD marker file in /var/keybags in early boot task failed
-```
+The first remaining failure is keybag identity provisioning.  The seeded
+filesystem contains the copied `.bootstrapped` marker and several keybag files,
+but no `/private/var/keybags/systembag.kb`; `keybagd` reports that exact absence
+at `PERSIST_DATA_BOOT1.serial.log:503-505`.  `usermanagerd` later reports
+`UMD:FATAL OTI LOAD ERROR ... -536870212` at line 533 and requests recovery.
+The eventual `Halt/Restart Timed Out` panic at line 614 is only the known
+reboot consequence.  Opcode `0x0f`, both opcode `0x10` forms, and opcode `0x32`
+remain healthy in the corresponding stderr log.
 
-The final cold witness is
-`/tmp/dvm/probe/BOOTSTRAP_SEED_SKS_FINAL_COLD.serial.log:586`. This demonstrates
-that mount-phase-2 does not populate a completely empty real Data volume merely
-because it is mounted. Supplying the initial Data filesystem layout is a
-separate bootstrap-design problem; it is not evidence for more SKS opcode
-guessing.
+The route to the identity failure includes status-only SKS operations whose
+payloads and side effects have not yet been decoded.  Their response schemas
+must be established from AppleSEPKeyStore firmware/static evidence and live
+wire captures before implementation; returning guessed success would recreate
+the silent-no-op failure mode this bootstrap is designed to prevent.
+
+As a control only, removing `umVolumeMigration-inprogress.kb` in a child
+overlay and enabling the existing diagnostic keybag skip advances past
+`usermanagerd`, then stops at a separate missing-data failure in `tzinit`
+(`/tmp/dvm/probe/PERSIST_DATA_SKIP_BOOT1.serial.log:552-555`).  This is not a
+normal-boot acceptance and is not evidence that keybag provisioning can be
+skipped.
 
 ## Scope limits
 
