@@ -72,36 +72,44 @@ tools/rootfs/bootstrap_data_volume.sh normal
 tools/rootfs/bootstrap_data_volume.sh verify
 ```
 
-Here is the actual derived chain used for the two clean boots. Each command is
-run after the preceding command has completed, and each output image is a
-derived artifact rather than a repository file:
+Starting from the verified fresh-format parent, this is a copy-pasteable
+reproduction of the corrected chain. Each command runs after the preceding
+command completes, and every output is a derived artifact rather than a
+repository file:
 
 ```
 REPO=/Users/jdolbe1/Downloads/darwin-vm
+RUN=/tmp/dvm/data-seed/repro-persistent-1
 BASE=/tmp/dvm/data-seed/roles-fresh-format-033500.qcow2
-RAMDISK=/tmp/dvm/data-seed/ramdisk-data-seed.dmg
+RAMDISK="$RUN/ramdisk-data-seed.dmg"
 HELPER=/libexec/dvm_data_seed_helper
+mkdir -p "$RUN"
+cd "$REPO"
+WORK="$RUN/work" RESTORE_RAMDISK_OUT="$RAMDISK" \
+  tools/rootfs/bootstrap_data_volume.sh ramdisk-helper
 RESTORE_RAMDISK="$RAMDISK" RESTORE_HELPER_SOURCE="$HELPER" \
-  OVL="$BASE" OUT_OVL=/tmp/dvm/data-seed/roles-manifest-ramdisk1.qcow2 \
-  TAG=BOOTSTRAP_MANIFEST_ROLES_RAMDISK1 \
+  WORK="$RUN/work" PARENT="$BASE" OUT_OVL="$RUN/copy.qcow2" \
+  TAG=BOOTSTRAP_COPY_REPRO1 \
+  tools/rootfs/bootstrap_data_volume.sh copy-data
+RESTORE_RAMDISK="$RAMDISK" RESTORE_HELPER_SOURCE="$HELPER" \
+  WORK="$RUN/work" PARENT="$RUN/copy.qcow2" OUT_OVL="$RUN/manifest.qcow2" \
+  TAG=BOOTSTRAP_MANIFEST_REPRO1 \
   tools/rootfs/bootstrap_data_volume.sh manifest
 RESTORE_RAMDISK="$RAMDISK" RESTORE_HELPER_SOURCE="$HELPER" \
-  OVL=/tmp/dvm/data-seed/roles-manifest-ramdisk1.qcow2 \
-  OUT_OVL=/tmp/dvm/data-seed/roles-layout-ramdisk1.qcow2 \
-  TAG=BOOTSTRAP_LAYOUT_ROLES_RAMDISK1 \
+  WORK="$RUN/work" PARENT="$RUN/manifest.qcow2" OUT_OVL="$RUN/layout.qcow2" \
+  TAG=BOOTSTRAP_LAYOUT_REPRO1 \
   tools/rootfs/bootstrap_data_volume.sh layout
 RESTORE_RAMDISK="$RAMDISK" RESTORE_HELPER_SOURCE="$HELPER" \
-  OVL=/tmp/dvm/data-seed/roles-layout-ramdisk1.qcow2 \
-  OUT_OVL=/tmp/dvm/data-seed/roles-marker-ramdisk1.qcow2 \
-  TAG=BOOTSTRAP_MARKER_ROLES_RAMDISK1 \
+  WORK="$RUN/work" PARENT="$RUN/layout.qcow2" OUT_OVL="$RUN/marker.qcow2" \
+  TAG=BOOTSTRAP_MARKER_REPRO1 \
   tools/rootfs/bootstrap_data_volume.sh marker
-PARENT=/tmp/dvm/data-seed/roles-marker-ramdisk1.qcow2 \
-  OUT_OVL=/tmp/dvm/data-seed/roles-normal-persist-boot3.qcow2 \
-  TAG=PERSIST_NVME_CLEAN_BOOT3 NORMAL_BOOT_SECS=45 \
+WORK="$RUN/work" PARENT="$RUN/marker.qcow2" \
+  OUT_OVL="$RUN/boot1.qcow2" TAG=PERSIST_NVME_REPRO1_BOOT1 \
+  NORMAL_BOOT_SECS=45 \
   tools/rootfs/bootstrap_data_volume.sh normal
-PARENT=/tmp/dvm/data-seed/roles-normal-persist-boot3.qcow2 \
-  OUT_OVL=/tmp/dvm/data-seed/roles-normal-persist-boot4.qcow2 \
-  TAG=PERSIST_NVME_CLEAN_BOOT4 NORMAL_BOOT_SECS=45 \
+WORK="$RUN/work" PARENT="$RUN/boot1.qcow2" \
+  OUT_OVL="$RUN/boot2.qcow2" TAG=PERSIST_NVME_REPRO1_BOOT2 \
+  NORMAL_BOOT_SECS=45 \
   tools/rootfs/bootstrap_data_volume.sh normal
 ```
 
