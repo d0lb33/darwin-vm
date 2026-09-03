@@ -126,6 +126,15 @@ The full paired logs are
 
 ## Conclusion
 
+Correction: the statement that all swap/map breakpoints were zero is invalid
+as a debugger conclusion.  One matching stop was hidden by the LLDB 21
+repeated-`-o` command trap; see `docs/re/lldb-breakpoint-command-trap.md`.
+The independent RPC trace still has zero D575/A407/A408/D589/D591/surface-map
+records, and the storage, no-panic, and entirely black framebuffer witnesses
+remain valid.  The no-D575 control's zero-hit claim is valid only because its
+independent trace has no hidden breakpoint dependency; the D575-bool0 swap
+localization must be repeated with the corrected callback form.
+
 Omitting D575 prevents the known false external-display assertion without
 regressing persistent storage or boot health, but it does not create the
 missing producer event.  The blank display in this control occurs before

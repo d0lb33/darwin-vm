@@ -61,6 +61,14 @@ therefore covered launchd startup and the later UI-daemon launch period.
 
 ## Breakpoint result
 
+Correction: the zero-hit table below is not a valid runtime localization.
+The LLDB 21 command-file form hid 69 matching breakpoint stops; see
+`docs/re/lldb-breakpoint-command-trap.md`.  The same-boot slide proof,
+independent RPC/black-frame/storage witnesses, and the recorded absence of
+the expected downstream trace records remain valid.  The claim that the
+missing producer gate is upstream of QuartzCore must be rerun with the
+validated Python callback form.
+
 The measured `+0x1fe4c000` slide was applied to every QuartzCore static
 address below.  LLDB accepted all 20 breakpoints
 (`/tmp/dvm/UI_QC_SURFACE1.lldb.log:14-78`), then ran until the scheduled stop.
