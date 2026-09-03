@@ -156,12 +156,13 @@ def wait_for_prompt(s, prompt_re, timeout, char_delay, drop_re, log):
 
 
 def send_command(s, command, char_delay):
-    """Transmit a command with a sacrificial shell-ignored leading space."""
-    # If an idle UART drops the first byte, it drops this space and the command
-    # is intact.  If it does not, POSIX sh ignores a leading space.  Unlike a
-    # leading newline, this cannot make the command itself become the first byte
-    # of a second input line.
-    send_paced(s, b' ' + command.encode() + b'\n', char_delay)
+    """Transmit a command behind a prefix valid with or without byte one."""
+    # If an idle UART drops the first byte, ``: :; command`` becomes
+    # `` :; command``: both forms run the POSIX `:` no-op and then `command`.
+    # A leading space alone is not enough because some console paths discard it
+    # before losing the first printable byte.  Unlike a leading newline, this
+    # cannot make the real command become a new line's first byte.
+    send_paced(s, b': :; ' + command.encode() + b'\n', char_delay)
 
 
 def main():

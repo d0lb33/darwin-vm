@@ -156,8 +156,13 @@ phase_format() {
     local before after
     before=$(stat -f%z "$OVL")
     say "[format] newfs_apfs -E on the Data slot (iOS makes the keys, not us)"
+    # The host already assigned this slot role D.  Do not repeat `-R D` here:
+    # this restore newfs rejects encryption plus that special role with
+    # "Can't create an encrypted volume with special role 0x280" (FMT_RC=73),
+    # before writing anything.  Formatting the existing Data slot without a
+    # role override lets it retain the host-created role while iOS owns keys.
     python3 "$REPO/tools/serial.py" "$sock" send \
-        'newfs_apfs -E -W -v Data -R D /dev/disk1s2; echo FMT_RC=$?' --secs 180 --log "$clog" \
+        'newfs_apfs -E -W -v Data /dev/disk1s2; echo FMT_RC=$?' --secs 180 --log "$clog" \
         | tail -5
 
     # VERIFY, do not assert. The first version of this phase printed "done"

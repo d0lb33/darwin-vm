@@ -37,7 +37,8 @@ class SerialHandshakeTests(unittest.TestCase):
                 wire += server.recv(256)
             received.append(wire)
             # Model the fault: the first byte after idle disappears.  The
-            # guarded byte is a shell-ignored space, leaving the command whole.
+            # guarded byte is the first of a prefix that remains valid after a
+            # one-byte loss, leaving the command whole.
             guest_line = wire[1:]
             server.sendall(b"\r\n# " + guest_line + b"\r\n# ")
             server.close()
@@ -54,7 +55,7 @@ class SerialHandshakeTests(unittest.TestCase):
             client, re.compile(re.escape(command)), 1, None, log, echo=False))
         thread.join(1)
         self.assertFalse(thread.is_alive())
-        self.assertEqual(received, [b" " + command.encode() + b"\n"])
+        self.assertEqual(received, [b": :; " + command.encode() + b"\n"])
         client.close()
 
     def test_missing_prompt_fails_closed(self):
