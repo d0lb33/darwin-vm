@@ -78,6 +78,8 @@ phase_image() {
 phase_format() {
     [ -f "$OVL" ] || die "no overlay; run the image phase first"
     local dt="$WORK/dt_ramdisk.bin" sock="$WORK/fmt.sock"
+    local slog=/tmp/dvm/probe/BOOTSTRAP_FMT.serial.log
+    local clog="$WORK/fmt.console.log"
     say "[format] device tree: ans + smc + sep on the restore ramdisk"
     python3 "$REPO/dt_fixup.py" "$REPO/../dtree_raw" "$dt" -nvram "$NVRAM" \
         -enable ans -enable smc -enable sep -dram 12G 2>/dev/null \
@@ -93,6 +95,16 @@ phase_format() {
         -- -drive "if=none,id=ans,file=$OVL,format=qcow2" >/dev/null 2>&1 &
     local probe_pid=$!
 
+    # probe.sh starts QEMU in a subshell, so killing only $probe_pid leaks the
+    # guest.  Keep this armed on every error path, including a failed transport
+    # handshake, and reap only our unique tag.
+    cleanup_format() {
+        kill "$probe_pid" 2>/dev/null || true
+        pkill -f "BOOTSTRAP_FMT" 2>/dev/null || true
+        pkill -f "unix:$sock" 2>/dev/null || true
+    }
+    trap cleanup_format EXIT INT TERM
+
     # Wait for the restore ramdisk's shell by watching the ACCUMULATING serial
     # log, not by reading the socket. serial.py *drains* the stream into its own
     # log, so polling it with `read` consumes the prompt and the next poll finds
@@ -100,7 +112,6 @@ phase_format() {
     # already eaten, and declared "guest console never appeared" on a boot that
     # had reached the shell with 0 panics. --uart-socket still writes the serial
     # log (the chardev carries logfile=), so the log is the reliable witness.
-    local slog=/tmp/dvm/probe/BOOTSTRAP_FMT.serial.log
     local waited=0
     while (( waited < 300 )); do
         perl -e 'sleep 5'; waited=$((waited+5))
@@ -116,11 +127,31 @@ phase_format() {
     }
     say "[format] guest shell up after ${waited}s"
 
+    # `command -v` is the positive control for a negative answer below.  The
+    # earlier `cho: not found` came from a mangled echo, not from newfs_apfs, so
+    # do not infer the formatter is absent until the guest has echoed and run
+    # this checked command.  The probe chardev logfile, not socket output, is
+    # the witness: it is QEMU's accumulating guest->host console record.
+    rm -f "$clog"
+    say "[format] positive control: locate newfs_apfs on the restore ramdisk"
+    python3 "$REPO/tools/serial.py" "$sock" send \
+        'command -v newfs_apfs; echo NEWFS_AVAILABLE_RC=$?' --secs 30 --log "$clog" \
+        | tail -5
+    local available=""
+    waited=0
+    while (( waited < 60 )); do
+        available=$(grep -ao 'NEWFS_AVAILABLE_RC=[0-9]\+' "$slog" 2>/dev/null | tail -1 | cut -d= -f2)
+        [ -n "$available" ] && break
+        perl -e 'sleep 5'; waited=$((waited+5))
+    done
+    [ "$available" = "0" ] || die "newfs_apfs is unavailable on the restore ramdisk (rc=${available:-none}); see $slog"
+    say "[format] positive control passed: restore ramdisk reported newfs_apfs rc=0"
+
     local before after
     before=$(stat -f%z "$OVL")
     say "[format] newfs_apfs -E on the Data slot (iOS makes the keys, not us)"
     python3 "$REPO/tools/serial.py" "$sock" send \
-        'newfs_apfs -E -W -v Data -R D /dev/disk1s2; echo FMT_RC=$?' --secs 180 \
+        'newfs_apfs -E -W -v Data -R D /dev/disk1s2; echo FMT_RC=$?' --secs 180 --log "$clog" \
         | tail -5
 
     # VERIFY, do not assert. The first version of this phase printed "done"
@@ -128,26 +159,20 @@ phase_format() {
     # string, the overlay never grew, and the phase still reported success --
     # the exact "a silent no-op looks like success" failure this project keeps
     # being bitten by. Two independent witnesses now have to agree.
-    local clog="$WORK/fmt.console.log" rc="" waited=0
+    local rc="" waited=0
     while (( waited < 180 )); do
-        rc=$(grep -ao 'FMT_RC=[0-9]\+' "$clog" 2>/dev/null | tail -1 | cut -d= -f2)
+        rc=$(grep -ao 'FMT_RC=[0-9]\+' "$slog" 2>/dev/null | tail -1 | cut -d= -f2)
         [ -n "$rc" ] && break
         perl -e 'sleep 5'; waited=$((waited+5))
     done
     after=$(stat -f%z "$OVL")
 
-    python3 "$REPO/tools/serial.py" "$sock" send 'diskutil list; echo LIST_RC=$?' --secs 60 \
-        | grep -iE "disk1s|Data" | head -6
-
-    # Reap the guest by its own tag: killing probe.sh leaves the qemu it spawned
-    # in a subshell running, which is how this script leaked a VM on its first run.
-    pkill -f "BOOTSTRAP_FMT" 2>/dev/null
-    pkill -f "unix:$sock" 2>/dev/null
-
     say "[format] newfs_apfs rc=${rc:-<never reported>}  overlay ${before} -> ${after} bytes"
-    [ "$rc" = "0" ] || die "newfs_apfs did not report success (rc=${rc:-none}); see $clog"
+    [ "$rc" = "0" ] || die "newfs_apfs did not report success (rc=${rc:-none}); see $slog"
     (( after > before )) || die "newfs_apfs reported success but wrote nothing to $OVL -- a real format writes a superblock"
     say "[format] verified: the encrypted Data volume is in $OVL"
+    cleanup_format
+    trap - EXIT INT TERM
 }
 
 # ---------------------------------------------------------------- phase 3 ----
