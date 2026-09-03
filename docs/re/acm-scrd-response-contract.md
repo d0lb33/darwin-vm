@@ -29,10 +29,9 @@ must be measured rather than claimed.
 |---|---|---|
 | Endpoint readiness | `sep-endpoint,scrd` is already usable before the timeout. | `SKS_OP19_BH6_PAD1.serial.log:240-246` logs the wait, `SEP EP 10 enabled`, then `SEPEndpoint enabled`. |
 | Request mailbox frame | Endpoint is byte 0, tag is byte 1, OOL byte count is bits `[31:16]`, and the upper word is the SEP status on reply. | `qemu-sptm/hw/arm/darwin_sep.c:151-157`; packing implementation at `:719-728`. |
-| Live command 10 | 36-byte request, request sequence 1, SUID 0; caller declares no output bytes. | `SKS_OP19_BH6_PAD1.stderr.log:373-378` shows `01 00 1c 00`, sequence 1, `SCRD`, and command byte `0x0a`; `serial.log:575-579` records `inLen=36`, `outLen=0`. |
-| Live command 25 | 40-byte request, request sequence 2, SUID -1; caller declares one output byte. | `SKS_OP19_BH6_PAD1.stderr.log:1189-1194` shows the same header, `SCRD`, and command byte `0x19`; `serial.log:624-628` records `inLen=40`, `outLen=1`. |
-| Current timeout cause | The endpoint-10 switch logs the request and, unless `DARWIN_SEP_SCRD_FAIL_FAST` is set, falls through without calling `sep_send_raw()`. | `qemu-sptm/hw/arm/darwin_sep.c:1914-1924`. The resulting errors are `0xe00002d6` at serial `:575-579` and `:624-638`. |
-| Fast-fail is not success | The opt-in reply has zero OOL length and status 1, which ACM surfaces as an SEP error rather than a completed request. | `darwin_sep.c:159-162`, `:1919-1922`. |
+| Live command 10 | 36-byte request, request sequence 1, SUID 0; caller declares no output bytes. | `SKS_OP19_BH6_PAD1.stderr.log:373-378` shows `01 00 1c 00`, sequence 1, logical FourCC `SCRD` serialized as bytes `44 52 43 53` (`DRCS`), and command byte `0x0a`; `serial.log:575-579` records `inLen=36`, `outLen=0`. |
+| Live command 25 | 40-byte request, request sequence 2, SUID -1; caller declares one output byte. | `SKS_OP19_BH6_PAD1.stderr.log:1189-1194` shows the same header and wire-order `DRCS`, then command byte `0x19`; `serial.log:624-628` records `inLen=40`, `outLen=1`. |
+| Former timeout cause | The endpoint-10 switch logged the request without replying. The resulting errors were `0xe00002d6`. | Historical control `SKS_OP19_BH6_PAD1.serial.log:575-579` and `:624-638`. |
 | Response envelope gate | On generic request type 4, `sendSEPCommand` rejects an absent buffer, total OOL length `<= 11`, byte 0 equal to zero, mismatched `u32` at `+4`, or a `u16` at `+2` greater than the total length. | `AppleSEPCredentialManager` unslid `0xfffffff0095291e4-0xfffffff009529224`. Specifically: buffer at service `+0x170`, total length `+0x160`, byte `[0]`, request ID `[+4]`, and header length `[+2]`. |
 | Payload handoff | After those checks, the same routine advances by the `u16` at `+2`, sets remaining length to `total-header_len`, and copies that remainder to the caller's output buffer. | `AppleSEPCredentialManager` unslid `0xfffffff00952921c-0xfffffff0095292b4`. |
 | Command 25 dispatch | `LibCall_ACMGetEnvironmentVariable`'s local wrapper explicitly supplies command `0x19` (decimal 25) to its transport callback. | `AppleSEPCredentialManager` unslid `0xfffffff009531b84-0xfffffff009531ba4`; its cstring is at unslid `0xfffffff0076fd902`. |
@@ -71,22 +70,27 @@ byte after the same header, matching its live `outLen=1`; use zero only as a
 positive-control value (plausibly "developer mode disabled"), not as a
 documented SCRD policy assertion.
 
+`UI_SCRD_DCP2` is the dynamic positive control. QEMU records matching-sequence
+12- and 13-byte replies at stderr lines 391 and 401. The guest emits none of
+the former command-10/25 timeout or `0xe00002d6` error lines, reaches Early
+Boot at serial line 640, remains panic-free for the 100-second probe, and
+continues into the IOMFB hot-plug path at serial line 745. An earlier test that
+compared bytes at `+0x1c` with ASCII `SCRD` timed out exactly like the control;
+its hexdump established the on-wire `DRCS` order before this successful run.
+
 ## Concrete implementation plan
 
 1. Add a dedicated endpoint-10 helper in `qemu-sptm/hw/arm/darwin_sep.c` rather
    than changing generic mailbox code.  It should DART-write the OOL reply,
    parse only the observed request invariants (`u16 version=1`, header length
-   `0x1c`, `SCRD` tag at `+0x1c`, command byte at `+0x20`), and log the
+   `0x1c`, wire-order `DRCS` tag at `+0x1c`, command byte at `+0x20`), and log the
    sequence, command, reply length, and status.
 2. Dispatch command byte `0x0a` to the 12-byte envelope and command byte
    `0x19` to the 13-byte envelope.  Leave unrecognized command bytes
    unanswered and dump their OOL body; this keeps unknown SCRD behavior
    observable instead of turning it into an invented success.
-3. Run a fresh-child boot with `DARWIN_SEP_DEBUG=1`.  Acceptance requires both
-   `sendSEPCommand ... took` lines to report `ioErr=0x0 acmErr=0` without the
-   5000-ms delay, and an endpoint-10 model log showing the matching sequence
-   and OOL-out write.  A later regression boot must retain ANS, SKS, and DCP
-   behavior.
+3. The fresh-child `UI_SCRD_DCP2` run supplies the positive control above. A
+   later regression boot must retain ANS, SKS, and DCP behavior.
 4. If command 25 is accepted but changes policy incorrectly, capture the
    caller's one-byte output with an LLDB breakpoint immediately after
    `0xfffffff009531ba4` and sweep only the two boolean values.  That resolves
