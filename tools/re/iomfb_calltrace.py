@@ -55,6 +55,15 @@ RUNTIME_ADDRESSES = {
     "a482_wrapper": 0xfffffff02a0cc25c,
     "surface_map_entry": 0xfffffff02a0b9600,
     "surface_map_return": 0xfffffff02a0b97a0,
+    # D120/default-framebuffer chain.  These are runtime addresses, with the
+    # same +0x20000000 slide as the original IOMFB sites above.
+    "d120_entry": 0xfffffff02919b338,
+    "d120_boot_call": 0xfffffff02919b384,
+    "boot_vtable_call": 0xfffffff02918837c,
+    "unified_pipeline2_target": 0xfffffff029189a68,
+    "iomfg_bridge": 0xfffffff02a0d5490,
+    "hotplug_post_latch": 0xfffffff02a0bcb94,
+    "default_dimension_query_return": 0xfffffff02a0c047c,
 }
 
 SITE_ORDER = tuple(RUNTIME_ADDRESSES)
@@ -342,6 +351,62 @@ class CallTracer:
                 memory["u64_at_x25"] = self._memory(x25, 8)
             if x24:
                 memory["u64_at_x24"] = self._memory(x24, 8)
+        elif site == "d120_entry":
+            # rpc_callee_gated's complete callback ABI.  The D120 handler
+            # writes its raw result through x4, bounded by x5.  D120's normal
+            # boot action returns w0=0, so a zero byte is not a failure; the
+            # downstream A389/A454 transport and bridge hits are the witness.
+            add("x0", "x1", "x2", "x3", "x4", "x5")
+            x4, x5 = r("x4"), r("x5")
+            if x4 and x5:
+                memory["d120_out_buffer"] = self._memory(x4, x5)
+        elif site == "d120_boot_call":
+            # 0x...19b384 calls the display boot path after deriving x0 from
+            # D120's pipeline entry; x4/x5 remain the callback out buffer.
+            add("x0", "x4", "x5", "x9")
+            x4, x5 = r("x4"), r("x5")
+            if x4 and x5:
+                memory["d120_out_buffer"] = self._memory(x4, x5)
+        elif site == "boot_vtable_call":
+            # The call at +0x837c is a vtable dispatch on the boot object's
+            # x19 self; LR identifies the only immediate post-call branch.
+            add("x0", "x19", "x8", "w0")
+        elif site == "unified_pipeline2_target":
+            # Function entry: x0 is saved as x19 before the directly read
+            # +0x5e88 bridge pointer (applemobiledisp.r2dis.txt:12955+).
+            add("x0", "x1", "x2", "x3")
+            x0 = r("x0")
+            if x0:
+                memory["self_plus_0x5e88"] = self._memory(x0 + 0x5e88, 8)
+        elif site == "iomfg_bridge":
+            # IOMobileGraphicsFamily-DCP bridge entry stores x0 in x19 and
+            # directly reads its +0x30 peer (iomfg_dcp.r2dis.txt:36103+).
+            add("x0", "x1", "x2", "x3")
+            x0 = r("x0")
+            if x0:
+                memory["self_plus_0x30"] = self._memory(x0 + 0x30, 8)
+        elif site == "hotplug_post_latch":
+            # The preceding instructions latch +0x38a and +0x430, then the
+            # site reads +0x384.  Record exactly the fields that distinguish
+            # an announced display from a merely completed callback.
+            add("x19", "w21", "w8", "w9")
+            x19 = r("x19")
+            if x19:
+                memory["self_plus_0x1a0"] = self._memory(x19 + 0x1a0, 8)
+                memory["self_plus_0x384"] = self._memory(x19 + 0x384, 4)
+                memory["self_plus_0x389"] = self._memory(x19 + 0x389, 1)
+                memory["self_plus_0x38a"] = self._memory(x19 + 0x38a, 1)
+                memory["self_plus_0x430"] = self._memory(x19 + 0x430, 1)
+        elif site == "default_dimension_query_return":
+            # This address is the call-site return boundary for the default
+            # dimension query.  x1/x2 are the two stack output slots and x19
+            # is the retained framebuffer self for the following checks.
+            add("x0", "x1", "x2", "x8", "x19")
+            x1, x2 = r("x1"), r("x2")
+            if x1:
+                memory["dimension_out_1"] = self._memory(x1, 4)
+            if x2:
+                memory["dimension_out_2"] = self._memory(x2, 4)
         else:  # validate_address_map prevents this, but preserve safe behavior.
             add("x0", "x1", "x2", "x3")
 
