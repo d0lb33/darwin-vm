@@ -28,6 +28,8 @@ session unreadable. Lines matching --drop (default that message) are written to
 the log but not printed. Pass --drop '' to see raw output.
 """
 import argparse
+import base64
+import subprocess
 import os
 import re
 import socket
@@ -165,10 +167,88 @@ def send_command(s, command, char_delay):
     send_paced(s, b': :; ' + command.encode() + b'\n', char_delay)
 
 
+def remote_path_is_safe(path):
+    """Limit uploads to the disposable Data-volume staging namespace."""
+    return (path.startswith('/private/var/.dvm-data-seed/') and
+            '..' not in path.split('/') and
+            path != '/private/var/.dvm-data-seed/')
+
+
+def upload(s, local_path, remote_path, char_delay, prompt_re, args,
+           drop_re, log):
+    """Upload a local file via the restore shell's shipped /bin/base64.
+
+    This deliberately does not add a binary to an image on the host.  Each
+    shell command is handshake/echo checked like ordinary serial commands,
+    while the final byte count is a guest-side witness that the decoder did
+    work.  Chunks are appended as base64 text by the shell builtin; one guest
+    decoder runs only after the complete text has arrived.  That avoids
+    repeatedly spawning base64 (and flooding the console with policy logs).
+    The target namespace is intentionally narrow: it is only writable
+    after the caller mounted the disposable Data volume at /private/var.
+    """
+    if not remote_path_is_safe(remote_path):
+        sys.exit('serial: upload target must be below /private/var/.dvm-data-seed/')
+    try:
+        with open(local_path, 'rb') as f:
+            blob = f.read()
+    except OSError as e:
+        sys.exit(f'serial: cannot read upload source {local_path}: {e}')
+
+    def checked(command, marker, final=False):
+        if not wait_for_prompt(s, prompt_re, args.prompt_timeout,
+                               char_delay, drop_re, log):
+            sys.exit(f'serial: shell prompt did not arrive before upload command')
+        send_command(s, command, char_delay)
+        # Kernel and launchd logs may bisect terminal echo.  A numbered command
+        # completion marker is a stronger witness than an exact visual echo:
+        # it proves the shell parsed and ran this command, and the final cksum
+        # below proves all parsed chunks decoded to the intended bytes.
+        if not wait_for_text(s, re.compile(re.escape(marker)),
+                             args.echo_timeout, drop_re, log):
+            sys.exit('serial: upload completion marker did not arrive')
+        # Base64 decode of one short chunk is immediate.  Waiting the normal
+        # command idle window for every chunk would turn a 50 KiB helper into a
+        # ten-minute transfer, while skipping the final witness would weaken
+        # the only useful success signal.  Keep the chunks paced and reserve
+        # the caller-selected drain for setup and byte-count verification.
+        drain(s, args.secs if final else 0.10,
+              args.idle if final else 0.05, drop_re, log)
+
+    # mkdir is intentionally only the unique parent created by this tool.
+    encoded_path = remote_path + '.b64'
+    checked("mkdir -p /private/var/.dvm-data-seed && : > %s; echo DVM_UPLOAD_SETUP_RC=$?" % encoded_path,
+            'DVM_UPLOAD_SETUP_RC=0')
+    # Keep an individual line comfortably below the shell's and UART's input
+    # limits.  Base64 has no quoting metacharacters, so single quotes are safe.
+    encoded = base64.b64encode(blob).decode('ascii')
+    # The restore shell silently loses characters on a roughly 500-byte input
+    # line (payload plus the decoder command), not merely on the 2 KiB lines
+    # that visibly ring its bell.  Keep the complete shell line below 256 B.
+    # It is slower, but every accepted chunk must be exact before a trust-cache
+    # controlled guest executable is allowed to run.
+    for number, off in enumerate(range(0, len(encoded), 128), 1):
+        chunk = encoded[off:off + 128]
+        marker = 'DVM_UPLOAD_CHUNK_%d_RC' % number
+        checked("printf '%%s' '%s' >> %s; echo %s=$?" %
+                (chunk, encoded_path, marker), marker + '=0')
+
+    witness = 'DVM_UPLOAD_FINAL_RC=0 DVM_UPLOAD_BYTES=%d' % len(blob)
+    try:
+        cksum = subprocess.check_output(['cksum', local_path], text=True).split()[0]
+    except (OSError, subprocess.CalledProcessError) as e:
+        sys.exit(f'serial: cannot calculate host cksum: {e}')
+    # The restore ramdisk deliberately has a very small userland; avoid awk
+    # here and let POSIX sh split cksum's "sum bytes filename" output.
+    checked("/bin/base64 -d %s > %s; dec=$?; test \"$dec\" -eq 0 && test \"$(wc -c < %s)\" -eq %d && set -- $(cksum %s) && test \"$1\" = %s; rc=$?; test \"$rc\" -ne 0 || /bin/rm -f %s; echo DVM_UPLOAD_FINAL_RC=$rc DVM_UPLOAD_BYTES=%d" %
+            (encoded_path, remote_path, remote_path, len(blob), remote_path, cksum,
+             encoded_path, len(blob)), witness, final=True)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument('sock')
-    p.add_argument('action', choices=['read', 'send', 'script'])
+    p.add_argument('action', choices=['read', 'send', 'script', 'upload'])
     p.add_argument('arg', nargs='?', default='')
     p.add_argument('--secs', type=float, default=10, help='max seconds to read')
     p.add_argument('--idle', type=float, default=1.5,
@@ -186,6 +266,8 @@ def main():
                    help='seconds between transmitted UART bytes')
     p.add_argument('--no-handshake', action='store_true',
                    help='send directly; only for consoles that are not shells')
+    p.add_argument('--remote-path',
+                   help='guest destination for upload (only /private/var/.dvm-data-seed/*)')
     args = p.parse_args()
 
     if not os.path.exists(args.sock):
@@ -231,6 +313,14 @@ def main():
                 if not wait_for_text(s, echo_re, args.echo_timeout, drop_re, log):
                     sys.exit(f'serial: command echo did not match: {c}')
             drain(s, args.secs, args.idle, drop_re, log)
+    elif args.action == 'upload':
+        if args.no_handshake:
+            sys.exit('serial: upload requires the shell handshake')
+        if not args.remote_path:
+            sys.exit('serial: upload requires --remote-path')
+        drain(s, 0.3, 0.2, drop_re, log, echo=False)
+        upload(s, args.arg, args.remote_path, args.char_delay,
+               re.compile(args.prompt), args, drop_re, log)
     s.close()
     log.close()
 
