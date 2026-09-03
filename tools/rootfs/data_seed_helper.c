@@ -8,7 +8,9 @@
  * MKBKeyBagCreateSystemWithACM(NULL, data) at 0x100006dd4..e0, before its
  * content restore at 0x100006e4c..80.  /sbin/mount calls
  * UMLCreatePrimaryUserLayout(CFSTR("/"), CFSTR("/private/var/mobile"), 0,
- * &error) at 0x1000042b4..cc.  See docs/re/data-volume.md.
+ * &error) at 0x1000042b4..cc.  --full preserves that observed default.
+ * --full-aks-setup is the separate, explicitly labelled experiment for the
+ * reverse-engineered withAKSSetup option bit.  See docs/re/data-volume.md.
  *
  * The source must be the System volume mounted read-only at
  * /private/var/hardware; it is not caller-selectable.  Data must be mounted
@@ -458,7 +460,8 @@ static void run_probe(const struct apis *a, const char *source, const char *dest
     verify_probe(src, dst);
 }
 
-static void run_full(const struct apis *a, const char *source, const char *dest) {
+static void run_full(const struct apis *a, const char *source, const char *dest,
+                     int with_aks_setup) {
     struct copy_context ctx;
     CFStringRef root, mobile;
     CFErrorRef error = NULL;
@@ -471,7 +474,13 @@ static void run_full(const struct apis *a, const char *source, const char *dest)
     root = a->cf_string(NULL, "/", CF_STRING_ENCODING_UTF8);
     mobile = a->cf_string(NULL, "/private/var/mobile", CF_STRING_ENCODING_UTF8);
     if (!root || !mobile) fail_rc("UML_CFSTRING", 0);
-    if (!a->uml_create(root, mobile, 0, &error)) fail_rc("UML", 0);
+    /* Option zero is the observed /sbin/mount call.  The nonzero branch is
+     * deliberately opt-in: RE identifies bit 0 as withAKSSetup, and this
+     * helper records which branch it actually asked the private API to take. */
+    printf("DVM_SEED_UML_AKS_SETUP=%d\n", with_aks_setup ? 1 : 0);
+    fflush(stdout);
+    if (!a->uml_create(root, mobile, with_aks_setup ? 1 : 0, &error))
+        fail_rc("UML", 0);
     a->cf_release(root); a->cf_release(mobile);
     printf("DVM_SEED_UML_RC=0\n");
     fd = open(COMPLETE_MARKER, O_WRONLY | O_CREAT | O_EXCL, 0600);
@@ -604,7 +613,15 @@ int main(int argc, char **argv) {
         require_empty_data(argv[3]);
         a = load_apis();
         remove_staging_helper();
-        run_full(&a, argv[2], argv[3]);
+        run_full(&a, argv[2], argv[3], 0);
+        return 0;
+    }
+    if (argc == 4 && exact(argv[1], "--full-aks-setup")) {
+        require_layout(argv[2], argv[3]);
+        require_empty_data(argv[3]);
+        a = load_apis();
+        remove_staging_helper();
+        run_full(&a, argv[2], argv[3], 1);
         return 0;
     }
     if (argc == 4 && exact(argv[1], "--init-only")) {
@@ -632,9 +649,10 @@ int main(int argc, char **argv) {
         return 0;
     }
     {
-        fprintf(stderr, "usage: %s --probe REL %s %s | --diagnose %s %s | --diagnose-file REL %s %s | --full %s %s | --init-only %s %s\n",
+        fprintf(stderr, "usage: %s --probe REL %s %s | --diagnose %s %s | --diagnose-file REL %s %s | --full %s %s | --full-aks-setup %s %s | --init-only %s %s\n",
                 argv[0], SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT,
                 SOURCE_ROOT, DATA_MOUNT, SOURCE_ROOT, DATA_MOUNT,
+                SOURCE_ROOT, DATA_MOUNT,
                 SOURCE_ROOT, DATA_MOUNT);
         return 2;
     }
