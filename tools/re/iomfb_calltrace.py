@@ -34,7 +34,6 @@ import argparse
 import json
 import os
 import shlex
-import signal
 import sys
 import time
 from collections import defaultdict
@@ -61,6 +60,7 @@ RUNTIME_ADDRESSES = {
 SITE_ORDER = tuple(RUNTIME_ADDRESSES)
 DEFAULT_SITE_CAP = 8
 MAX_MEMORY_READ = 0x80
+MAX_STATE_RECORDS = 64
 
 # `SBBreakpoint` only offers the script-callback API on Apple's LLDB; it does
 # not expose the C++/Python `SetCallback` convenience method.  The registered
@@ -386,8 +386,46 @@ def _open_output(path):
     return sys.stdout if path == "-" else open(path, "w", encoding="utf-8")
 
 
+def _state_name(lldb, state):
+    """Return a stable human-readable LLDB process-state name."""
+    try:
+        return lldb.SBDebugger.StateAsCString(state) or "unknown(%d)" % state
+    except Exception:
+        return "unknown(%d)" % state
+
+
+def _stop_reason(process):
+    """Return the selected thread's stop reason without assuming a symbol file."""
+    try:
+        thread = process.GetSelectedThread()
+        if not thread or not thread.IsValid():
+            return None
+        out = {"code": thread.GetStopReason()}
+        try:
+            desc = thread.GetStopDescription(256)
+            if desc:
+                out["description"] = desc
+        except Exception:
+            pass
+        return out
+    except Exception:
+        return None
+
+
+def _is_terminal_state(lldb, state):
+    """Only definite teardown states end a trace; Invalid is transient at attach."""
+    return state in (lldb.eStateExited, lldb.eStateDetached)
+
+
 def run_live(args, addresses, caps, lldb):
-    """Attach, install breakpoints, trace for a bounded period, then detach."""
+    """Attach, event-pump LLDB, trace a bounded period, then detach.
+
+    QEMU's gdbstub reports an intermediate ``invalid``/``connected`` process
+    state while it changes from -S to running.  Polling GetState alone treated
+    that as an exit in the first live run.  This function pumps the debugger's
+    own listener and acts only on state-change events; ``invalid`` is logged
+    but never considered terminal.
+    """
     error = lldb.SBError()
     debugger = lldb.SBDebugger.Create()
     debugger.SetAsync(True)
@@ -396,7 +434,10 @@ def run_live(args, addresses, caps, lldb):
         lldb.SBDebugger.Destroy(debugger)
         raise RuntimeError("LLDB could not create an arm64 target")
 
-    listener = lldb.SBListener("iomfb-calltrace")
+    # Use the debugger's listener, not an unpumped side listener.  ConnectRemote
+    # posts eBroadcastBitStateChanged events here; waiting on it is what lets
+    # LLDB dispatch script breakpoint callbacks during an asynchronous continue.
+    listener = debugger.GetListener()
     process = target.ConnectRemote(listener, "connect://%s:%d" %
                                    (args.host, args.port), "gdb-remote", error)
     if not error.Success() or not process or not process.IsValid():
@@ -406,14 +447,64 @@ def run_live(args, addresses, caps, lldb):
 
     stream = _open_output(args.output)
     tracer = CallTracer(lldb, process, stream, addresses, caps)
-    stopped = False
+    state_records = 0
+    state_dropped = 0
+    end_reason = "duration"
 
-    def request_stop(_signum, _frame):
-        nonlocal stopped
-        stopped = True
+    def record_state(state, source, current_state=None):
+        nonlocal state_records, state_dropped
+        if state_records >= MAX_STATE_RECORDS:
+            state_dropped += 1
+            return
+        rec = {
+            "event": "state",
+            "source": source,
+            "state": _state_name(lldb, state),
+        }
+        if current_state is not None and current_state != state:
+            rec["current_state"] = _state_name(lldb, current_state)
+        if state == lldb.eStateStopped:
+            reason = _stop_reason(process)
+            if reason:
+                rec["stop_reason"] = reason
+        stream.write(json.dumps(rec, sort_keys=True) + "\n")
+        stream.flush()
+        state_records += 1
 
-    old_int = signal.signal(signal.SIGINT, request_stop)
-    old_term = signal.signal(signal.SIGTERM, request_stop)
+    def continue_guest(source):
+        """Resume an explicit stopped event and leave the rationale in JSONL."""
+        # Listener queues can contain the attach's initial stopped event after
+        # the earlier Continue has already made the remote target running.
+        # Never issue a second continue for that stale event.
+        current_state = process.GetState()
+        if current_state != lldb.eStateStopped:
+            stream.write(json.dumps({
+                "event": "continue",
+                "source": source,
+                "skipped": True,
+                "current_state": _state_name(lldb, current_state),
+            }, sort_keys=True) + "\n")
+            stream.flush()
+            return
+        continue_error = process.Continue()
+        rec = {
+            "event": "continue",
+            "source": source,
+            "success": bool(continue_error.Success()),
+        }
+        if not continue_error.Success():
+            rec["error"] = continue_error.GetCString() or "unknown error"
+            rec["raced_running"] = "already running" in rec["error"].lower()
+        stream.write(json.dumps(rec, sort_keys=True) + "\n")
+        stream.flush()
+        if not continue_error.Success():
+            # The gdbstub can acknowledge the first Continue between the
+            # GetState check above and this request.  That is the stale-stop
+            # race observed with QEMU -S, not a trace failure.
+            if rec["raced_running"]:
+                return
+            raise RuntimeError("could not continue guest: %s" % rec["error"])
+
     try:
         tracer.install(target)
         stream.write(json.dumps({
@@ -424,32 +515,45 @@ def run_live(args, addresses, caps, lldb):
         }, sort_keys=True) + "\n")
         stream.flush()
 
-        state = process.GetState()
-        if state in (lldb.eStateStopped, lldb.eStateCrashed):
-            continue_error = process.Continue()
-            if not continue_error.Success():
-                raise RuntimeError("could not continue guest: %s" %
-                                   (continue_error.GetCString() or "unknown error"))
+        initial_state = process.GetState()
+        record_state(initial_state, "attach")
+        if initial_state in (lldb.eStateStopped, lldb.eStateCrashed):
+            continue_guest("attach")
 
         deadline = None if args.duration == 0 else time.monotonic() + args.duration
-        while not stopped and (deadline is None or time.monotonic() < deadline):
-            state = process.GetState()
-            if state in (lldb.eStateExited, lldb.eStateDetached, lldb.eStateInvalid):
+        while deadline is None or time.monotonic() < deadline:
+            event = lldb.SBEvent()
+            # Apple's SBListener.WaitForEvent takes whole seconds, which is
+            # too coarse for a short trace and previously rejected our float.
+            # GetNextEvent is nonblocking; the short sleep preserves a
+            # responsive duration clock while continuously draining the
+            # debugger listener that dispatches gdb-remote state changes.
+            got_event = listener.GetNextEvent(event)
+            if not got_event:
+                time.sleep(0.05)
+                continue
+            if not lldb.SBProcess.EventIsProcessEvent(event):
+                continue
+            state = lldb.SBProcess.GetStateFromEvent(event)
+            current_state = process.GetState()
+            record_state(state, "event", current_state)
+            if _is_terminal_state(lldb, state):
+                end_reason = _state_name(lldb, state)
                 break
-            # A non-breakpoint stop can happen while QEMU is coming up.  Do
-            # not leave the guest stopped merely because this is a tracer.
-            if state in (lldb.eStateStopped, lldb.eStateCrashed):
-                continue_error = process.Continue()
-                if not continue_error.Success():
-                    break
-            time.sleep(0.05)
+            # A scripted breakpoint has already returned False by the time we
+            # observe its stop event.  Calling Continue defensively here also
+            # handles an unrelated remote stop without leaving the VM paused.
+            if state == lldb.eStateStopped:
+                continue_guest("state-event")
 
         summary = {
             "event": "session_end",
             "a401_hits": tracer.hits["a401"],
             "emitted": {site: tracer.emitted[site] for site in SITE_ORDER},
             "hits": {site: tracer.hits[site] for site in SITE_ORDER},
-            "reason": "interrupted" if stopped else "duration-or-process-end",
+            "reason": end_reason,
+            "state_records": state_records,
+            "state_records_dropped": state_dropped,
         }
         stream.write(json.dumps(summary, sort_keys=True) + "\n")
         stream.flush()
@@ -457,12 +561,13 @@ def run_live(args, addresses, caps, lldb):
             raise RuntimeError("positive control failed: A401 never hit")
         return 0
     finally:
-        signal.signal(signal.SIGINT, old_int)
-        signal.signal(signal.SIGTERM, old_term)
         # Detach rather than Stop/Kill: this tool must not perturb the boot it
         # is measuring.  QEMU's gdbstub resumes a detached target.
         if process and process.IsValid():
-            process.Detach()
+            try:
+                process.Detach()
+            except Exception:
+                pass
         tracer.clear_callbacks()
         if stream is not sys.stdout:
             stream.close()
@@ -494,7 +599,7 @@ def lldb_command(debugger, command, exe_ctx, result, internal_dict):
         import lldb
         run_live(args, addresses, caps, lldb)
         result.PutCString("iomfb-calltrace: A401 positive control hit")
-    except (OSError, RuntimeError, ValueError, SystemExit) as exc:
+    except Exception as exc:
         _command_result_error(result, "iomfb-calltrace: %s" % exc)
 
 
