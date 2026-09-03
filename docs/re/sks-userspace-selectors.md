@@ -72,17 +72,46 @@ at `+0x54` (total reply length `0x54+N`).  The reference labels its particular
 eight-byte blob as guessed DER, so neither its contents nor selector zero is an
 established iOS-27 fact until a candidate reaches the post-call success path.
 
+### Blob-consumer acceptance gate
+
+The response callback itself is not the state decoder.  The generated wrapper
+`fcn.fffffff00957c36c` submits opcode `0x19` at `0xfffffff00957c3d8-3e0`; its
+registered callback starts at `0xfffffff009547544`, builds two closures, and
+hands them to the imported IPC dispatcher through `fcn.fffffff0095825d0` at
+`...75c0-5d4`.  Consequently, the callback's common queueing machinery does
+not establish additional selector values; the reliable downstream contract is
+the direct state consumer below.
+
+| Item | Required behavior | Evidence |
+|---|---|---|
+| blob envelope | Non-null pointer and `N <= 0x144` (324 bytes). | `fcn.fffffff00956e6ac:0xfffffff00956e6e8-704` rejects null/oversize before calling the parser. |
+| parse result | The fixed-field parser must return zero.  It produces a 0x54-byte local record. | `...e704-708` branches to the error path on nonzero return; `fcn.fffffff009581144:...81180-190` initializes 0x54 output bytes. |
+| accepted state kind | The signed 32-bit field written at parsed-record offset `+0x2a` must equal `-6` or `-10`; every other value takes the reject path. | `...811f0-2f8` writes the field; consumer tests `cmn w22, 6` and `ccmn w22, 0xa` at `0xfffffff00956e70c-720`. |
+| cache on success | The raw input blob is copied into one of two cached records, selected by that state kind. | `...e73c-794`; `-6` selects byte size `0x148`, while the other accepted kind selects `0x298`. |
+| integer encoding detail | The parser has a signed, variable-width integer-field helper, so all-zero arbitrary bytes are not a demonstrated valid state record. | `fcn.fffffff009580158:0xfffffff009580178-1b4` sign-extends the first field byte then folds the remaining bytes. |
+
+This establishes two safe, bounded test stages.  Stage A can test only the
+reply union by emitting selector zero plus a length-prefixed blob and breaking
+after `fcn.fffffff00957c36c`; it must not be called success unless the blob
+pointer/length pair is populated.  Stage B must provide a parser-valid record
+whose `+0x2a` field is `-6` for the observed selector-7 request (or `-10`),
+then prove passage through `0xfffffff00956e770` and disappearance of the
+ACMTRM keybag-state failure.  The exact tag/order/values needed to construct
+that record are not established by static code here; calling it DER is an
+unverified hypothesis inherited only from the older reference.
+
 ## Implementation boundary
 
 An implementer may retain the existing authenticated IPC-v1 envelope and the
 `0x19` request parser, but must remove `{selector=2,scalar=0}` from the normal
 success path: both the dynamic return witness and the iOS-27 blob outputs
-disprove it.  The minimum candidate is the selector-zero length-prefixed blob
-layout above; first try an empty blob, then separately and visibly label any
-DER candidates as a hypothesis.  Instrument the generated response callback
-beginning at `0xfffffff009547544` (runtime address plus the kernel slide), log
-the decoded selector, blob pointer and length, and run a bounded isolated-child
-sweep.  For `0x3d`, first capture the request body and stop in
+disprove it.  The minimum union candidate is the selector-zero length-prefixed
+blob layout above; an empty blob can only test that arm's decoding and must not
+be treated as a state-success candidate.  Instrument the generated callback
+beginning at `0xfffffff009547544` (runtime address plus the kernel slide), and
+the direct consumer at `0xfffffff00956e6ac`; log the decoded selector, blob
+pointer/length, parser result, and state kind before running a bounded
+isolated-child sweep.  For `0x3d`, first capture the request body and stop in
 `0xfffffff00957dd54` plus its response decoder; a guessed empty/status-only
 reply would repeat the already disproved no-op pattern.
 
@@ -91,5 +120,6 @@ reply would repeat the already disproved no-op pattern.
 | Question | Observation that would settle it |
 |---|---|
 | Which response-union arm and payload make selector 7 succeed? | First try the derived candidate `{selector=0, length=N, bytes[N]}` and break at runtime `0xfffffff029547544` and `...7424`; record selector, blob pointer/length, and return value, then show `ACMTRM: _currentDeviceStateFromKeybag` succeeds in the serial log. The present selector-2/scalar-zero arm is ruled out by `SKS_USERSEL_OP19_DYN_1.lldb.log`. |
+| What bytes make the parsed device-state kind `-6` or `-10`? | Log the 0x54-byte parsed record immediately after `0xfffffff009581144` returns, from a real successful device/SEP trace or a candidate sweep.  The decisive value is its signed `+0x2a` field, checked at `0xfffffff00956e70c-720`; the current static analysis does not establish the preceding field tags or order. |
 | Are selectors 17 and 35 independently required for SpringBoard/Welcome? | With selector 7 cleared, compare a reproducible boot where each public-method error disappears against process evidence for `SpringBoard`/Setup Assistant and a rendered frame. |
 | What is the exact `0x3d` payload and reply union for selector 68? | Run one `DARWIN_SEP_DEBUG=1` isolated child and record the raw authenticated request, then break at the codec's response decoder; require both an echoed wire capture and a successful public selector-68 return. |
