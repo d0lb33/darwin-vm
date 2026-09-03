@@ -15,6 +15,7 @@ import argparse, mmap, os, re, subprocess, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from kc_text_map import load_map, attribute  # noqa: E402
 import kmem  # noqa: E402
+from ramscan_stall import frame_patterns  # noqa: E402
 
 KSLIDE = 0x20000000
 
@@ -30,29 +31,27 @@ def main():
     ap.add_argument("--bootkc", default="firmware/bootkc")
     a = ap.parse_args()
     ranges = load_map(a.bootkc)
-    wanted = [r for r in ranges if any(k in r[2] for k in a.kext)]
-    if not wanted:
-        sys.exit("no kext matched %s" % a.kext)
+    try:
+        wanted, pats = frame_patterns(ranges, a.kext)
+    except ValueError as error:
+        sys.exit(str(error))
     os.makedirs(a.workdir, exist_ok=True)
-    pats = []
     for lo, hi, name in wanted:
         slo, shi = lo + KSLIDE, hi + KSLIDE
-        # bytes 0-4 of the little-endian word are the low 40 bits; byte 4 is always 0xf0 here
-        b2lo, b2hi = (slo >> 16) & 0xff, (shi >> 16) & 0xff
-        b3 = (slo >> 24) & 0xff
-        pat = re.compile(b"..[" + re.escape(bytes([b2lo])) + b"-" + re.escape(bytes([b2hi])) + b"]"
-                         + re.escape(bytes([b3])) + b"\xf0", re.DOTALL)
-        pats.append((pat, slo, shi, name))
         print("kext %s slid 0x%x-0x%x" % (name, slo, shi))
     kmem.ensure_kernel(a.sock)
     pages = {}
     t0 = time.time()
     for off in range(0, a.ram_size, a.chunk):
         size = min(a.chunk, a.ram_size - off)
-        f = os.path.join(a.workdir, "chunk.bin")
+        f = os.path.join(a.workdir, "chunk-%d.bin" % os.getpid())
+        try:
+            os.unlink(f)
+        except FileNotFoundError:
+            pass
         # the size is parsed as an expression, so an unquoted /path reads as a division
         kmem.hmp(a.sock, "pmemsave 0x%x 0x%x \"%s\"" % (a.ram_base + off, size, f), timeout=600)
-        if not os.path.exists(f) or os.path.getsize(f) < size:
+        if not os.path.exists(f) or os.path.getsize(f) != size:
             sys.exit("pmemsave failed at 0x%x" % (a.ram_base + off))
         with open(f, "rb") as fh:
             mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)

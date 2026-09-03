@@ -30,8 +30,14 @@ def main():
     rows = []; t0 = time.time()
     for off in range(0, a.ram_size, a.chunk):
         size = min(a.chunk, a.ram_size - off)
-        f = os.path.join(a.workdir, "tchunk.bin")
+        f = os.path.join(a.workdir, "tchunk-%d.bin" % os.getpid())
+        try:
+            os.unlink(f)
+        except FileNotFoundError:
+            pass
         kmem.hmp(a.sock, "pmemsave 0x%x 0x%x \"%s\"" % (a.ram_base + off, size, f), timeout=600)
+        if not os.path.exists(f) or os.path.getsize(f) != size:
+            sys.exit("pmemsave failed at 0x%x" % (a.ram_base + off))
         with open(f, "rb") as fh:
             mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
             for m in pat.finditer(mm):

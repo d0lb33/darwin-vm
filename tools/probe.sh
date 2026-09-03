@@ -22,8 +22,10 @@
 #                     tree's dram-size, which dt_fixup sets with -dram.
 #   --grep PATTERN    extra egrep pattern to pull out of the serial log
 #   --uart-socket FILE expose the logged UART on a UNIX socket for guest input
+#   --stop-file FILE   stop when FILE appears; its first line becomes the reason
+#   --pid-file FILE    write the owned QEMU PID for an outer orchestrator
 #   --keep            leave the VM running (frozen) instead of killing it
-#   NO_WATCHDOG=1     wait the full --secs even if the guest is visibly dead
+#   NO_WATCHDOG=1     disable panic/quiet checks (a --stop-file still works)
 #   STALL_AFTER_PANIC seconds of silence after a panic before giving up (20)
 #   STALL_SECS        seconds of total silence before calling it hung (180)
 #   --                everything after this is passed straight to qemu
@@ -53,7 +55,29 @@ MEM=8G
 GREP_EXTRA=""
 KEEP=0
 UART_SOCKET=""
+STOP_FILE=""
+PID_FILE=""
+QEMU_PID=""
+PROBE_COMPLETE=0
 EXTRA_QEMU=()
+
+cleanup_probe() {
+    _rc=$?
+    if [[ "$PROBE_COMPLETE" -eq 0 && -n "$QEMU_PID" ]] && kill -0 "$QEMU_PID" 2>/dev/null; then
+        [[ -S "${SOCK:-}" ]] && python3 "$HMP" "$SOCK" quit >/dev/null 2>&1 || true
+        perl -e 'select(undef,undef,undef,0.25)'
+        kill -0 "$QEMU_PID" 2>/dev/null && kill "$QEMU_PID" 2>/dev/null || true
+        _cleanup_wait=0
+        while kill -0 "$QEMU_PID" 2>/dev/null && (( _cleanup_wait < 20 )); do
+            perl -e 'select(undef,undef,undef,0.1)'; _cleanup_wait=$((_cleanup_wait+1))
+        done
+        kill -0 "$QEMU_PID" 2>/dev/null && kill -KILL "$QEMU_PID" 2>/dev/null || true
+        wait "$QEMU_PID" 2>/dev/null || true
+    fi
+    return "$_rc"
+}
+trap cleanup_probe EXIT
+trap 'exit 130' INT TERM HUP
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -68,12 +92,16 @@ while [[ $# -gt 0 ]]; do
         --mem)      MEM="$2"; shift 2 ;;
         --grep)     GREP_EXTRA="$2"; shift 2 ;;
         --uart-socket) UART_SOCKET="$2"; shift 2 ;;
+        --stop-file) STOP_FILE="$2"; shift 2 ;;
+        --pid-file) PID_FILE="$2"; shift 2 ;;
         --keep)     KEEP=1; shift ;;
         --)         shift; EXTRA_QEMU=("$@"); break ;;
         -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
         *)          echo "unknown option: $1" >&2; exit 2 ;;
     esac
 done
+
+[[ "$TAG" =~ ^[A-Za-z0-9_.-]{1,80}$ ]] || { echo "probe: unsafe tag: $TAG" >&2; exit 2; }
 
 [[ -z "$RAMDISK" ]] && RAMDISK="$REPO/firmware/ramdisk.dmg"
 [[ -z "$TC" ]] && TC="$REPO/firmware/ramdisk.tc"
@@ -88,8 +116,14 @@ mkdir -p /tmp/dvm
 SOCK="/tmp/dvm/$TAG.sock"
 SERIAL="$OUT/$TAG.serial.log"
 ERR="$OUT/$TAG.stderr.log"
+if [[ -S "$SOCK" ]] && python3 "$HMP" "$SOCK" 'info status' >/dev/null 2>&1; then
+    echo "probe: live monitor already owns $SOCK; choose another --tag" >&2
+    exit 1
+fi
 rm -f "$SOCK" "$SERIAL" "$ERR"
 [[ -n "$UART_SOCKET" ]] && rm -f "$UART_SOCKET"
+[[ -n "$STOP_FILE" ]] && rm -f "$STOP_FILE"
+[[ -n "$PID_FILE" ]] && rm -f "$PID_FILE"
 
 ARGS=(
     -M darwin
@@ -113,7 +147,13 @@ fi
 [[ -f "$REPO/firmware/sptm" ]] && ARGS+=(-sptm "$REPO/firmware/sptm" -txm "$REPO/firmware/txm")
 [[ ${#EXTRA_QEMU[@]} -gt 0 ]] && ARGS+=("${EXTRA_QEMU[@]}")
 
-( "$QEMU" "${ARGS[@]}" 2> "$ERR" & )
+"$QEMU" "${ARGS[@]}" 2> "$ERR" &
+QEMU_PID=$!
+if [[ -n "$PID_FILE" ]]; then
+    _pid_tmp="$PID_FILE.$$.tmp"
+    printf '%s\n' "$QEMU_PID" > "$_pid_tmp"
+    mv -f "$_pid_tmp" "$PID_FILE"
+fi
 
 # Wait, but stop early once the guest can no longer make progress. Without this
 # every dead guest costs the full --secs: on 2026-09-02 three separate agents
@@ -132,30 +172,42 @@ fi
 #
 # --no-watchdog restores the old blind wait.
 STOP_REASON=""
-if [[ -n "${NO_WATCHDOG:-}" ]]; then
+STOP_KIND=""
+if [[ -n "${NO_WATCHDOG:-}" && -z "$STOP_FILE" ]]; then
     perl -e "sleep $SECS"
 else
     STALL_AFTER_PANIC=${STALL_AFTER_PANIC:-20}
     STALL_SECS=${STALL_SECS:-180}
+    _interval=$([[ -n "$STOP_FILE" ]] && echo 1 || echo 3)
     _elapsed=0; _last_size=0; _quiet=0
     while (( _elapsed < SECS )); do
-        perl -e 'sleep 3'; _elapsed=$((_elapsed+3))
+        perl -e "sleep $_interval"; _elapsed=$((_elapsed+_interval))
+        if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+            STOP_REASON="QEMU exited before the probe condition"; STOP_KIND="dead"; break
+        fi
+        if [[ -n "$STOP_FILE" && -f "$STOP_FILE" ]]; then
+            STOP_REASON=$(head -1 "$STOP_FILE" 2>/dev/null)
+            STOP_REASON="${STOP_REASON:-external stop requested}"
+            STOP_KIND="condition"
+            break
+        fi
+        [[ -n "${NO_WATCHDOG:-}" ]] && continue
         _size=$(stat -f%z "$SERIAL" 2>/dev/null || echo 0)
-        if [[ "$_size" == "$_last_size" ]]; then _quiet=$((_quiet+3)); else _quiet=0; _last_size=$_size; fi
+        if [[ "$_size" == "$_last_size" ]]; then _quiet=$((_quiet+_interval)); else _quiet=0; _last_size=$_size; fi
         if grep -qa 'Nested panic count exceeds limit' "$SERIAL" 2>/dev/null; then
-            STOP_REASON="nested panic limit -- the guest will spin forever"; break
+            STOP_REASON="nested panic limit -- the guest will spin forever"; STOP_KIND="dead"; break
         fi
         if grep -qa 'Halt/Restart Timed Out' "$SERIAL" 2>/dev/null; then
-            STOP_REASON="Halt/Restart Timed Out -- guest asked to reboot; no reset path"; break
+            STOP_REASON="Halt/Restart Timed Out -- guest asked to reboot; no reset path"; STOP_KIND="dead"; break
         fi
         if (( _quiet >= STALL_AFTER_PANIC )) && grep -qa 'panic(cpu' "$SERIAL" 2>/dev/null; then
-            STOP_REASON="panicked and quiet for ${_quiet}s"; break
+            STOP_REASON="panicked and quiet for ${_quiet}s"; STOP_KIND="dead"; break
         fi
         if (( _quiet >= STALL_SECS )); then
-            STOP_REASON="no serial output for ${_quiet}s -- hung"; break
+            STOP_REASON="no serial output for ${_quiet}s -- hung"; STOP_KIND="dead"; break
         fi
     done
-    (( _elapsed >= SECS )) && STOP_REASON=""
+    if (( _elapsed >= SECS )) && [[ -z "$STOP_KIND" ]]; then STOP_REASON=""; fi
 fi
 
 python3 "$HMP" "$SOCK" stop >/dev/null 2>&1
@@ -169,10 +221,14 @@ SHELL_UP=$(grep -c "can't access tty" "$SERIAL" 2>/dev/null)
 
 echo "=== probe: $TAG ==="
 if [[ -n "$STOP_REASON" ]]; then
-    echo "STOPPED EARLY : $STOP_REASON"
-    echo "               (the guest is dead; do not wait on it. Find the FIRST"
-    echo "                panic(cpu line -- the nested-panic register dump is the"
-    echo "                panic printer faulting, not your bug.)"
+    if [[ "$STOP_KIND" == "condition" ]]; then
+        echo "STOPPED ON CONDITION : $STOP_REASON"
+    else
+        echo "STOPPED EARLY : $STOP_REASON"
+        echo "               (the guest is dead; do not wait on it. Find the FIRST"
+        echo "                panic(cpu line -- the nested-panic register dump is the"
+        echo "                panic printer faulting, not your bug.)"
+    fi
 fi
 echo "serial lines : ${LINES:-0}"
 echo "xnu panics   : ${PANICS:-0}"
@@ -214,7 +270,25 @@ fi
 echo "logs: $SERIAL  $ERR"
 
 if [[ "$KEEP" -eq 0 ]]; then
-    pkill -f "unix:$SOCK" >/dev/null 2>&1
+    python3 "$HMP" "$SOCK" quit >/dev/null 2>&1 || true
+    _wait=0
+    while kill -0 "$QEMU_PID" 2>/dev/null && (( _wait < 40 )); do
+        perl -e 'select(undef,undef,undef,0.25)'; _wait=$((_wait+1))
+    done
+    if kill -0 "$QEMU_PID" 2>/dev/null; then
+        echo "probe: QEMU did not exit after HMP quit; sending TERM" >&2
+        kill "$QEMU_PID" 2>/dev/null || true
+        _term_wait=0
+        while kill -0 "$QEMU_PID" 2>/dev/null && (( _term_wait < 20 )); do
+            perl -e 'select(undef,undef,undef,0.1)'; _term_wait=$((_term_wait+1))
+        done
+        if kill -0 "$QEMU_PID" 2>/dev/null; then
+            echo "probe: QEMU ignored TERM; sending KILL" >&2
+            kill -KILL "$QEMU_PID" 2>/dev/null || true
+        fi
+    fi
+    wait "$QEMU_PID" 2>/dev/null || true
 else
     echo "guest left frozen; resume with: python3 $HMP $SOCK cont"
 fi
+PROBE_COMPLETE=1

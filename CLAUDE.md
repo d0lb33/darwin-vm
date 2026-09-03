@@ -47,6 +47,57 @@ message out of guest memory. Device model tracing is opt-in per model:
 Boot-arg `io=0x1f` makes IOKit log every driver match and start, which is how you
 see where a driver chain stalls.
 
+### Fast display iteration
+
+Do not give every experiment a blind 480- or 600-second budget. The instrumented
+display stall is visible at about 104 seconds. This command stops when selector
+79 is still pending at its 30-second deadline, freezes QEMU, and automatically
+runs a 2 GiB first-pass post-mortem:
+
+```bash
+CALLBACKS=display_iokit_callbacks SECS=180 \
+  tools/re/setup_gate_probe.sh UI_MY_TEST1
+```
+
+When callbacks fire, they write atomic per-call events under
+`/tmp/dvm/UI_MY_TEST1.events`;
+`tools/re/probe_watch.py` writes the durable reason to
+`/tmp/dvm/UI_MY_TEST1.stop`; and `probe.sh` reports `STOPPED ON CONDITION`.
+The post-mortem writes `/tmp/dvm/UI_MY_TEST1.postmortem.txt`. It scans thread
+signatures and kext frames from each RAM chunk in one pass. This setup probe asks
+for two correlated display-stall stacks; if fewer are found in the first 2 GiB,
+it scans only the untouched suffix up to the full 12 GiB. The standalone tool's
+`--min-stacks` default is one. A positive fast result is labelled
+`partial-first-pass`; use `--ram-size 0x300000000` for an exhaustive 12 GiB scan.
+
+Other bounded conditions are opt-in:
+
+```bash
+# Stop on a serial or LLDB log line.
+PROBE_STOP_SERIAL_REGEX='set_power_state done powerState=0' SECS=180 \
+  tools/re/setup_gate_probe.sh UI_POWER0
+
+# Stop as soon as SpringBoard reaches applicationDidFinishLaunching.
+CALLBACKS=sb_setup_path_callbacks PROBE_SUCCESS_LABELS=SB_ADFL_ENTRY \
+  AUTO_POSTMORTEM=0 SECS=300 tools/re/setup_gate_probe.sh UI_SB_ADFL1
+
+# Run independent EPIC controls two at a time; each uses a unique tag/port.
+MAX_PARALLEL=2 tools/re/setup_gate_sweep.sh UI_EPIC off all
+```
+
+Standalone probes leave the guest frozen by default. Sweeps default to
+`KEEP_GUEST=0` after collection so 12 GiB guests do not accumulate. Never run a
+QEMU rebuild during a sweep. Every parallel run needs a distinct tag and GDB port;
+the sweep assigns both, and the post-mortem isolates scratch paths by tag. All
+variants inherit the same callback, condition, and post-mortem settings.
+
+Before spending a boot, run the host-only regressions:
+
+```bash
+python3 -m unittest discover -s tools/tests -v
+bash -n tools/probe.sh tools/re/setup_gate_probe.sh tools/re/setup_gate_sweep.sh
+```
+
 ## Ownership — do not edit outside your lane
 
 Only the orchestrator session edits these. If your task needs a change here,
@@ -110,21 +161,22 @@ name; the orchestrator merges.
 - `darwin-afk`: the AFK ring transport on top of RTKit. All eleven DCP
   endpoints `0x20`–`0x2a` complete INIT / GETBUF / INIT_TX / INIT_RX / START,
   with their rings translated through the DART.
-- **Real iOS userspace.** The actual system volume boots as the ramdisk: dyld
-  maps the shared cache, launchd runs, hundreds of services start, backboardd
-  reaches `running`. See `docs/re/userspace-boot-state.md`.
-- **The normal boot path.** `rootdev=md0` plus a kernel patch gets iOS off its
-  restore path onto the `local` boot spec, so `mount-phase-1`/`-2` run and
-  `/private/var` is mounted writable as a tmpfs (`-ephemeral-data`).
+- **Real iOS userspace.** The cryptex-merged System volume roots from ANS/NVMe;
+  dyld maps the shared cache, launchd runs, hundreds of services start,
+  SpringBoard launches, and backboardd reaches `running`. See
+  `docs/re/persistent-data-volume.md` and `docs/re/setup-launch-runtime.md`.
+- **Persistent Data.** A formatted, populated, protected APFS Data volume mounts
+  at `/private/var` across chained cold boots. The second boot performs no
+  41,557-file tmpfs copy. Rebuild the disposable parent with
+  `tools/rootfs/rebuild_persistent_parent.sh`; see **Storage**.
 - `darwin-sep`: enough SEP for `AppleSEPManager` to reach "control endpoints
   created" and answer `AppleCredentialManager`. That wait used to burn 890 of
   every 900 seconds; it is now zero. `-enable sep`.
 - `darwin-ans`: the ANS/NVMe storage controller. **iOS roots off it** —
   `BSD root: disk1s1`, `mount-phase-2` completes, `Early boot complete`,
   0 panics. Reads and writes both proven. See **Storage**.
-- A root shell inside the booted system volume, for poking at it live
-  (`/tmp/dvm/build/rootfs_sh.dmg`, 102 tools from the restore ramdisk, uid 0).
-  `tools/serial.py` drives it over a socket.
+- `tools/serial.py` drives restore-ramdisk shells over a socket. The historical
+  `rootfs_sh.dmg` was lost in a `/tmp` wipe and is not a current artifact.
 
 ## The GPU may not be on the critical path
 
@@ -300,8 +352,11 @@ The recipe, and three things that each cost a boot (`docs/re/ans-nvme-references
 - **The boot-arg is `rootdev=`, not `rd=`.** The `bsd_rooted_ramdisk` patch
   only fires on the branch where `PE_parse_boot_argn("rd")` fails; otherwise
   `panic: rootvp not authenticated after mounting @bsd_init.c:976`.
-- `-ephemeral-data` is **still needed**, because the image has no Data volume
-  (`mount: missing data volume`, `mount[8] exited ... status 66`).
+- The verified persistent parent does **not** use `-ephemeral-data`: APFS mounts
+  `disk1s2` at `/private/var` with `protect`, plus the Hardware and User roles.
+  Two chained clean boots reached `Early boot complete` with no `Copying ` and
+  no first `panic(cpu`; exact log lines are in
+  `docs/re/persistent-data-volume.md:40-74`.
 
 **Fixed.** `AppleSEPXART::getFullEpochs()` used to panic with `REQUIRE fail:
 expected_out_len == out_len`. It was recorded as specific to `-enable sep` plus
@@ -325,10 +380,12 @@ in this kernelcache). The submission path is a **tag-indexed array, not a
 ring**. We cannot wrap QEMU's stock `hw/nvme`: it is a PCI device,
 `CONFIG_NVME_PCI` is off, and this machine has no PCI bus.
 
-**Next:** `tools/rootfs/build_dual_volume.sh`. A real Data volume is the only
-thing left between this and a persistent system — `mount-phase-2` would mount
-instead of copying 41,557 files, which is the ~213 seconds of guest time this
-boot still spends, and `/private/var` would survive a reboot.
+The rebuild entry point is `tools/rootfs/rebuild_persistent_parent.sh`. It runs
+format, restore-helper injection, Data copy, User manifest/layout, completion
+marker, and two normal boots, then links the result at
+`/tmp/dvm/data-seed/persistent-parent.qcow2`. The base image survives under
+`~/dvm-artifacts`; `/tmp/dvm` does not. Do not rerun the full rebuild for display
+variants: `setup_gate_probe.sh` creates a fresh qcow2 child from this parent.
 
 ## Performance
 
@@ -346,9 +403,21 @@ describes six CPUs, so MTTCG headroom is unused.
 
 ## Where the userspace boot stands
 
-**SpringBoard launches and no longer crashes.** The system volume boots to
-`Early boot complete` with 0 panics, and with `-skip-keybag` launchd starts
-SpringBoard, which crashes:
+**Current:** the storage/userspace bootstrap is complete enough for display
+work. The cryptex-merged System volume boots from ANS, the protected persistent
+Data/User volumes remount across cold boots, `Early boot complete` is reached
+without the old tmpfs copy, and SpringBoard/backboardd run. The current blocker
+is later: backboardd's `IOConnectCallMethod` selector 79 (`_kern_GetBlock`, kind
+`0x41`) does not return while the IOMFB display-power path is parked through
+RTBuddy/AppleFirmwareKit. `DARWIN_DCP_EPIC=off` did not release it: `UI_NOEPIC2`
+recorded 39 method entries and 38 returns, with the unmatched `x1=0x4f` entry at
+104.1 seconds and zero panics. Start from `docs/handoff/display-power-off-plan.md`
+and use **Fast display iteration** above.
+
+### Historical fixed blockers
+
+The pre-cryptex System image reached `Early boot complete` and then SpringBoard
+crashed:
 
 ```
 (boot) <Notice>: Early boot complete. Continuing system boot.
@@ -392,82 +461,19 @@ trap on the rebuild: the cryptex files are APFS-compressed (`com.apple.decmpfs`,
 type 14), so archive tools list them and extract zero bytes — the copy has to go
 through a mounted volume with `cp`/`ditto`.
 
-Three results worth not re-deriving, all in `docs/re/springboard-crash.md`:
+The former SEP/SKS and Data-volume limitations are also resolved for the
+current persistent parent. `sks` is implemented and advertised; the system
+boot mounts encrypted/protected Data, Hardware, and User roles and reads the
+seeded protected files without `fext_ek`, `apfs_unwrap_key`, timeout-strike, or
+first-panic failures across two chained boots. Use
+`docs/re/persistent-data-volume.md:40-74` for the runtime proof and
+`docs/re/sks-op0f-media-key-migration.md:181-216` for the opcode/key contract.
+The older restore-only feasibility notes remain useful history, not current
+status.
 
-- **The display stack is not the critical path for SpringBoard.** A boot with
-  `-enable dcp` and `DARWIN_DCP_IOMFB=4` (11/11 AFK endpoints, `A401` answering
-  `0x01`) crashes identically in the same 19.6 s window. That hypothesis is
-  refuted, not untested.
-- **`-enable sep` is required for SpringBoard to launch at all.** Without it the
-  `.app` spawn blocks in AMFI/ACM and nothing appears for 600 s past
-  `Early boot complete`.
-- **`-enable ans` plus `-enable dcp` panics SPTM** at `RTBuddy(DCP): start`
-  with `VIOLATION_FRAME_TYPE ... XNU_KERNEL_RESTRICTED`. Either alone is fine.
-  This currently blocks testing the display on the storage path.
-
-Without `-skip-keybag`, `SEPFINAL` still runs 42,020 lines to 0 panics,
-finishes `mount-phase-2`, and reaches launchd's `keybag` boot task and
-`MobileAssetEarlyBootTask`.
-
-Three gates were cleared to get here, all in `docs/re/seputil-data-protection.md`
-with addresses:
-
-- **the xART marker node.** `gigalocker_init`'s first call (`0x100014820`) is
-  just `IORegistryEntryFromPath` on
-  `"IODeviceTree:/arm-io/sep/iop-sep-nub/xART"`; with the node absent seputil
-  prints "xART is not supported on platform, skipping initialization" and
-  returns 0. `dt_fixup.py -enable sep` removes it.
-- **`/chosen/sepfw-load-at-boot = 0`.** The personalized `sep-firmware.img4`
-  lives on the **Preboot** volume, which the IPSW system-volume payload does
-  not contain. Clearing it takes the "Skipping SEP firmware load" branch. The
-  SEP still does its full ROM handshake and ACM still sends SCRD commands —
-  that was measured, not assumed.
-- **the `sks` endpoint is no longer advertised.** `AppleSEPKeyStore` starts its
-  IPC the moment `sep-endpoint,sks` appears and panics at strike 20 (`cmp w21,
-  0x14` at `0xfffffff00954c0b4`). Advertising an endpoint we cannot answer is
-  strictly worse than not advertising it. Default is `cntl,scrd,xars,xarm`;
-  `DARWIN_SEP_EPS` restores the old set. This also removed a latent panic from
-  the restore-ramdisk path, which was silently reaching strike 18.
-
-A refuted idea worth not re-having: making `/private/xarts` writable cannot
-help. seputil's boot-task path passes 0 for "may I create the file" — only
-`--gigalocker-init` passes 1 — so it returns `errno` 2 without ever attempting
-a create.
-
-**The keystore works, but read the scope carefully.** `sks` is implemented and
-advertised by default. What is *proven*: iOS's own `newfs_apfs` creates an encrypted
-APFS volume, the volume persists across reboots, and it re-mounts with the `protect`
-flag (data protection live), with 0 timeout strikes, 0 `Missing key` and 0
-unencrypted-volume panics. `enhanced apfs is enabled` and the `disk1s3 keybag
-notification handler` both start.
-
-What is **not** proven, and was briefly claimed in commit `6432ffc`: every proof run so
-far (`SKS_LIVEKEY_V9`, `SKS_REMOUNT_V10`, `SKS_FINAL_DEFAULT`) is a **restore-ramdisk**
-boot — `BSD root: md0` — where the volume is mounted by an explicit `/sbin/mount` from a
-guest shell on the last line of the log. The system volume has **not** been shown to
-adopt it as `/private/var` during its own boot: on that path `mount-phase-2` logs
-`Skipping boot-task`, so nothing seeds the volume, and `-ephemeral-data` is **not**
-retired. The ~213 s file copy is therefore not yet eliminated.
-
-The remaining gap is populating the volume. The `/private/var` template files carry
-protection classes an empty keybag cannot unlock — `cp` panics reading `MobileAsset`
-even with `--reflink=never` — so a host- or shell-side copy is not the route. Getting
-iOS's own `mount-phase-2` to run the seeding, with the keybag it already has, probably
-is.
-
-The `sks` keystore is **feasible, not a hard no** — see
-`docs/re/sks-feasibility.md`. The crux is that keystore replies are *opaque*:
-the only check `AppleSEPKeyStore` runs is a transport digest the reply itself
-carries, which we would be generating on both sides, so we need key material
-that is **stable across reboots, not secret**. Roughly 10-12 opcodes, estimated
-3-6 agent-days. The find that changes the calculus: Apple ships a degraded mode
-for exactly this situation — a check for the device-tree property
-`no-effaceable-storage` (which our tree already has) that branches to code
-logging *"disabling use of effaceable storage, using fake key"*. Not yet
-observed firing at runtime, since `sks` is still not advertised.
-
-Still open: **personas.** `usermanagerd` dies with "Daemon failed to load
-persona manifest" and 248 `kpersona_find_by_type(type 6)` failures follow.
+Still open but not the first display gate: persona completeness. Preserve the
+current ANS, SEP/SKS, protected-file, and cryptex behavior in every display
+change.
 
 ### A trap in fresh agent worktrees
 
@@ -488,9 +494,11 @@ catastrophic regression and is not one. Symlink `firmware` into the worktree.
   panic was `seputil[4] exited ... status 2`. Do not decode it and conclude
   anything; find the *first* `panic(cpu` line instead.
 
-Artifacts now live at `~/dvm-artifacts/` (`build/rootfs.dmg`,
-`tc/merged_sysvol_cryptex_tc.bin`), not `/tmp/dvm/build`, which gets wiped.
-There is currently no `rootfs_sh.dmg` (the shell-tools rootfs) in that set.
+Durable artifacts live at `~/dvm-artifacts/`, including the dual-role base image
+and `tc/merged_sysvol_cryptex_tc.bin`. Derived qcow2 parents, children, device
+trees, sockets, scans, and logs under `/tmp/dvm` are disposable; reconstruct
+them with `tools/rootfs/rebuild_persistent_parent.sh`. There is currently no
+durable `rootfs_sh.dmg` shell-tools image.
 
 ## Reading the logs
 

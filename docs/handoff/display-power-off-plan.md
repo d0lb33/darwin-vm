@@ -7,8 +7,10 @@ report at any **ESCALATE** line; do not improvise past one.
 ## Ground rules (from CLAUDE.md, repeated because they bite)
 
 - Never push. Commit only when told.
-- Boot with `tools/re/setup_gate_probe.sh <TAG>`. Before every boot:
-  `pkill -f 'unix:/tmp/dvm/<PREVIOUS_TAG>.sock'`, or it fails with "port 1234 is in use".
+- Boot with `tools/re/setup_gate_probe.sh <TAG>`. A standalone run leaves its
+  guest frozen; either quit that exact monitor with
+  `python3 tools/hmp.py /tmp/dvm/<PREVIOUS_TAG>.sock quit`, or assign the next
+  run a distinct `GDB_PORT`. Never use a broad `pkill`.
 - The default parent disk is `/tmp/dvm/data-seed/persistent-parent.qcow2`. If it is
   missing (host rebooted), rebuild it with `tools/rootfs/rebuild_persistent_parent.sh`
   (about 10 minutes) and read `tools/rootfs/README.md` first.
@@ -16,6 +18,10 @@ report at any **ESCALATE** line; do not improvise past one.
   `dt_fixup.py`, `run.sh`, `CLAUDE.md`. If a fix needs one of them, write the exact
   diff into your report instead.
 - Build with `cd qemu-sptm/build && make -j18` and never while a boot is running.
+- The display-I/O callback emits a pending event; the external watcher freezes
+  the guest after 30 seconds without a matching return, and the probe then runs
+  the post-mortem. Do not restore `SECS=480` unless the experiment genuinely
+  needs events later than this stall.
 - A boot that prints `panic(cpu` in `/tmp/dvm/probe/<TAG>.serial.log` is a
   regression unless the first panic line is `Halt/Restart Timed Out`.
 
@@ -55,7 +61,11 @@ Its guest may still be frozen on `/tmp/dvm/UI_NOEPIC2.sock`.
 
 ```
 grep -v PROOF /tmp/dvm/UI_NOEPIC2.lldb.log | grep -o '=== IOCONNECT_CALL_METHOD\(_RET\)\? hit' | sort | uniq -c
-grep -v PROOF /tmp/dvm/UI_NOEPIC2.lldb.log | grep -A1 'IOCONNECT_CALL_METHOD hit' | grep -c 'x1=0x4f'
+if grep -q 'PROBE_EVENT event=iokit-entry' /tmp/dvm/UI_NOEPIC2.lldb.log; then
+  grep 'PROBE_EVENT event=iokit-entry' /tmp/dvm/UI_NOEPIC2.lldb.log | grep -c 'selector=0x4f'
+else
+  grep -v PROOF /tmp/dvm/UI_NOEPIC2.lldb.log | grep -A1 'IOCONNECT_CALL_METHOD hit' | grep -c 'x1=0x4f'
+fi
 ```
 
 - If the `_RET` count equals the entry count, selector 79 returned: **the EPIC
@@ -63,20 +73,24 @@ grep -v PROOF /tmp/dvm/UI_NOEPIC2.lldb.log | grep -A1 'IOCONNECT_CALL_METHOD hit
 - If entries exceed returns by one and the unmatched entry has `x1=0x4f`, the
   hang is still there. Go to Step 2.
 - If the run is missing or panicked, rerun it:
-  `CALLBACKS=display_iokit_callbacks SECS=480 DARWIN_DCP_EPIC=off tools/re/setup_gate_probe.sh UI_NOEPIC3`
-  (about 9 minutes; it leaves the guest frozen).
+  `CALLBACKS=display_iokit_callbacks SECS=180 DARWIN_DCP_EPIC=off tools/re/setup_gate_probe.sh UI_NOEPIC3`
+  (normally about 135–145 seconds before post-mortem work; it leaves the guest frozen).
 
 ## Step 2 — name the next blocker (only if Step 1 still hangs)
 
-With the guest frozen:
+The rerun command above automatically produces
+`/tmp/dvm/<TAG>.postmortem.txt`. If working from an older already-frozen guest,
+produce it manually:
 
 ```
 python3 tools/re/stall_postmortem.py /tmp/dvm/<TAG>.sock <TAG> \
   --kext AppleFirmwareKit --kext driver.RTBuddy --kext IOMobileGraphicsFamily --kext AppleDCP
 ```
 
-It writes `/tmp/dvm/<TAG>.postmortem.txt`: one block per kernel stack that
-references those kexts, with the thread's `wait_event`. Find the block whose
+It writes `/tmp/dvm/<TAG>.postmortem.txt`: one block per correlated
+display-related stack/frame page, with the thread's `wait_event`. The default
+2 GiB first pass scans the remaining DRAM if it finds no correlated stack.
+Find the block whose
 frames include `IOMobileGraphicsFamily-DCP+0x23b50` (that is the display-off
 thread). Report, verbatim, its frame list and `wait_event`, plus the block for the
 thread whose frames include `IOMobileGraphicsFamily-DCP+0x23abc` (the GetBlock
@@ -90,11 +104,14 @@ and include that dump in the report. **ESCALATE.**
 
 ## Step 3 — confirm SpringBoard moves (only if Step 1 succeeded)
 
-Boot once more with the SpringBoard callbacks:
+Boot once more with the SpringBoard callbacks. The success label stops the
+guest immediately rather than waiting for the timer:
 
 ```
-pkill -f 'unix:/tmp/dvm/UI_NOEPIC2.sock'
-CALLBACKS=sb_setup_path_callbacks SECS=600 DARWIN_DCP_EPIC=off tools/re/setup_gate_probe.sh UI_SB_NOEPIC1
+python3 tools/hmp.py /tmp/dvm/UI_NOEPIC2.sock quit
+CALLBACKS=sb_setup_path_callbacks PROBE_SUCCESS_LABELS=SB_ADFL_ENTRY \
+  AUTO_POSTMORTEM=0 SECS=300 DARWIN_DCP_EPIC=off \
+  tools/re/setup_gate_probe.sh UI_SB_NOEPIC1
 python3 tools/re/lldb_hits_summary.py /tmp/dvm/UI_SB_NOEPIC1.lldb.log | head -40
 ```
 

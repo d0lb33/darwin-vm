@@ -14,6 +14,8 @@ neither printed nor counted.
     command script import tools/re/display_iokit_callbacks.py
     script display_iokit_callbacks.install(lldb.debugger, <slide>)
 """
+import json
+import os
 import time
 import lldb
 
@@ -21,6 +23,7 @@ import lldb
 CONFIG = {}
 RET_CONFIG = {}
 HITS = {}
+NEXT_CALL_ID = [1]
 SLIDE = [0]
 T0 = [0.0]
 STATE = {"srv": None}
@@ -28,6 +31,39 @@ CACHE_LO = 0x180000000
 CACHE_HI = 0x340000000
 PROGNAME_PTR = 0x1e6ef1590
 BKD = "backboardd"
+EVENT_DIR = os.environ.get("DVM_PROBE_EVENT_DIR", "")
+try:
+    STALL_SELECTOR = int(os.environ.get("DVM_PROBE_STALL_SELECTOR", "-1"), 0)
+except ValueError:
+    STALL_SELECTOR = -1
+SUCCESS_LABELS = set(filter(None, os.environ.get("DVM_PROBE_SUCCESS_LABELS", "").split(",")))
+
+
+def _event_path(name):
+    return os.path.join(EVENT_DIR, name) if EVENT_DIR else ""
+
+
+def _write_event(name, payload):
+    if not EVENT_DIR:
+        return
+    os.makedirs(EVENT_DIR, exist_ok=True)
+    path = _event_path(name)
+    temporary = "%s.%d.tmp" % (path, os.getpid())
+    with open(temporary, "w") as stream:
+        json.dump(payload, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
+
+
+def _remove_event(name):
+    if not EVENT_DIR:
+        return
+    try:
+        os.unlink(_event_path(name))
+    except FileNotFoundError:
+        pass
 
 
 def _reg(frame, name):
@@ -86,10 +122,16 @@ def _elapsed():
     return now - T0[0]
 
 
-def _plant_return(target, lr, label, tp, extra):
+def _plant_return(target, lr, label, tp, extra, call_id, selector):
     bp = target.BreakpointCreateByAddress(lr)
     bp.SetScriptCallbackFunction("display_iokit_callbacks.on_return")
-    RET_CONFIG[bp.GetID()] = {"label": label + "_RET", "tp": tp, "t": time.time(), "extra": extra, "hits": 0}
+    RET_CONFIG[bp.GetID()] = {"label": label + "_RET", "tp": tp, "t": time.time(),
+                              "extra": extra, "hits": 0, "call_id": call_id,
+                              "selector": selector}
+    if selector == STALL_SELECTOR:
+        _write_event("pending.%d.json" % call_id,
+                     {"call_id": call_id, "selector": selector, "time": time.time(),
+                      "tpidr_el1": tp or 0, "return_breakpoint": bp.GetID()})
 
 
 def on_return(frame, bp_loc, _dict):
@@ -100,7 +142,7 @@ def on_return(frame, bp_loc, _dict):
         return False
     tp = _reg(frame, "tpidr_el1")
     cfg["hits"] += 1
-    if tp != cfg["tp"] and cfg["hits"] < 16:
+    if tp != cfg["tp"]:
         return False
     x0 = _reg(frame, "x0")
     print("=== %s hit=1/1 t=%.3f ===" % (cfg["label"], time.time()))
@@ -108,6 +150,14 @@ def on_return(frame, bp_loc, _dict):
           (progname(frame.GetThread().GetProcess()), bp_id, frame.GetThread().GetThreadID(), _elapsed()))
     print("registers x0=%s tpidr_el1=0x%x elapsed_in_call=%.3fs %s" %
           ("0x%x" % x0 if x0 is not None else "?", tp or 0, time.time() - cfg["t"], cfg["extra"]))
+    print("PROBE_EVENT event=iokit-return call_id=%d selector=0x%x t=%.6f" %
+          (cfg["call_id"], cfg["selector"], time.time()), flush=True)
+    _remove_event("pending.%d.json" % cfg["call_id"])
+    _remove_event("claimed.%d.json" % cfg["call_id"])
+    if cfg["selector"] == STALL_SELECTOR:
+        _write_event("returned.%d.json" % cfg["call_id"],
+                     {"call_id": cfg["call_id"], "selector": cfg["selector"],
+                      "time": time.time()})
     frame.GetThread().GetProcess().GetTarget().BreakpointDelete(bp_id)
     del RET_CONFIG[bp_id]
     return False
@@ -140,6 +190,10 @@ def on_break(frame, bp_loc, _dict):
         values.append("%s=%s" % (rn, "<invalid>" if value is None else "0x%x" % value))
     print("registers " + " ".join(values))
     print("lr_static=%s" % (_fmt_addr(lr) if lr is not None else "?"))
+    if cfg["label"] in SUCCESS_LABELS:
+        _write_event("success.%s.json" % cfg["label"],
+                     {"label": cfg["label"], "time": time.time(), "hit": hit,
+                      "thread": thread.GetThreadID()})
     if cfg.get("bt"):
         try:
             pcs = [_fmt_addr(thread.GetFrameAtIndex(i).GetPC() & 0x0000ffffffffffff)
@@ -150,8 +204,13 @@ def on_break(frame, bp_loc, _dict):
     if cfg.get("ret") and lr and len(RET_CONFIG) < 48:
         try:
             sel = _reg(frame, "x1")
+            selector = sel if sel is not None else 0
+            call_id = NEXT_CALL_ID[0]
+            NEXT_CALL_ID[0] += 1
+            print("PROBE_EVENT event=iokit-entry call_id=%d selector=0x%x t=%.6f" %
+                  (call_id, selector, time.time()), flush=True)
             _plant_return(process.GetTarget(), lr & 0x0000ffffffffffff, cfg["label"], tp,
-                          "selector=0x%x" % (sel if sel is not None else 0))
+                          "selector=0x%x" % selector, call_id, selector)
         except Exception as e:
             print("return-watch <error %s>" % e)
     if hit >= cfg["limit"]:
@@ -210,3 +269,4 @@ def install(debugger, slide):
     interpreter = debugger.GetCommandInterpreter()
     for static, label, regs, limit, bt, ret, only, srv_only in ENTRIES:
         _install(target, interpreter, static + slide, label, _BASE + " " + regs, limit, bt, ret, only, srv_only)
+    _write_event("ready", {"time": time.time(), "breakpoints": len(ENTRIES)})

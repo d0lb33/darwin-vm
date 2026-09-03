@@ -15,6 +15,8 @@ Static VAs are from the iOS 27 beta 8 cache, resolved with `ipsw dyld a2s` /
     command script import tools/re/sb_setup_path_callbacks.py
     script sb_setup_path_callbacks.install(lldb.debugger, <slide>)
 """
+import json
+import os
 import time
 import lldb
 
@@ -25,6 +27,22 @@ SLIDE = [0]
 CACHE_LO = 0x180000000
 CACHE_HI = 0x340000000
 PROGNAME_PTR = 0x1e6ef1590      # libsystem_c ___progname_pointer (__DATA_DIRTY.__bss)
+EVENT_DIR = os.environ.get("DVM_PROBE_EVENT_DIR", "")
+SUCCESS_LABELS = set(filter(None, os.environ.get("DVM_PROBE_SUCCESS_LABELS", "").split(",")))
+
+
+def _write_event(name, payload):
+    if not EVENT_DIR:
+        return
+    os.makedirs(EVENT_DIR, exist_ok=True)
+    path = os.path.join(EVENT_DIR, name)
+    temporary = "%s.%d.tmp" % (path, os.getpid())
+    with open(temporary, "w") as stream:
+        json.dump(payload, stream, sort_keys=True)
+        stream.write("\n")
+        stream.flush()
+        os.fsync(stream.fileno())
+    os.replace(temporary, path)
 
 
 def _reg(frame, name):
@@ -99,6 +117,10 @@ def on_break(frame, bp_loc, _dict):
     st = _static(lr)
     print("lr_static=%s" % ("0x%x" % st if st is not None else "<outside-cache>"))
     print("code@0x%x=%s" % (pc, _hex(_read(process, pc, 8))))
+    if cfg["label"] in SUCCESS_LABELS:
+        _write_event("success.%s.json" % cfg["label"],
+                     {"label": cfg["label"], "time": time.time(), "hit": hit,
+                      "thread": thread.GetThreadID()})
     for label, base, offset, size in cfg["reads"]:
         if isinstance(base, int):
             address = base + offset
@@ -201,3 +223,4 @@ def install(debugger, slide):
     entries.append((SETUP_APPLICATION[0], "SB_SETUPAPP_ENTRY", "x0 x1", [], 8))
     for static, label, regs, reads, limit in entries:
         _install(target, interpreter, static + slide, label, _BASE + " " + regs, reads, limit)
+    _write_event("ready", {"time": time.time(), "breakpoints": len(entries)})

@@ -31,3 +31,8 @@ field has no direct project-agent TOML equivalent, so never assume a Codex
 subagent has an isolated worktree; assign one explicitly when parallel code
 changes require isolation.
 
+For display runtime work, prefer the condition-bounded commands in
+`CLAUDE.md` over blind multi-minute sleeps. Give `loop-runner` an explicit
+variant matrix, unique tags/ports, stop condition, and required evidence. Use
+`tools/re/setup_gate_sweep.sh` only when the variants are independent and the
+host has enough memory; never overlap a QEMU build with a boot sweep.
