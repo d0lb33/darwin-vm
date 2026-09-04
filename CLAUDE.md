@@ -98,6 +98,12 @@ python3 -m unittest discover -s tools/tests -v
 bash -n tools/probe.sh tools/re/setup_gate_probe.sh tools/re/setup_gate_sweep.sh
 ```
 
+For a late SKS opcode, do not enable global request dumping during a long
+userspace boot. `DARWIN_SKS_REQUEST_DEBUG_CODE=0x0f` dumps only opcode `0x0f`;
+routine successful op19/device-state traffic is sampled by default. See
+`docs/re/fast-sks-iteration.md` for the exact-request replay test, bounded
+selector/caller probes, and the current host-LLDB authorization boundary.
+
 ## Ownership — do not edit outside your lane
 
 Only the orchestrator session edits these. If your task needs a change here,

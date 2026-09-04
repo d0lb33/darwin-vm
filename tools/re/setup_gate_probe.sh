@@ -14,11 +14,18 @@
 #   PROBE_STALL_SELECTOR selector whose unmatched PROBE_EVENT stops the run;
 #               defaults to 0x4f for display_iokit_callbacks, empty otherwise
 #   PROBE_STALL_SECS seconds an instrumented call may remain pending (30)
-#   PROBE_STOP_SERIAL_REGEX / PROBE_STOP_LLDB_REGEX optional early-stop regexes
+#   STALL_SECS  total serial-silence watchdog; defaults to SECS here because
+#               condition-driven system boots can be legitimately quiet
+#   PROBE_STOP_SERIAL_REGEX / PROBE_STOP_STDERR_REGEX / PROBE_STOP_LLDB_REGEX
+#               optional early-stop regexes
+#   DARWIN_DCP_IOMFB_RPC_TRACE 1 by default; set 0 for non-IOMFB discovery
+#               boots to avoid high-volume request logging
 #   PROBE_SUCCESS_LABELS comma-separated callback labels that create stop events
 #   AUTO_POSTMORTEM stall (default), all, or 0; runs after a conditional freeze
 #   POSTMORTEM_RAM_SIZE fast first-pass bytes (0x80000000 = 2 GiB)
 #   KEEP_GUEST  leave QEMU frozen after collection (1); 0 exits it cleanly
+#   HOLD_GUEST  with KEEP_GUEST=1, keep this driver process alive while the
+#               frozen guest is inspected; quit QEMU through HMP to release it
 #
 # outputs, all under /tmp/dvm:
 #   <TAG>.probe.out   probe.sh verdict
@@ -33,6 +40,7 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 TAG="${1:-UI_SETUP_GATE1}"
 SECS="${SECS:-300}"
+STALL_SECS="${STALL_SECS:-$SECS}"
 PARENT="${PARENT:-/tmp/dvm/data-seed/persistent-parent.qcow2}"
 CALLBACKS="${CALLBACKS:-setup_gate_callbacks}"
 GDB_PORT="${GDB_PORT:-1234}"
@@ -42,12 +50,14 @@ if [[ -z "$PROBE_STALL_SELECTOR" && "$CALLBACKS" == "display_iokit_callbacks" ]]
 fi
 PROBE_STALL_SECS="${PROBE_STALL_SECS:-30}"
 PROBE_STOP_SERIAL_REGEX="${PROBE_STOP_SERIAL_REGEX-}"
+PROBE_STOP_STDERR_REGEX="${PROBE_STOP_STDERR_REGEX-}"
 PROBE_STOP_LLDB_REGEX="${PROBE_STOP_LLDB_REGEX-}"
 PROBE_SUCCESS_LABELS="${PROBE_SUCCESS_LABELS-}"
 AUTO_POSTMORTEM="${AUTO_POSTMORTEM:-stall}"
 POSTMORTEM_RAM_SIZE="${POSTMORTEM_RAM_SIZE:-0x80000000}"
 POSTMORTEM_FULL_RAM_SIZE="${POSTMORTEM_FULL_RAM_SIZE:-0x300000000}"
 KEEP_GUEST="${KEEP_GUEST:-1}"
+HOLD_GUEST="${HOLD_GUEST:-0}"
 LLDB_DRAIN_SECS="${LLDB_DRAIN_SECS:-5}"
 DTREE=/tmp/dvm/data-seed/dt_nvme_welcome.bin
 TC="$HOME/dvm-artifacts/tc/merged_sysvol_cryptex_tc.bin"
@@ -56,6 +66,7 @@ CHILD="/tmp/dvm/data-seed/$(printf '%s' "$TAG" | tr 'A-Z_' 'a-z-').qcow2"
 BOOTARGS='rootdev=disk1s1 ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort'
 SOCK="/tmp/dvm/$TAG.sock"
 SERIAL="/tmp/dvm/probe/$TAG.serial.log"
+STDERR_LOG="/tmp/dvm/probe/$TAG.stderr.log"
 LLDB_LOG="/tmp/dvm/$TAG.lldb.log"
 STOP_FILE="/tmp/dvm/$TAG.stop"
 EVENT_DIR="/tmp/dvm/$TAG.events"
@@ -70,6 +81,7 @@ PROBE_PID=""; LLDB_PID=""; WATCH_PID=""; FINISHED=0
 }
 case "$AUTO_POSTMORTEM" in 0|off|1|all|stall) ;; *) echo "setup_gate_probe: invalid AUTO_POSTMORTEM=$AUTO_POSTMORTEM" >&2; exit 2 ;; esac
 case "$KEEP_GUEST" in 0|1) ;; *) echo "setup_gate_probe: KEEP_GUEST must be 0 or 1" >&2; exit 2 ;; esac
+case "$HOLD_GUEST" in 0|1) ;; *) echo "setup_gate_probe: HOLD_GUEST must be 0 or 1" >&2; exit 2 ;; esac
 if [[ -n "$PROBE_STALL_SELECTOR" && ! "$PROBE_STALL_SELECTOR" =~ ^(0[xX][0-9a-fA-F]+|[0-9]+)$ ]]; then
     echo "setup_gate_probe: invalid PROBE_STALL_SELECTOR=$PROBE_STALL_SELECTOR" >&2; exit 2
 fi
@@ -122,7 +134,8 @@ rm -rf -- "$EVENT_DIR"
 # The IOMFB level-4 answers and D120/D586 callback script are the established
 # display-stack configuration (docs/re/quartz-corrected-runtime.md).
 DARWIN_DCP_EPIC="${DARWIN_DCP_EPIC-all}" DARWIN_DCP_REPLY="${DARWIN_DCP_REPLY-1}" DARWIN_DCP_IOMFB="${DARWIN_DCP_IOMFB-4}" \
-DARWIN_DCP_IOMFB_RPC_TRACE=1 \
+DARWIN_DCP_IOMFB_RPC_TRACE="${DARWIN_DCP_IOMFB_RPC_TRACE-1}" \
+STALL_SECS="$STALL_SECS" \
 DARWIN_DCP_IOMFB_OUT='A401=01,A000=01,A454=01000000,A033=4152474200000000000000000000000000000000000000000000000000000000000000000000000001000000,A453=9b040000fc090000,A412=01000000' \
 DARWIN_DCP_IOMFB_CB='D120::4,D586:9b040000fc090000:4' \
 "$REPO/tools/probe.sh" --dtree "$DTREE" --tc "$TC" --mem 12G --secs "$SECS" --tag "$TAG" \
@@ -189,6 +202,9 @@ if [[ -n "$PROBE_STALL_SELECTOR" ]]; then
 fi
 if [[ -n "$PROBE_STOP_SERIAL_REGEX" ]]; then
     WATCH_ARGS+=(--stop-on "$SERIAL" "$PROBE_STOP_SERIAL_REGEX")
+fi
+if [[ -n "$PROBE_STOP_STDERR_REGEX" ]]; then
+    WATCH_ARGS+=(--stop-on "$STDERR_LOG" "$PROBE_STOP_STDERR_REGEX")
 fi
 if [[ -n "$PROBE_STOP_LLDB_REGEX" ]]; then
     WATCH_ARGS+=(--stop-on "$LLDB_LOG" "$PROBE_STOP_LLDB_REGEX")
@@ -265,4 +281,11 @@ else
     echo "guest remains frozen: $SOCK"
 fi
 FINISHED=1
+if [[ "$KEEP_GUEST" == 1 && "$HOLD_GUEST" == 1 ]]; then
+    _qpid=$(head -1 "$QEMU_PID_FILE" 2>/dev/null || true)
+    echo "holding frozen guest (pid ${_qpid:-?}); HMP quit releases driver"
+    while [[ "$_qpid" =~ ^[0-9]+$ ]] && kill -0 "$_qpid" 2>/dev/null; do
+        perl -e 'select(undef,undef,undef,1)'
+    done
+fi
 exit "$PROBE_RC"
