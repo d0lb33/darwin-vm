@@ -7,8 +7,8 @@ version and records the implementation location for each row.
 | Object/device | State owner | Existing VMState | Required fields | Timers/BHs | Host resources | Post-load work |
 |---|---|---|---|---|---|---|
 | ARM vCPU / SPTM | `ARMCPU`, `CPUARMState` | Stock `vmstate_arm_cpu` | Architectural and exception state; timers; Apple IMP-DEF bank; SPRR; GXF/GL banks; PMC counters | Generic and WFxT virtual timers | None | Stock ARM rebuilds hflags/TLB; Apple subsection restores value-only banks |
-| AIC | `DarwinAICState` | None at start | Config; IRQ config; hardware/software pending; masks; MMIO backing | None | Destination `qemu_irq` objects | Validate geometry and recompute CPU IRQ level |
-| ASC / RTKit | One `DarwinASCState` per IOP | None at start | CPU/power state; mailbox controls and FIFOs; RTKit protocol, endpoint map/start state | Optional diagnostic virtual timer; no BH | Destination IRQs and personality callbacks | Validate FIFO/protocol bounds, migrate timer deadline, reassert mailbox IRQs |
+| AIC | `DarwinAICState` | `vmstate_darwin_aic` | Config; IRQ config; hardware/software pending; masks; MMIO backing | None | Destination `qemu_irq` objects | Validate geometry and recompute CPU IRQ level |
+| ASC / RTKit | One `DarwinASCState` per IOP | `vmstate_darwin_asc` | CPU/power state; mailbox controls and FIFOs; RTKit protocol, endpoint map/start state | Optional diagnostic virtual timer; no BH | Destination IRQs and personality callbacks | Validate FIFO/protocol bounds, migrate timer deadline, reassert mailbox IRQs |
 | SEP / SKS | `DarwinSEPState` | None at start | Mailbox queues; endpoints and OOL DMA; shared memory/TXM; power/status; request counters | None | DART link and destination IRQs | Validate queues/DMA ranges, retain destination DART, reassert IRQs |
 | ANS / NVMe | `DarwinANSState` | None at start | MMIO backing; NVMe controller registers; queue bases/sizes/indices/phases; interrupt mask; RTKit boot state | None; commands are synchronous | Reopened `BlockBackend`, SART link, IRQ | Validate queue geometry and derive level IRQ; no host AIO exists to replay |
 | DART / IOMMU | One `DarwinDARTState` per DART | None at start | Stream enables; TCR/TTBR; protection/error; MMIO backing | None | Registry link and IRQ | Validate geometry; no cached translations exist, so authoritative tables are walked again |
@@ -23,6 +23,5 @@ version and records the implementation location for each row.
 | Guest RAM / clock | Migration core | Stock RAM/global state | RAM blocks, runstate, virtual-clock offsets | All registered virtual timers | None | Restore remains paused until PC witness; terminated wall time does not advance virtual time |
 | ANS disk generation | External immutable qcow2 overlay | Outside VMState | Exact block generation paired with stream | None | Host file and backing chain | Flush before migration, terminate source, make source read-only, create fresh child per restore |
 
-AIC and ASC are implemented only in the applyable ownership-escalation patch
-`checkpoint-restricted-device-vmstate.patch`; the restricted sources themselves
-are intentionally unchanged.
+AIC and ASC migration was applied after the owner explicitly authorized edits
+to the shared sources.  The implementation is in QEMU commit `60e1fd0`.

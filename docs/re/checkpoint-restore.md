@@ -21,14 +21,13 @@ explicitly advertises `-incoming file:filename`, `-incoming defer`, and
 `-dump-vmstate`; its HMP table supplies asynchronous `migrate -d`,
 `info migrate`, and `migrate_set_parameter`.  The implementation therefore
 uses the supported external file migration transport rather than `savevm`.
-The final allowed-file build's dump is
-`/tmp/dvm/ckpt-final-vmstate-inventory.json` (SHA-256
-`ec3cd84c70057bfea1def00d60259865bad8845a0cea5dca7911b4d12ede34a8`).
-It contains the QOM sections for SEP, ANS, DART, SART, framebuffer, and AMCC;
-AIC and ASC remain absent until their restricted patch is applied.  AFK, DCP,
-IOMFB (when configured), and sparse-unimplemented state are registered non-QOM
-sections and do not appear in this type-schema dump; instantiated sections do
-appear in migration analysis.
+The owner-authorized build's dump is
+`/tmp/dvm/ckpt-aicasc-vmstate-inventory.json` (SHA-256
+`7f19e5e8b2a1f2b7dc523710cf31b2d8524675aedd766885c54925cd8bd8811f`).
+It contains the QOM sections for AIC, ASC, SEP, ANS, DART, SART, framebuffer,
+and AMCC.  AFK, DCP, IOMFB (when configured), and sparse-unimplemented state
+are registered non-QOM sections and do not appear in this type-schema dump;
+instantiated sections do appear in migration analysis.
 
 ## Security model
 
@@ -108,18 +107,16 @@ The restore report counts ANS reads and writes, completed SKS replies, DCP/AFK
 messages, and IOMFB messages only from stderr bytes written after `cont`; model
 initialization before incoming migration cannot satisfy those witnesses.
 
-## Device coverage and remaining ownership gate
+## Device coverage
 
 `checkpoint-device-inventory.json` is the field-level inventory for CPU/SPTM,
 AIC, ASC/RTKit, SEP/SKS, ANS/NVMe, DART, SART, DCP/IOMFB/AFK, framebuffer,
 timers, interrupts, UART, AMCC, and sparse unimplemented-register state.
 
-The allowed qemu-sptm implementation covers all entries except AIC and ASC.
-Those sources are ownership-restricted.  The exact proposed implementation is
-in `checkpoint-restricted-device-vmstate.patch`; it must be applied and reviewed
-by their owner before an end-to-end checkpoint can be called complete.  The
-patch serializes pending/masked AIC interrupts and ASC mailbox/RTKit endpoint
-state, validates bounds, migrates the optional virtual timer, and reasserts
+The qemu-sptm implementation covers every listed entry.  AIC and ASC support
+was applied after explicit owner authorization in QEMU commit `60e1fd0`: it
+serializes pending/masked AIC interrupts and ASC mailbox/RTKit endpoint state,
+validates bounds, migrates the optional virtual timer, and reasserts
 destination-process IRQ lines in `post_load`.
 
 ## Test ladder and acceptance evidence
@@ -143,22 +140,38 @@ status into a claim that these guest-level checks passed.
 
 ## 2026-09-04 runtime results
 
-The bounded control ladder reached the ownership gate rather than merely a
-migration-command success:
+The bounded control ladder includes both the expected failure before AIC/ASC
+support and successful new-process restores after that support was applied:
 
 | Checkpoint | Boundary | Create evidence | Restore evidence | Result |
 |---|---|---|---|---|
 | `CKPT_CPU_CTRL7` | prelaunch CPU/RAM control using the final allowed-file binary | PC `0x100070a0388`; 414,830,884-byte stream; 1.535 s migration; source PID 61605 exited | PIDs 61787 and 61933 each loaded the exact PC from a fresh disk child, advanced into XNU, emitted 51,129/51,153 new serial bytes, and completed SKS traffic without XNU/SPTM panic in the 15 s control window | control passed; the repeated bootstrap banner is expected because the checkpoint precedes boot |
 | `CKPT_EARLY_BOOT2` | after `Early boot complete` and a live SEP/SKS request | PC `0xfffffff02ac72da8`; 1,117,096,894-byte stream; 1.024 s migration; source PID 58979 exited | PID 59233 loaded the exact PC, advanced, emitted new serial output, and did not repeat a boot banner | failed after resume: SKS timeout strikes followed by an IONVMeFamily panic at 27 s |
+| `CKPT_AICASC_EARLY2` | after `Early boot complete`, using the migrated Data/User parent and the owner-authorized AIC/ASC build | PC `0xfffffff00709a610`; 663,051,921-byte stream; 1.530 s migration; source PID 65586 exited | PIDs 66009 and 67448 each loaded the exact PC in 0.940/0.941 s from independent fresh disk children and ran 120 s; both showed execution and serial progress, ANS reads/writes, SKS replies, DCP/IOMFB traffic, no repeated boot banner, and no XNU/SPTM panic | passed twice; this directly fixes the prior 27 s failure |
+| `CKPT_SB_STAGE1_PROGRESS` | 14+ minutes after restoring the early checkpoint, while Data-volume metadata and SEP traffic were still progressing but before `SB_ADFL_ENTRY` | PC `0xfffffff02aaf76e4`; 3,542,058,441-byte stream; 1.537 s migration; source PID 68274 exited | PID 75975 loaded the exact PC in 1.053 s, advanced for 60 s, emitted 8,318 serial bytes, completed ANS and SKS traffic, and showed no repeated boot banner or XNU/SPTM panic | resumable investigation point, not SpringBoard acceptance evidence |
 
-The first post-resume request printed by the failed early-boot restore was an
+The first post-resume request printed by the failed pre-AIC/ASC restore was an
 already submitted QID 1 NVMe read.  ANS queue indices, disk generation, and
 controller state were present in the stream, but the AIC and generic ASC were
 absent from `-dump-vmstate`.  The destination therefore lost the pending AIC
 delivery and RTKit mailbox state: the NVMe request timed out and SKS accumulated
-timeout strikes.  This is direct runtime evidence that the restricted AIC/ASC
-patch is required before continuing to SpringBoard; it is not evidence that
-ANS migration itself completed a request incorrectly.
+timeout strikes.  The two `CKPT_AICASC_EARLY2` restores show that preserving
+those devices removes that failure; it was not an ANS completion bug.
+
+The progressed SpringBoard-stage run did not hit `SB_ADFL_ENTRY` within its
+bounded condition windows.  It also did not reproduce the other display
+experiment's runaway DCP restart loop: there was no repeated coprocessor
+handshake/power-cycle storm and no endpoint-11 DCP NMI.  This is deliberately
+not a claim that the late DCP power path is fixed.  The main checkout has a
+separate uncommitted ASC power-transition experiment; it was not copied into
+this isolated branch.  `CKPT_SB_STAGE1_PROGRESS` exists so that work can resume
+at this exact state after the two checkpoint commits are integrated.
+
+`COLD_REG_CKPT1` was an ordinary 30-second cold boot from a fresh qcow2 child
+after the general device-state implementation.  It produced 634 serial lines,
+reached the normal early-boot region, and had zero XNU/SPTM panics.  The AIC/ASC
+build then independently cold-booted to `Early boot complete` while creating
+`CKPT_AICASC_EARLY2`.
 
 The development-only manifest
 `/tmp/dvm/CKPT_EARLY_BOOT1.development-bridge.json` was used solely to carry an

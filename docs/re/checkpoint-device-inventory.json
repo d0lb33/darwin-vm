@@ -18,22 +18,22 @@
     {
       "object": "darwin-aic",
       "state_owner": "DarwinAICState",
-      "existing_vmstate": null,
+      "existing_vmstate": "hw/arm/darwin_aic.c:vmstate_darwin_aic",
       "required_fields": ["global config", "IRQ configuration", "hardware levels", "software pending bits", "mask bits", "misc MMIO backing"],
       "timers_or_bh": [],
       "host_resources": ["qemu_irq inputs/output"],
       "post_load": "validate geometry and recompute CPU IRQ level",
-      "implementation": "docs/re/checkpoint-restricted-device-vmstate.patch (ownership-restricted, intentionally unapplied)"
+      "implementation": "hw/arm/darwin_aic.c:vmstate_darwin_aic"
     },
     {
       "object": "darwin-asc / RTKit (DCP, ANS, generic IOPs)",
       "state_owner": "DarwinASCState per instantiated ASC",
-      "existing_vmstate": null,
+      "existing_vmstate": "hw/arm/darwin_asc.c:vmstate_darwin_asc",
       "required_fields": ["CPU power state", "mailbox control/send word", "visible and staging FIFOs", "RTKit state/version", "endpoint map/start state", "AP/IOP power handshake"],
       "timers_or_bh": ["optional QEMU_CLOCK_VIRTUAL diagnostic autostart timer"],
       "host_resources": ["qemu_irq lines", "personality callback pointers"],
       "post_load": "validate queues/protocol state, retain destination callbacks, reassert four mailbox IRQs",
-      "implementation": "docs/re/checkpoint-restricted-device-vmstate.patch (ownership-restricted, intentionally unapplied)"
+      "implementation": "hw/arm/darwin_asc.c:vmstate_darwin_asc"
     },
     {
       "object": "darwin-sep / SKS",
