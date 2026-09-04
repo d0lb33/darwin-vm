@@ -27,7 +27,7 @@ This takes seconds after the initial Meson regeneration.  It proves parser
 behavior only; it does not prove that the guest sends the request, consumes a
 reply, or continues booting.
 
-### 2. Launch QEMU under host LLDB (implemented, host authorization blocked)
+### 2. Launch QEMU under host LLDB
 
 macOS denied LLDB attaching to an already-running QEMU.  The alternative is
 implemented: `tools/re/qemu_under_lldb.sh` starts QEMU as LLDB's child and
@@ -35,21 +35,25 @@ installs `host_sks_request_callbacks.py` before `run`.  The default callback is
 read-only: it logs the exact request SHA-256 and decoded fields at
 `sep_sks_validate_migrate_request()`.
 
-This host did not authorize even launch-under-LLDB.  The clean smoke test
-stopped at `process launch` in
-`/tmp/dvm/HOST_LLDB_PROBE_SMOKE3.host.log:17`; `DevToolsSecurity -status`
-reports `Developer mode is currently disabled.`  The wrapper and probe driver
-now notice that startup failure and reap LLDB/debugserver/QEMU descendants, so
-it no longer leaks a stopped guest.  When an interactive administrator is
-present, enable developer-tool authorization and repeat the smoke test before
-using any override:
+The initial smoke test stopped at `process launch` because Developer Mode was
+disabled and LLDB had not been granted access to the repository in Downloads.
+After enabling Developer Mode and approving that folder access, the positive
+control `HOST_LLDB_PROBE_SMOKE5` resolved the host callback to exactly one
+location, launched QEMU as process 65623, ran the guest, and exited status zero
+(`/tmp/dvm/HOST_LLDB_PROBE_SMOKE5.host.log:14-19`).  The wrapper and probe
+driver still detect authorization/startup failures and reap
+LLDB/debugserver/QEMU descendants, so a rejected launch does not leak a stopped
+guest.
+
+On a fresh host, enable developer-tool authorization before the first smoke
+test:
 
 ```sh
 sudo DevToolsSecurity -enable
 ```
 
-An OS developer-tools/taskgated prompt may still need interactive approval.
-Do not interpret an authorization failure as a guest result.
+Approve any developer-tools/taskgated or Downloads-folder access prompt.  Do
+not interpret an authorization failure as a guest result.
 
 The diagnostic override requires an exact SHA-256, an explicit response
 class, and the one-shot guard:

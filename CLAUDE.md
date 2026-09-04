@@ -102,7 +102,7 @@ For a late SKS opcode, do not enable global request dumping during a long
 userspace boot. `DARWIN_SKS_REQUEST_DEBUG_CODE=0x0f` dumps only opcode `0x0f`;
 routine successful op19/device-state traffic is sampled by default. See
 `docs/re/fast-sks-iteration.md` for the exact-request replay test, bounded
-selector/caller probes, and the current host-LLDB authorization boundary.
+selector/caller probes, and the verified QEMU-under-host-LLDB path.
 
 ## Ownership — do not edit outside your lane
 
