@@ -29,7 +29,6 @@ CACHE_HI = 0x340000000
 PROGNAME_PTR = 0x1e6ef1590      # libsystem_c ___progname_pointer (__DATA_DIRTY.__bss)
 EVENT_DIR = os.environ.get("DVM_PROBE_EVENT_DIR", "")
 SUCCESS_LABELS = set(filter(None, os.environ.get("DVM_PROBE_SUCCESS_LABELS", "").split(",")))
-INCLUDE_GLOBAL = os.environ.get("DVM_SB_SETUP_INCLUDE_GLOBAL", "1") != "0"
 
 
 def _write_event(name, payload):
@@ -221,7 +220,8 @@ def install(debugger, slide):
     target = debugger.GetSelectedTarget()
     interpreter = debugger.GetCommandInterpreter()
     entries = list(ENTRIES)
-    if not INCLUDE_GLOBAL:
+    include_global = os.environ.get("DVM_SB_SETUP_INCLUDE_GLOBAL", "1") != "0"
+    if not include_global:
         entries = [entry for entry in entries
                    if entry[1] not in {"BY_NEEDS_ENTRY", "BY_NEEDS_RETURN",
                                        "BY_PREPARE_LAUNCH_SENTINEL",
@@ -229,4 +229,5 @@ def install(debugger, slide):
     entries.append((SETUP_APPLICATION[0], "SB_SETUPAPP_ENTRY", "x0 x1", [], 8))
     for static, label, regs, reads, limit in entries:
         _install(target, interpreter, static + slide, label, _BASE + " " + regs, reads, limit)
-    _write_event("ready", {"time": time.time(), "breakpoints": len(entries)})
+    _write_event("ready", {"time": time.time(), "breakpoints": len(entries),
+                           "include_global": include_global})
