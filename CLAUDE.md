@@ -68,11 +68,11 @@ and every other device. Preserve direct boot and all existing device behavior.
 Use only isolated firmware copies and disposable disk overlays; never modify
 the active checkout or its durable/base disk artifacts.
 
-Current iBoot checkpoint (QEMU `e706f05`, 2026-09-04): both pinned d47
+Current iBoot checkpoint (QEMU `8503414`, 2026-09-04): both pinned d47
 research and release images pass the bounded LLC/SEP/APIA/root, CPM, unlock,
-GPIO, PMGR topology, MCC, signed range-3 tuning, and the first 25 range-2
-table RMWs, then first touch physical `0x300040068`
-(`pmgr[2]+0x40068`). The exact next record and runtime/static addresses are
+GPIO, PMGR topology, MCC, signed range-3 tuning, and 78 exact range-2 table
+RMWs, then first touch physical `0x300040144`
+(`pmgr[2]+0x40144`). The exact next record and runtime/static addresses are
 in `docs/re/iboot-runtime.md`. A real-device capture is optional fidelity
 evidence, not a prerequisite for continuing the firmware-defined path.
 
