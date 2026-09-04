@@ -4,7 +4,8 @@
 Every `struct thread` in this kernelcache carries 0x2010002030100000 at +0x1a0,
 0xfeedfacefeedfad3 at +0x1d0 and 0x2020a52a302abae6 at +0x1d8 (observed on several
 live threads; see docs/re/setup-launch-runtime.md).  Fields printed: +0x18 wait_event,
-+0xe0 continuation, +0xf0 kernel_stack (a VA; the stack is one 16 KiB page).
++0x28 waitq, +0xe0 continuation, +0xf0 kernel_stack (a VA; the stack is one
+16 KiB page), +0x1f0 scheduler state, and +0x290 thread_group.
 
 usage: ramscan_threads.py SOCK OUT [--ram-base --ram-size --chunk --workdir]
 """
@@ -42,18 +43,19 @@ def main():
             mm = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
             for m in pat.finditer(mm):
                 base = m.start() - SIG[0]
-                if base < 0 or base & 7 or base + 0x200 > len(mm):
+                if base < 0 or base & 7 or base + 0x298 > len(mm):
                     continue
                 if all(int.from_bytes(mm[base + o:base + o + 8], "little") == v for o, v in CHECKS):
                     w = lambda o: int.from_bytes(mm[base + o:base + o + 8], "little")
-                    rows.append((a.ram_base + off + base, w(0x18), w(0xe0), w(0xf0), w(0x10)))
+                    rows.append((a.ram_base + off + base, w(0x18), w(0x28), w(0xe0),
+                                 w(0xf0), w(0x1f0), w(0x10), w(0x290)))
             mm.close()
         os.unlink(f)
         print("scanned 0x%x: %d threads so far (%.0fs)" % (a.ram_base + off, len(rows), time.time() - t0), flush=True)
     with open(a.out, "w") as o:
-        o.write("# thread_pa wait_event continuation kernel_stack +0x10\n")
+        o.write("# thread_pa wait_event waitq continuation kernel_stack state +0x10 thread_group\n")
         for r in rows:
-            o.write("0x%x 0x%x 0x%x 0x%x 0x%x\n" % r)
+            o.write("0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x 0x%x\n" % r)
     print("wrote", a.out, len(rows), "threads")
 
 
