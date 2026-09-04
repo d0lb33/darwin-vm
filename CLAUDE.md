@@ -68,18 +68,21 @@ and every other device. Preserve direct boot and all existing device behavior.
 Use only isolated firmware copies and disposable disk overlays; never modify
 the active checkout or its durable/base disk artifacts.
 
-Current iBoot checkpoint (QEMU `a56e663`, 2026-09-04): both pinned d47
+Current iBoot checkpoint (QEMU `53a1b1a`, 2026-09-05): both pinned d47
 research and release images pass the bounded LLC/SEP/APIA/root, CPM, unlock,
 GPIO, PMGR topology, MCC, signed range-3 tuning, late range-2 RMWs through
-`+0x6f100`, all 13 firmware-asserted boot-on target preconditions, and four
-exact range-43 cold-start latch words. Both now first touch physical
-`0x3028aa0bc` (`pmgr[43]+0x8aa0bc`): research reads at
-`0xfffffc01fc0ee468`, release at `0xfffffc01fc0ed758`, and each next writes
-`old | 0x40`. Audit every static reference and consumer before modeling that
-word; the diagnostic zero is not an accepted reset value. Runtime/static
-addresses and regressions are in `docs/re/iboot-runtime.md`. A real-device
-capture is optional fidelity evidence, not a prerequisite for continuing the
-firmware-defined path.
+`+0x6f100`, all 13 firmware-asserted boot-on target preconditions, five exact
+range-43 cold-start latch words, and twelve cross-build-identical range-1
+table RMWs through `+0x38060`. Both now fail closed on the same existing PMGR
+state word: `AOP_CPU`, physical `0x308284098` (`pmgr[1]+0x4098`), is read as
+`0x000000ff` and the selected table requests `0x000020ff`. Research writes at
+`0xfffffc01fc10b6b0`; release writes at `0xfffffc01fc10a78c`. The exact active
+descriptors prove `(mask,value)=(0x2000,0x2000)`, but bit 13 is not yet an
+accepted state-control field. Model it only as a per-device, ordered stored
+control bit after auditing its consumers; do not broaden the global state mask
+or synthesize completion. Runtime/static addresses and regressions are in
+`docs/re/iboot-runtime.md`. A real-device capture is optional fidelity
+evidence, not a prerequisite for continuing the firmware-defined path.
 
 Current SEPROM checkpoint (2026-09-04): direct SPTM boot can opt in to an
 authentic encrypted d47 `sepi` with `-sepfw`. The loader preserves the exact

@@ -196,7 +196,7 @@ plausible reset/watchdog implementation cannot make the parked caller resume.
 
 ## Current bounded checkpoint
 
-QEMU commits through `a56e663` implement only finite, observed d47 bootstrap
+QEMU commits through `53a1b1a` implement only finite, observed d47 bootstrap
 transactions. In addition to the earlier LLC/SEP/APIA/root work, they
 validate:
 
@@ -228,8 +228,10 @@ validate:
   RMWs at `+0x6f000` and `+0x6f100`;
 - 13 exact PMGR target-nibble reset preconditions proven by the firmware's
   source-line-500 assertion; and
-- four range-43 cold-start latch words at `+0x8ac000`, `+0x800000`,
-  `+0x8ac028`, and `+0x864000`.
+- five range-43 cold-start latch words at `+0x8ac000`, `+0x800000`,
+  `+0x8ac028`, `+0x864000`, and `+0x8aa0bc`; and
+- twelve ordered range-1 table RMWs at `+0x50400`, `+0x50408`,
+  `+0x3c000..+0x3c330`, and `+0x38060`.
 
 No completion value is synthesized for the topology or MCC loops: their prior
 firmware writes leave the polled bit clear. Invalid order, width, mask, value,
@@ -299,12 +301,13 @@ initialized:
 
 Only target bits `[3:0]` start at `0xf`; actual-state bits `[7:4]` remain zero
 until an accepted firmware write drives the existing PMGR state transition.
-The research caller at `0xfffffc01fc0e9534..0xfffffc01fc0e962c` contains 12
-top-level requests; recursive dependencies account for the 13 target words.
-Once all are present, both images clear the line-500 panic and continue.
+The research caller at `0xfffffc01fc0e9534..0xfffffc01fc0e962c` contains 13
+top-level requests (`a1,a3,a5,95,8b,86,83,76,75,70,ae,11,1b`). Recursive
+dependencies eventually reach the 13 asserted target words above. Once all
+are present, both images clear the line-500 panic and continue.
 
-The next cross-build-identical block performs four ordered, non-polling RMW
-sequences in PMGR range 43:
+The next cross-build-identical block and leaf perform five ordered,
+non-polling RMW sequences in PMGR range 43:
 
 | physical address | range offset | exact operation |
 |---:|---:|---|
@@ -312,35 +315,82 @@ sequences in PMGR range 43:
 | `0x302800000` | `+0x800000` | read/write `old | 0x04`; reread/write `old | 0x20` |
 | `0x3028ac028` | `+0x8ac028` | read; write `old | 0x01` |
 | `0x302864000` | `+0x864000` | read; write `old | 0x02` |
+| `0x3028aa0bc` | `+0x8aa0bc` | read; write `old | 0x40` |
 
 Research raw `+0x69250..+0x6929c` and release raw
-`+0x68540..+0x6858c` are instruction-for-instruction equivalent for these
-accesses. The model starts only these four words at the explicit cold-clear
-representative and rejects a wrong width, value, order, or extra transaction;
-it supplies no status value.
+`+0x68540..+0x6858c` are instruction-for-instruction equivalent for the first
+four accesses. The fifth uses a four-instruction leaf at research raw
+`+0x6e45c` and release raw `+0x6d74c`. An exact address-materialization scan
+finds only two references in each image; the other is a snapshot recorder and
+does not branch on the value. The model starts only these five words at the
+explicit cold-clear representative and rejects a wrong width, value, order,
+or extra transaction; it supplies no status value.
+
+The selected table then performs twelve more ordered, non-polling 32-bit RMWs
+in PMGR range 1. Runtime identifies the active adjacent `+0x50400/+0x50408`
+descriptors at research raw `+0x265948/+0x265958` and release raw
+`+0x2634f8/+0x263508`. Their referenced tuples are respectively research raw
+`+0x2e60f0/+0x2ee728` and release raw `+0x2e3380/+0x2eb9b8` and are byte-for-byte
+identical across builds. The next nine active descriptors begin at research
+raw `+0x265a60` and release raw `+0x263610`. The final accepted descriptor is
+research raw `+0x265b30` and release raw `+0x2636e0`.
+
+| physical address | range offset | mask | value/result from cold-zero representative |
+|---:|---:|---:|---:|
+| `0x3082d0400` | `+0x50400` | `0x00000fff` | `0x00000000` |
+| `0x3082d0408` | `+0x50408` | `0x00ffffff` | `0x00000352` |
+| `0x3082bc000` | `+0x3c000` | `0x00000001` | `0x00000001` |
+| `0x3082bc020` | `+0x3c020` | `0x3fffffff` | `0x3f1c7ff7` |
+| `0x3082bc044` | `+0x3c044` | `0x00000001` | `0x00000001` |
+| `0x3082bc100` | `+0x3c100` | `0x00000001` | `0x00000001` |
+| `0x3082bc110` | `+0x3c110` | `0xffffffff` | `0xf37fe05f` |
+| `0x3082bc114` | `+0x3c114` | `0xffffffff` | `0xcbff9400` |
+| `0x3082bc118` | `+0x3c118` | `0x01ffffff` | `0x01fe4047` |
+| `0x3082bc32c` | `+0x3c32c` | `0x000000ff` | `0x00000000` |
+| `0x3082bc330` | `+0x3c330` | `0x800001ff` | `0x00000000` |
+| `0x3082b8060` | `+0x38060` | `0xffffffff` | `0x0000001c` |
+
+Every accepted word is isolated to a four-byte region, starts at an explicitly
+labeled cold-zero representative, and requires the exact cross-word order,
+width, and firmware-computed value. No completion value is returned. The
+`+0x38060` list contains two later records that request `0x2c` and `0x0b`; the
+current model intentionally accepts only the first `0x1c` transaction so those
+later phases cannot be reached accidentally.
 
 ### Current first unsupported boundary
 
-After all four latches, both images enter the next helper and stop on a 32-bit
-read at physical `0x3028aa0bc`, PMGR range 43 `+0x8aa0bc`. The diagnostic zero
-is not an accepted reset-value model. The following instruction writes
-`old | 0x40`:
+After the twelve range-1 RMWs, both images reach the existing `AOP_CPU` PMGR
+state word at physical `0x308284098`, range 1 `+0x4098`. Its accepted earlier
+transition left target and actual nibbles at 15 (`0x000000ff`). The selected
+table reads that word and requests `0x000020ff`; the state model rejects the
+new bit 13 rather than silently broadening its global control mask:
 
 ```text
-research: read pc=0xfffffc01fc0ee468; write pc=0xfffffc01fc0ee470
-release:  read pc=0xfffffc01fc0ed758; write pc=0xfffffc01fc0ed760
+research: write pc=0xfffffc01fc10b6b0, changed-outside-model=0x00002000
+release:  write pc=0xfffffc01fc10a78c, changed-outside-model=0x00002000
 ```
 
-The persisted research stop records `x0=0x39b4, x1=0, x2=0,
-x3=0xfffffc01fc10b67c`; the release stop records `x0=0x37cb, x1=0, x2=0,
-x3=0xfffffc01fc10a758`. Exact accepted latch lines and boundary registers are
-in `IBOOT_RANGE43_BOUNDARY_RESEARCH.stderr.log:419-425` and
-`IBOOT_RANGE43_BOUNDARY_RELEASE.stderr.log:419-425`. The next implementation
-increment must audit all static references and downstream consumers of this
-word, then either preserve any independently required reset bits or admit an
-explicitly labeled representative. It may accept only `read32;
-write32(old | 0x40)` at this exact address and must not add a completion
-response.
+Runtime identifies the active descriptor at research raw `+0x265cf8` and
+release raw `+0x2638a8`; both encode width 4 and offset `0x4098`. Their tuple
+pointers resolve to research raw `+0x2ee7c8` and release raw `+0x2eba58`, where
+both images contain `(mask,value)=(0x00002000,0x00002000)`. The immediately
+adjacent records apply the same tuple to range-1 offsets `+0x40a0` and
+`+0x8000`, but they have not executed because the first write fails closed.
+
+The next implementation increment should add a per-device bit-13 capability,
+not change `D47_PMGR_STATE_CONTROL_MASK` globally. First admit only the exact
+ordered `AOP_CPU` transaction `read32; write32(old | 0x2000)` after the
+`+0x38060 <- 0x1c` phase, store bit 13 without changing target/actual nibbles,
+and return no completion. Then stop and verify whether the adjacent `AOP2_CPU`
+and `SMC_FABRIC` descriptors execute in the predicted order before extending
+that explicit allowlist. Audit later consumers before assigning a semantic
+name to bit 13.
+
+Boundary logs are
+`IBOOT_AOP_CPU_BOUNDARY_RESEARCH.stderr.log:425-437` and
+`IBOOT_AOP_CPU_BOUNDARY_RELEASE.stderr.log:425-437`. Descriptor/register
+captures are in `IBOOT_AOP_BIT13_TARGET_RESEARCH.lldb.log` and
+`IBOOT_AOP_BIT13_TARGET_RELEASE.lldb.log`.
 
 ## Regressions and controls
 
@@ -368,6 +418,9 @@ After the changes:
 | `IBOOT_RANGE43_DIRECT_REG1` | current direct-boot regression, 303 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE43_DIRECT_REG1.*.log` |
 | `IBOOT_RANGE43_DCP_SEP_FB_REG1` | current DCP + SEP + 828x1792@2 framebuffer regression, 376 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE43_DCP_SEP_FB_REG1.*.log` |
 | `IBOOT_RANGE43_SEPI_STRICT_REG1` | authentic encrypted d47 `sepi` transport, full 7,673,931-byte mapped-container SHA-256 verified, SEP protocol accepted, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE43_SEPI_STRICT_REG1.*.log` |
+| `IBOOT_AOP_DIRECT_REG1` | current direct-boot regression, 303 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_AOP_DIRECT_REG1.*.log` |
+| `IBOOT_AOP_DCP_SEP_FB_REG1` | current DCP + SEP + 828x1792@2 framebuffer regression, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_AOP_DCP_SEP_FB_REG1.*.log` |
+| `IBOOT_AOP_SEPI_STRICT_REG1` | authentic encrypted d47 `sepi` transport, full 7,673,931-byte mapped-container SHA-256 `db0d02a7...28ed817` verified, SEP protocol accepted, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_AOP_SEPI_STRICT_REG1.*.log` |
 
 The ANS smoke is not claimed as a working storage regression: the documented
 ANS path requires `tools/ans/dt_ans_fixup.py`, the ANS firmware region, and a
