@@ -37,7 +37,7 @@
 #      pipeline can already populate Data.
 #
 # Usage:
-#   tools/rootfs/bootstrap_data_volume.sh [all|image|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|normal|verify]
+#   tools/rootfs/bootstrap_data_volume.sh [all|image|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|debug-shell|normal|verify]
 #
 # Env:
 #   SRC   cryptex-merged system volume  (default ~/dvm-artifacts/build/rootfs_cx.dmg)
@@ -452,6 +452,38 @@ phase_marker() {
     restore_stop
 }
 
+# Install a console shell in a disposable child only.  Normal userspace does
+# not expose the restore ramdisk's UART shell, which otherwise makes a simple
+# `ps` or launchctl experiment cost a new instrumented boot.  The System
+# volume is modified by iOS from a restore boot, never mounted by macOS; the
+# parent is immutable and remains the positive-control input.  This shell is a
+# diagnostic accelerator, not valid evidence for a normal-boot result.
+phase_debug_shell() {
+    local parent=${PARENT:?set PARENT to an immutable persistent parent}
+    local child=${OUT_OVL:?set OUT_OVL to a new disposable qcow path}
+    local tag=${TAG:-DVM_DEBUG_SHELL_INSTALL_$$}
+    local plist="$REPO/tools/re/debug-shell.plist"
+    local staged=/private/var/hardware/.dvm-data-seed/debug-shell.plist
+
+    [ -f "$plist" ] || die "missing debug shell plist: $plist"
+    plutil -lint "$plist" >/dev/null || die "invalid debug shell plist"
+    seed_child "$parent" "$child"
+    restore_start "$tag" "$child" "$REPO/firmware/ramdisk.tc"
+    restore_send "$tag" \
+        'mkdir -p /private/var/hardware; mount_apfs /dev/disk1s1 /private/var/hardware; mrc=$?; mkdir -p /private/var/hardware/.dvm-data-seed; echo DVM_DEBUG_MOUNT_RC=$mrc' \
+        'DVM_DEBUG_MOUNT_RC=0'
+    python3 "$REPO/tools/serial.py" "$RESTORE_SOCK" upload "$plist" \
+        --remote-path "$staged" --secs 60 --log "$WORK/$tag.console.log" \
+        --char-delay "$SERIAL_CHAR_DELAY" >/dev/null \
+        || die "$tag debug-shell plist upload failed"
+    restore_send "$tag" \
+        "dst=/private/var/hardware/System/Library/LaunchDaemons/com.apple.dvm-debug-shell.plist; mv '$staged' \"\$dst\"; chmod 644 \"\$dst\"; chown 0:0 \"\$dst\"; sync; test -s \"\$dst\"; rc=\$?; echo DVM_DEBUG_SHELL_INSTALL_RC=\$rc" \
+        'DVM_DEBUG_SHELL_INSTALL_RC=0'
+    restore_stop
+    say "[debug-shell] installed in disposable child=$child"
+    say "[debug-shell] boot with launchd_unsecure_cache=1; never use this child as final evidence"
+}
+
 phase_normal_boot() {
     local parent=${PARENT:?set PARENT to marker child} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_NORMAL}
     say "[normal] parent=$parent child=$child tag=$tag"
@@ -534,8 +566,9 @@ case "$MODE" in
     manifest) phase_manifest ;;
     layout) phase_layout ;;
     marker) phase_marker ;;
+    debug-shell) phase_debug_shell ;;
     normal) phase_normal_boot ;;
     verify) phase_verify ;;
     all)    phase_image; phase_format; phase_seed ;;
-    *) die "usage: $0 [all|image|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|normal|verify]" ;;
+    *) die "usage: $0 [all|image|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|debug-shell|normal|verify]" ;;
 esac

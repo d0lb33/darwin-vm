@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.apple.dvm-debug-shell</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/sh</string>
+        <string>-i</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>POSIXSpawnType</key>
+    <string>Interactive</string>
+    <key>EnablePressuredExit</key>
+    <false/>
+    <key>StandardInputPath</key>
+    <string>/dev/console</string>
+    <key>StandardOutputPath</key>
+    <string>/dev/console</string>
+    <key>StandardErrorPath</key>
+    <string>/dev/console</string>
+    <key>UserName</key>
+    <string>root</string>
+</dict>
+</plist>
