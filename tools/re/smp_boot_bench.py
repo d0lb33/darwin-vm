@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import statistics
+import socket
 import subprocess
 import time
 
@@ -30,9 +31,12 @@ def main():
     parser.add_argument("--migration-sample", action="store_true",
                         help="stop after 100 User-volume dir-stats updates; never wait for completion")
     parser.add_argument("--parent", type=Path)
-    parser.add_argument("--variant", choices=["stock1", "pv2", "pv6"],
+    parser.add_argument("--variant", choices=["stock1", "pv2", "pv4", "pv5", "pv6"],
                         help="run one selected configuration")
+    parser.add_argument("--capture-at", type=int, nargs="+", help="diagnostic CPU captures at elapsed seconds; stops after last capture")
     args = parser.parse_args()
+    if args.capture_at and (not args.migration_sample or any(t < 1 or t >= 180 for t in args.capture_at)):
+        parser.error("--capture-at requires migration mode and times in 1..179")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", args.tag):
         parser.error("invalid tag")
     out = Path("/tmp/dvm") / args.tag
@@ -55,7 +59,7 @@ def main():
     report = {"marker": "100 User-volume dir-stats updates" if args.migration_sample else "Early boot complete", "poll_seconds": .02,
               "qemu_sha256": hashlib.file_digest(qemu.open("rb"), "sha256").hexdigest(),
               "parent": str(parent), "runs": []}
-    variants = {"stock1": (1, False), "pv2": (2, True), "pv6": (6, True)}
+    variants = {"stock1": (1, False), "pv2": (2, True), "pv4": (4, True), "pv5": (5, True), "pv6": (6, True)}
     order = ["stock1", "pv2", "pv6"] if args.migration_sample else [
         "stock1", "pv2", "pv6", "pv6", "pv2", "stock1", "pv2", "stock1", "pv6"]
     if args.variant:
@@ -75,6 +79,12 @@ def main():
                "-fb", "1179x2556", "-fbmode", "graphics",
                "-drive", f"if=none,id=ans,file={disk},format=qcow2",
                "-args", "rootdev=disk1s1 ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort"]
+        captures = sorted(set(args.capture_at or []))
+        if captures:
+            with socket.socket() as sock:
+                sock.bind(("127.0.0.1", 0))
+                port = sock.getsockname()[1]
+            cmd += ["-gdb", f"tcp:127.0.0.1:{port}"]
         run_env = dict(env, **({"DARWIN_SMP_PV": "1"} if pv else {}))
         row = {"variant": name, "command": cmd, "host_load": os.getloadavg(), "seconds": None}
         events = []
@@ -91,6 +101,16 @@ def main():
                         row["error"] = "guest panic"
                         break
                     elapsed = time.monotonic() - start
+                    if captures and elapsed >= captures[0]:
+                        from smp_capture import capture
+                        at = captures.pop(0)
+                        states = capture(port, cpus)
+                        (out / f"{tag}.cpus{at}.json").write_text(json.dumps(states, indent=2))
+                        print(f"{tag} CPU capture at {elapsed:.3f}: " + " ".join(
+                            f"cpu{x['cpu']}={x['pc']}" for x in states), flush=True)
+                        if not captures:
+                            row["stop_reason"] = "diagnostic captures complete"
+                            break
                     if b"Early boot complete" in text and b"BSD root: disk1s1" in text:
                         row.setdefault("early_boot_seconds", elapsed)
                         if not args.migration_sample:

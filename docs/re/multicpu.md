@@ -4,8 +4,9 @@
 CPU power-management adapter. Two CPUs are verified simultaneously executing
 separate userspace workloads.** Display is not a prerequisite. This remains
 experimental: physical ApplePMGR, suspend, hotplug and checkpoint restore are
-not supported by this path. Six-core first-boot migration also failed to make
-sustained metadata progress in two bounded tests; use two cores for that workload.
+not supported by this path. The six-core first-boot migration stall was traced
+to a missing Apple WFE event stream and fixed; two fresh partial migration runs
+now reach 100 User-volume progress events in about 99 seconds each.
 
 Worktree: `/Users/jdolbe1/Downloads/darwin-vm-multicpu`, branch `codex/multicpu`
 in both the parent and nested QEMU repository. Based on parent `487f8aa` and
@@ -217,7 +218,7 @@ trial's complete serial/stderr logs. The other checkout's existing VM was left
 untouched. The results describe this host/session, not an isolated laboratory
 or a Windows host.
 
-## Partial first-boot migration sample (2026-09-04)
+## Partial first-boot migration sample before the WFE fix (2026-09-04)
 
 The user requested an estimate from fresh first-boot migration work, explicitly
 without finishing migration. These tests used fresh qcow2 children of
@@ -258,9 +259,8 @@ run produced sustained progress in this sampled metadata phase before the
 run was observed consuming about 307% host CPU despite this lack of metadata
 progress. This is a repeatable progress failure under this workload, **not a
 measured six-core migration speed or proof that every guest task is stalled**.
-The cause is not yet diagnosed. Two cores are the supported experimental
-recommendation for this workload; six-core early-boot success does not prove
-six-core migration works.
+This was the pre-fix result. The diagnosis and successful correction are
+documented next; the early-boot test alone had missed this failure.
 
 Evidence: `/tmp/dvm/SMP_MIG_PARTIAL1/results.json` and
 `/tmp/dvm/SMP_MIG_PARTIAL6_REPEAT/results.json`, with adjacent full serial and
@@ -274,6 +274,105 @@ the script now omits that rate when fewer than 20 events are available.
 python3 tools/re/smp_boot_bench.py --migration-sample --tag NEW_MIG_SAMPLE
 python3 tools/re/smp_boot_bench.py --migration-sample --variant pv6 --tag NEW_MIG_REPEAT
 ```
+
+## Six-core stackshot stall: diagnosis and fix (2026-09-04)
+
+`SMP_DIAG6_1` captured all six vCPUs at 55, 75 and 95 host seconds, after
+metadata progress stopped. All three snapshots showed the same kernel PCs:
+
+| CPUs | Runtime PC | Identified loop |
+|---|---|---|
+| 0–3 (efficiency cluster) | `0xfffffff02aa70384` | `stackshot_cpu_work_on_queue`, immediately after WFE |
+| 4–5 (performance cluster) | `0xfffffff02aa75c4c` | `stackshot_aux_cpu_entry`, immediately after WFE while waiting for setup |
+
+Identification uses the matching public XNU
+`osfmk/kern/kern_stackshot.c:stackshot_cpu_work_on_queue`,
+`stackshot_aux_cpu_entry`, `stackshot_cpu_preflight`, and disassembly of this
+kernelcache at unslid `0xfffffff00aa70340` / `0xfffffff00aa75be4`.
+Stackshot elects a recommended performance CPU as its main worker; other CPUs
+wait for that worker to populate task queues. The four-core control
+`SMP_DIAG4_CONTROL`, which has no performance cluster, reached 100 metadata
+events in 98.090 seconds. All six CPUs had entered the debugger/stackshot
+rendezvous in the failing case, confirming startup and debugger IPI delivery.
+
+**The missing behavior was the Apple timebase event stream that wakes WFE.**
+The captured register values on every CPU were `AGTCNTKCTL_EL1=0x0f`, while
+architectural `CNTKCTL_EL1` / `CNTHCTL_EL2` were `0x03`. XNU's
+`osfmk/arm64/machine_routines.c:_enable_timebase_event_stream()` deliberately
+enables the event stream in `KERNEL_CNTKCTL_EL1` (Apple AGT on this SoC), and
+separately enables only userspace counter access in architectural CNTKCTL.
+`proc_reg.h:2793–2796` gives EVENTI bits [7:4], direction bit 3, enable bit 2.
+The generated QEMU `AGTCNTKCTL_EL1` accessor at encoding `S3_4_C15_C9_6`
+previously stored the value without connecting it to an event source.
+
+QEMU's WFE helper actually halts the vCPU, and previously consulted only ARM
+architectural event-stream controls. The performance CPUs had no pending timer
+interrupt (`CNTHV_CTL_EL2=1`); the efficiency CPUs' timers were pending
+(`CNTHV_CTL_EL2=5`). That accounts for sleeping performance workers and busy
+waiting on the efficiency workers. A masked WFE needed the enabled Apple event
+source to return and recheck the shared stackshot state.
+
+The fix adds an optional machine-provided event deadline to ARMCPU's WFE event
+calculation. `apple_regs.c:apple_event_stream_deadline_ns` computes the next
+selected counter-bit edge from AGTCNTKCTL, AGTCNTVOFF and the emulated counter
+frequency, returning an absolute virtual-clock nanosecond deadline. QEMU's
+existing WFE timer then delivers the wakeup. Rising/falling edges, disabled
+state, nonzero virtual offsets and overflow saturation are handled. The
+architectural control registers retain their separate values. WFI behavior
+and the guest stackshot/migration algorithms are unchanged. The already saved
+Apple register backing remains authoritative; the callback is machine
+configuration, not additional guest state. SMP restore is still unverified.
+
+No new kernel patch was needed. The same hash-pinned virtual CPU adapter was
+used before and after this emulator correction.
+
+### Runtime verification
+
+- `SMP_EVENT6_FIXED`: 100 User-volume events in **98.778 s**, with 2.531 events/s
+  over events 20–100; zero XNU panics.
+- `SMP_EVENT6_REPEAT`: independent fresh child, 100 events in **98.616 s**, with
+  2.464 events/s over events 20–100; zero XNU panics.
+- `SMP_EVENT2_COMPARE`: two CPUs on the same corrected build, independent fresh
+  child, 100 events in **102.418 s**, with 2.604 events/s over events 20–100;
+  zero XNU panics.
+- All three tests stop at the same partial-work limit. None finishes migration.
+- `python3 tools/re/smp_smoke.py --wfe` runs 16 masked-IRQ WFE waits for each of
+  falling edges, rising edges and a nonzero virtual offset. All 48 wakeups
+  complete; after disabling AGT events, the failure sentinel stays zero and
+  the CPU remains at the final WFE. Result `(16,16,16,0,0,0,0x600d)`.
+- Local and cross-cluster CPU startup/atomic/IPI tests still pass; the normal
+  one-core restore boot reaches its shell with zero panics. The two-core
+  userspace test still captures simultaneous EL0 execution with distinct
+  stacks, stops its workloads and obtains a responsive shell, with zero panics.
+- All 18 host tests and script syntax checks pass.
+
+This fixes the observed six-core progress failure. It does not establish linear
+speedup with CPU count or completion of every later migration/display phase.
+Six cores reach the milestone about 3.6% sooner than the corrected two-core run,
+but their events 20–100 throughput is slightly lower (2.46–2.53 versus 2.60/s).
+These few samples support roughly comparable performance, not a robust claim
+that six cores accelerate the migration work itself. More CPUs do not guarantee
+lower elapsed time for serial work or work with synchronization overhead.
+
+Artifacts: `/tmp/dvm/SMP_DIAG6_1/0_pv6.cpus{55,75,95}.json`,
+`/tmp/dvm/SMP_EVENT6_FIXED/results.json`,
+`/tmp/dvm/SMP_EVENT6_REPEAT/results.json`,
+`/tmp/dvm/SMP_EVENT2_COMPARE/results.json`, and
+`/tmp/dvm/SMP_EVENT_{WFE,LOCAL,GLOBAL}_TEST.log`, `SMP_EVENT_USER2.log`,
+`SMP_EVENT_SINGLE.log`, `SMP_EVENT_HOST_FINAL.log`. The debugger single-step
+wake experiment `SMP_WAKE6_DIAG` timed out and is not part of the causal proof.
+
+To capture read-only CPU/register/frame snapshots in an owned partial probe:
+
+```sh
+python3 tools/re/smp_boot_bench.py --migration-sample --variant pv6 \
+  --capture-at 55 75 95 --tag NEW_SMP_DIAG
+```
+
+Capture pauses/resumes the guest and ends the run after the final capture;
+use ordinary migration-sample mode for timing. The diagnostic mode also accepts
+`pv4` and `pv5` to isolate cluster topology. Every run uses its own fresh disk
+child and stops only its owned QEMU process.
 
 ## Remaining limits
 

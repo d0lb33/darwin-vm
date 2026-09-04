@@ -19,7 +19,9 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cross-cluster", action="store_true",
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--wfe", action="store_true", help="test Apple event wakeups with all interrupts masked")
+    modes.add_argument("--cross-cluster", action="store_true",
                         help="run CPU0/CPU4 with global IPIs in a five-CPU machine")
     options = parser.parse_args()
     sys.path.insert(0, str(ROOT))
@@ -43,11 +45,11 @@ def main():
                                  text=True, timeout=5)
         assert invalid.returncode != 0 and expected in invalid.stderr, invalid.stderr
     print("PASS: conflicting guest CPU boot arguments rejected", flush=True)
-    tag = "SMP_MACHINE_GLOBAL" if options.cross_cluster else "SMP_MACHINE"
+    tag = "SMP_MACHINE_WFE" if options.wfe else "SMP_MACHINE_GLOBAL" if options.cross_cluster else "SMP_MACHINE"
     obj = pathlib.Path(f"/tmp/dvm/{tag}.o")
     definitions = ["-DSMP_CROSS_CLUSTER"] if options.cross_cluster else []
     subprocess.run(["clang", "-arch", "arm64", "-c"] + definitions + [
-                    str(ROOT / "tools/re/smp_smoke.S"), "-o", str(obj)],
+                    str(ROOT / ("tools/re/smp_wfe_smoke.S" if options.wfe else "tools/re/smp_smoke.S")), "-o", str(obj)],
                    check=True)
     data = obj.read_bytes()
     count = struct.unpack_from("<I", data, 16)[0]
@@ -96,9 +98,13 @@ def main():
             result = struct.unpack("<8I", bytes.fromhex(reply))
             if result[6] or time.monotonic() >= deadline:
                 break
-        print("go, done0, done1, atomic_count, fiq0, fiq1, verdict:", result[:7], flush=True)
-        assert result[:7] == (1, 1, 1, 40000, 1, 1, 0x600D), result
-        print("PASS: secondary reset, shared-memory atomics and bidirectional FIQ IPIs", flush=True)
+        print("result words:", result[:7], flush=True)
+        if options.wfe:
+            assert result[:7] == (16, 16, 16, 0, 0, 0, 0x600D), result
+            print("PASS: WFE wakes with IRQs masked, both event edges and virtual offset; disabled stream stays asleep", flush=True)
+        else:
+            assert result[:7] == (1, 1, 1, 40000, 1, 1, 0x600D), result
+            print("PASS: secondary reset, shared-memory atomics and bidirectional FIQ IPIs", flush=True)
         remote.command("D")
     finally:
         if remote:
