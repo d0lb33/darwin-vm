@@ -1,13 +1,45 @@
 # Multicore / CPU-cache handoff, 2026-09-04
 
+## Latest result and what to pull
+
+**The warm-boot SKS blocker below is fixed** in QEMU commit `480870d` on
+`origin/codex/multicpu-warm-display`. The same branch in the parent repository
+records that submodule revision, the reusable warm-boot probe and the evidence.
+Fetch it in both repositories:
+
+```sh
+git fetch origin codex/multicpu-warm-display
+git -C qemu-sptm fetch origin codex/multicpu-warm-display
+```
+
+Merge into saved display work in a separate checkout, preserving any newer
+display fixes. If the display agent already integrated the CPU-only branch
+and wants only the new SKS change, cherry-pick **QEMU `480870d` inside
+qemu-sptm**, then record the resulting submodule revision in its parent repo.
+This avoids reimporting our earlier snapshot of its display changes.
+
+The fix accepts the captured **Data protection-class 2-to-3 transfer**, keeping
+the existing request-format and volume checks. All 19 SKS tests and 18 host
+tests pass. A fresh six-CPU boot accepted the request at **12.56 seconds**,
+completed 40 such transfers and ran for **300 seconds with zero kernel panics
+or SKS timeout strikes**. DCP handshakes began at 86.03 seconds. The remaining
+visible behavior was repeated display power cycling and a black framebuffer;
+Setup migration completion and a rendered welcome screen are not established.
+See [capture, fix and runtime evidence](../re/sks-data-class2-transfer.md).
+
+For reference, before the fix, one matched warm-boot run per CPU count with
+the cache enabled reached the rejection at **15.00 seconds (one CPU)** versus
+**12.45 seconds (six CPUs)**. This short boundary is not a full-boot benchmark.
+Evidence: `/tmp/dvm/SMP_WARM_TIMING_1V6/results.json`.
+
 ## Branches
 
 Both repositories use `origin` on GitHub under `d0lb33`:
 
 | Branch in darwin-vm and qemu-sptm | Contents |
 | --- | --- |
-| `codex/multicpu` | CPU work only: experimental 2–6 CPUs, WFE event-stream fix, PAuth mask cache, and fast-build/probe tools. Parent `24ad2da`, QEMU `d71bf46`. Prefer this when merging into the display agent's ongoing work. |
-| `codex/multicpu-warm-display` | The above plus a snapshot of the display checkout's uncommitted QEMU fixes used for the warm-boot control. This is an integration/test branch, not a replacement for newer display work. |
+| `codex/multicpu` | CPU work only: experimental 2–6 CPUs, WFE event-stream fix, PAuth mask cache, and fast-build/probe tools. Parent `24ad2da`, QEMU `d71bf46`. Does not include the new SKS fix. |
+| `codex/multicpu-warm-display` | CPU work plus the display-source snapshot, new SKS fix `480870d`, warm-boot probe and latest evidence. This is an integration/test branch, not a replacement for newer display work. |
 
 Fetch the desired branch in **both** repositories. Preserve/commit the display
 agent's own work before merging, resolve the QEMU merge in its own repository,
@@ -18,7 +50,8 @@ The integration snapshot includes DCP AFK state acknowledgements, SEP/SKS
 DER/class/key-transfer fixes, incoming run-state normalization and extra ARM
 timer restoration. It includes the untracked AFK header/test. It does not copy
 the display agent's unrelated parent-repository tools, assets or documentation.
-These are imported changes, not new device-model fixes by the CPU workstream.
+Those snapshot changes were imported as-is. The subsequent Data 2-to-3 fix
+was implemented and validated separately after the user's explicit request.
 
 ## Running six CPUs with the cache
 
@@ -61,7 +94,7 @@ Cold boot to initialize six CPUs; do not restore a one-CPU RAM checkpoint with
 `-smp 6`. Multicore checkpoint restore, suspend and hotplug remain unvalidated.
 The code retains portable TCG paths; Windows was not tested here.
 
-## Warm-boot blocker for the display agent
+## Historical control before the SKS fix
 
 Parent: `/tmp/dvm/data-seed/display-warm1.qcow2`, SHA256
 `07631b3182f9bc6106975bb5e4f9adcf356256ccfb6f9e330d7190c889115c5d`.
@@ -79,7 +112,8 @@ It reached Early boot complete at 9.82 host seconds and the identical rejection
 at 14.24 seconds. This reproduces the blocker without multicore or mask reuse;
 it does not independently test every compiler/CPU change. The six-core log
 also records timeout strikes 0 and 1 before the probe froze it. No device-model
-fix was attempted. No Setup welcome screen was established.
+fix was attempted in these initial controls. The later fix and positive boot
+are recorded at the top of this page. No Setup welcome screen was established.
 
 Evidence: `/tmp/dvm/SMP_WARM_DISPLAY6_1/{comparison,source-snapshot,launch}.json`,
 its serial/stderr logs, and `/tmp/dvm/SMP_WARM_CONTROL1_1/{result,launch}.json`
