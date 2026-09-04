@@ -34,9 +34,13 @@ def main():
     parser.add_argument("--variant", choices=["stock1", "pv2", "pv4", "pv5", "pv6"],
                         help="run one selected configuration")
     parser.add_argument("--capture-at", type=int, nargs="+", help="diagnostic CPU captures at elapsed seconds; stops after last capture")
+    parser.add_argument("--storage-profile", action="store_true", help="enable aggregate ANS request timings")
+    parser.add_argument("--host-sample-at", type=int, nargs="+", help="sample owned QEMU host stacks for five seconds at these elapsed times")
     args = parser.parse_args()
     if args.capture_at and (not args.migration_sample or any(t < 1 or t >= 180 for t in args.capture_at)):
         parser.error("--capture-at requires migration mode and times in 1..179")
+    if args.host_sample_at and any(t < 1 or t >= 175 for t in args.host_sample_at):
+        parser.error("--host-sample-at times must be in 1..174")
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", args.tag):
         parser.error("invalid tag")
     out = Path("/tmp/dvm") / args.tag
@@ -86,7 +90,14 @@ def main():
                 port = sock.getsockname()[1]
             cmd += ["-gdb", f"tcp:127.0.0.1:{port}"]
         run_env = dict(env, **({"DARWIN_SMP_PV": "1"} if pv else {}))
+        if args.storage_profile:
+            run_env["DARWIN_ANS_PROFILE"] = "1"
         row = {"variant": name, "command": cmd, "host_load": os.getloadavg(), "seconds": None}
+        row["storage_profile"] = args.storage_profile
+        samples = sorted(set(args.host_sample_at or []))
+        samplers = []
+        host_stats = []
+        next_host_stat = 0
         events = []
         seen = set()
         user_events = []
@@ -101,6 +112,17 @@ def main():
                         row["error"] = "guest panic"
                         break
                     elapsed = time.monotonic() - start
+                    if args.storage_profile and elapsed >= next_host_stat:
+                        host_stats.append({"seconds": elapsed, "ps": subprocess.run(
+                            ["ps", "-p", str(proc.pid), "-o", "pid=,pcpu=,time=,rss="],
+                            capture_output=True, text=True, timeout=2).stdout.strip()})
+                        next_host_stat = elapsed + 5
+                    if samples and elapsed >= samples[0]:
+                        at = samples.pop(0)
+                        samplers.append(subprocess.Popen(
+                            ["sample", str(proc.pid), "5", "10", "-file", str(out / f"{tag}.host{at}.txt")],
+                            stdout=subprocess.DEVNULL, stderr=err))
+                        print(f"{tag}: host stack sample at {elapsed:.3f}s", flush=True)
                     if captures and elapsed >= captures[0]:
                         from smp_capture import capture
                         at = captures.pop(0)
@@ -136,9 +158,15 @@ def main():
                         break
                     time.sleep(.02)
             finally:
+                for sampler in samplers:
+                    if sampler.poll() is None:
+                        sampler.terminate()
+                    sampler.wait(timeout=10)
                 if proc.poll() is None:
                     proc.terminate()
                 proc.wait(timeout=10)
+        if args.storage_profile:
+            row["host_stats"] = host_stats
         if args.migration_sample:
             row["metadata_events"] = events
             row["user_update_count"] = len(user_events)

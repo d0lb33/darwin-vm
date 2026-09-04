@@ -374,6 +374,11 @@ use ordinary migration-sample mode for timing. The diagnostic mode also accepts
 `pv4` and `pv5` to isolate cluster topology. Every run uses its own fresh disk
 child and stops only its owned QEMU process.
 
+For the remaining runtime cost after this fix, see
+[storage versus CPU profiling](storage-performance.md): two bounded fresh-child
+probes put ANS request service at about 2.3% of elapsed time, with substantial
+TCG helper overhead and the performance cluster largely idle in host samples.
+
 ## Remaining limits
 
 - Deferred IPIs currently take the immediate path; retract and no-wake are
