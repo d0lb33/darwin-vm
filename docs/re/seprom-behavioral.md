@@ -41,7 +41,7 @@ files were attributed. The malformed `/bin/echo` input and the authentic
 `stg1` object are both negative `-sepfw` controls: QEMU rejects each rather
 than accepting a file by name.
 
-## First implemented boundary
+## Implemented transport and strict boot boundary
 
 Direct SPTM boot now has an opt-in `-sepfw FILE` input. The loader:
 
@@ -52,8 +52,11 @@ Direct SPTM boot now has an opt-in `-sepfw FILE` input. The loader:
 3. writes every container byte into guest memory and leaves the historical
    2 MiB zero region unchanged when `-sepfw` is absent; and
 4. enables a ROM-side BOOT_IMG4 check that reads the AP-supplied firmware DVA
-   through `dart-sep` and refuses to reply unless that mapped buffer has the
-   same `IM4P/sepi` envelope.
+   through `dart-sep`, verifies the outer DER length, and streams the complete
+   mapped container through SHA-256; and
+5. requires the exact observed d47 sequence `GET_STATUS(1)`, `BOOT_TZ0`,
+   `GET_STATUS(2)`, `BOOT_IMG4(tag=1,param=0x20)`. Invalid order or fields,
+   resume-with-firmware, and unimplemented ART/TMM/patch inputs get no reply.
 
 This is deliberately a transport and protocol validation boundary, not a
 signature, decryption, or execution claim. `-sepfw` is not accepted with
@@ -64,52 +67,68 @@ The frozen-guest byte witness copied all 7,673,931 bytes back from physical
 `0x10015d70000`; its SHA-256 is the same
 `db0d02a7e3c44e1176b3bba9015b12579d7ff8087967f82a4686cf06828ed817`
 as the extracted file. In the live boot, AppleSEPBooter passed firmware page
-`0x1000000c`; the strict model translated DVA `0x1000000c000`, verified the
-envelope, and only then emitted reply opcode 106:
+`0x1000000c`; the strict model translated DVA `0x1000000c000`, verified all
+7,673,931 bytes, and only then emitted reply opcode 106:
 
 ```text
 darwin: preloaded encrypted SEP firmware IM4P at 0x10015d70000 (7673931 bytes)
-sep(SEP): ROM: verified mapped IM4P/sepi envelope at dva 0x1000000c000
+sep(SEP): ROM: verified complete mapped IM4P/sepi at dva 0x1000000c000 (7673931 bytes, SHA-256 db0d02a7e3c44e1176b3bba9015b12579d7ff8087967f82a4686cf06828ed817)
 sep(SEP): ROM: IMG4 accepted (firmware page 0x1000000c, param 0x20); sepOS "running"
 ```
 
-Evidence is in `/tmp/dvm/iboot-main/probe/SEP_REAL_FW_FULL1.stderr.log` and
-`SEP_REAL_FW_FULL1.serial.log`. That disposable-overlay run reached
+The pre-change wire trace at
+`/tmp/dvm/iboot-main/probe/SEP_BOOTSEQ_TRACE1.stderr.log:59-99` records every
+request/reply in the enforced order. The strict positive is
+`SEP_STRICT_FULLHASH_POS1.stderr.log:46-78`. Two runtime negative controls
+prove that this is not a header-only check:
+
+- `SEP_STRICT_DER_NEG1.stderr.log:95-97` passes a 32-byte `IM4P/sepi` prefix;
+  QEMU computes the declared DER size as 7,673,931, compares it with the
+  32-byte preload, and refuses BOOT_IMG4.
+- `SEP_STRICT_HASH_NEG1.stderr.log:109-111` changes one word at physical
+  preload address `0x10015d70020` after QEMU records the source identity. The
+  AP maps the changed container, the envelope and length still pass, but its
+  SHA-256 is
+  `07c9b086412c57ff3ece1b1bb093880acac6b6d6d0bef0868f02367f5aeb9688`;
+  QEMU logs both hashes and refuses BOOT_IMG4 without replying.
+
+The disposable-overlay regression is in
+`SEP_STRICT_STATE_FULL1.stderr.log` and `SEP_STRICT_STATE_FULL1.serial.log`.
+It reached
 `SEP accepted Tz0`, `SEP accepted IMG4`, `SEP/OS is alive`, registered
 AppleSEPManager, logged `Early boot complete`, and reached the restore shell
-with zero XNU panics. The matched `SEP_DEFAULT_FULL1` disposable-overlay run,
-without `-sepfw`, reached the same shell and early-boot milestone with zero
-panics, confirming that the compatibility default retains its prior zero-region
-and protocol behavior. The gated iBoot regression remains at its existing
-first unsupported access:
+with zero XNU panics. The matched `SEP_STRICT_STATE_DEFAULT1` run, without
+`-sepfw`, reached the same shell and early-boot milestone with zero panics,
+confirming that the compatibility default retains its prior zero-region and
+permissive protocol behavior. The gated iBoot regression remains at its
+existing first unsupported access:
 
 ```text
 unimp: read  0x300040000 (pmgr[2]+0x40000) -> 0x0 size 4 pc=0xfffffc01fc10b610
 ```
 
 That log is
-`/tmp/dvm/iboot-main/probe/IBOOT_SEPFW_GATED_REGRESSION1.stderr.log`.
+`/tmp/dvm/iboot-main/probe/IBOOT_SEP_STRICT_REGRESSION1.stderr.log`.
 
 ## Honest boundary and next implementation
 
-QEMU still does not execute SEPROM or sepOS. After validating BOOT_IMG4 it
-continues with the existing AP-visible protocol model. Therefore the current
-behavior is comparable at the AP/ROM message boundary, but not internally or
-cryptographically equivalent to a d47 SEP.
+QEMU still does not execute SEPROM or sepOS. After the state and complete-byte
+checks pass, it continues with the existing AP-visible protocol model.
+Therefore the current behavior is comparable at the observed AP/ROM message
+boundary, but not internally or cryptographically equivalent to a d47 SEP.
 
-The next independently justified SEPROM work is a strict boot state machine:
-
-- parse and bounds-check the complete unencrypted IM4P envelope and its
-  metadata, retaining the full expected container length;
-- require the evidenced ordering `GET_STATUS(1)`, `BOOT_TZ0`,
-  `GET_STATUS(2)`, optional ART/patch operations, then `BOOT_IMG4`;
-- validate BOOT_IMG4 type/slot and the entire AP-mapped container identity,
-  not only its envelope prefix; and
-- model explicit ROM panic/refusal results for each invalid transition from
-  AppleSEPBooter's decoder rather than returning a generic success.
+The next independently justified SEPROM work is semantic parsing of the
+unencrypted Image4 property dictionary. A bounded implementation should decode
+DER lengths and property records without trusting offsets, require the d47
+`arms`, `tz0s`, `tz1s`, and memory-map constraints recorded above, and fail
+closed on duplicate, missing, or out-of-range values. `stg1`/BOOT_PATCH and
+ART/TMM must remain refused until a trace actually selects those paths and
+their buffer contracts are attributed.
 
 Decryption and instruction execution are a later, separate boundary. They
 require either a legitimately obtained usable key or an independently
 implemented high-level sepOS replacement. Lack of a physical device does not
-block the state-machine work above, because its AP side, Image4 metadata, and
-failure handling are all observable from the available firmware and kernel.
+block that metadata work, because the Image4 envelope and properties are
+available before payload decryption. Separately, iBoot still must cross its
+current PMGR range-2 boundary before it can own the `SEPFW` placement and
+handoff that direct boot currently performs.
