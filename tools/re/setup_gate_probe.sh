@@ -72,6 +72,7 @@ STOP_FILE="/tmp/dvm/$TAG.stop"
 EVENT_DIR="/tmp/dvm/$TAG.events"
 WATCH_LOG="/tmp/dvm/$TAG.watch.log"
 QEMU_PID_FILE="/tmp/dvm/$TAG.qemu.pid"
+CHECKPOINT_LAUNCH_MANIFEST="${CHECKPOINT_LAUNCH_MANIFEST-}"
 PROBE_PID=""; LLDB_PID=""; WATCH_PID=""; FINISHED=0
 
 [[ "$TAG" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "setup_gate_probe: unsafe tag: $TAG" >&2; exit 2; }
@@ -128,6 +129,10 @@ fi
 if [[ ! -e "$CHILD" ]]; then
     "$REPO/qemu-sptm/build/qemu-img" create -f qcow2 -F qcow2 -b "$PARENT" "$CHILD" || exit 1
 fi
+CHECKPOINT_ARGS=()
+if [[ -n "$CHECKPOINT_LAUNCH_MANIFEST" ]]; then
+    CHECKPOINT_ARGS=(--launch-manifest "$CHECKPOINT_LAUNCH_MANIFEST")
+fi
 rm -f "$SOCK" "$LLDB_LOG" "$STOP_FILE" "$WATCH_LOG" "$QEMU_PID_FILE"
 rm -rf -- "$EVENT_DIR"
 
@@ -140,7 +145,7 @@ DARWIN_DCP_IOMFB_OUT='A401=01,A000=01,A454=01000000,A033=41524742000000000000000
 DARWIN_DCP_IOMFB_CB='D120::4,D586:9b040000fc090000:4' \
 "$REPO/tools/probe.sh" --dtree "$DTREE" --tc "$TC" --mem 12G --secs "$SECS" --tag "$TAG" \
     --bootargs "$BOOTARGS" --uart-socket "/tmp/dvm/$TAG.uart.sock" --stop-file "$STOP_FILE" \
-    --pid-file "$QEMU_PID_FILE" --keep -- \
+    --pid-file "$QEMU_PID_FILE" "${CHECKPOINT_ARGS[@]}" --keep -- \
     -S -fb 1179x2556 -fbmode graphics \
     -drive "if=none,id=ans,file=$CHILD,format=qcow2" -gdb "tcp::$GDB_PORT" \
     > "/tmp/dvm/$TAG.probe.out" 2>&1 &

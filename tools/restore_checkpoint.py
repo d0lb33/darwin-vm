@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""Restore a darwin-vm checkpoint into a new QEMU and fresh qcow2 child."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import time
+from pathlib import Path
+
+from checkpoint_common import (
+    HMP, SAFE_TAG, atomic_json, parse_migration_status, parse_pc, pid_alive,
+    restore_argv, sha256, serial_hex_clock_bounds, sptm_panic_message,
+    verify_backing_chain, wait_for_path,
+)
+
+
+BOOT_PATTERNS = ("Darwin Kernel Version", "Darwin Bootstrapper Version", "launchd[1]")
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("manifest", type=Path)
+    parser.add_argument("--tag", required=True)
+    parser.add_argument("--gdb-port", type=int)
+    parser.add_argument("--observe-seconds", type=int, default=120)
+    parser.add_argument("--out", type=Path)
+    args = parser.parse_args()
+    if not SAFE_TAG.fullmatch(args.tag):
+        parser.error("--tag must use 1-64 letters, digits, dots, underscores or dashes")
+    if args.observe_seconds < 0:
+        parser.error("--observe-seconds must be non-negative")
+
+    manifest = json.loads(args.manifest.read_text())
+    if manifest.get("format") != "darwin-vm-external-checkpoint-v1":
+        raise RuntimeError("unsupported checkpoint manifest format")
+    state = Path(manifest["vmstate"]["path"])
+    source_disk = Path(manifest["disk"]["path"])
+    if sha256(state) != manifest["vmstate"]["sha256"]:
+        raise RuntimeError("VM-state hash mismatch")
+    if sha256(source_disk) != manifest["disk"]["sha256"]:
+        raise RuntimeError("immutable checkpoint disk hash mismatch")
+    if source_disk.stat().st_mode & 0o222:
+        raise RuntimeError("checkpoint disk has regained write permission")
+    verify_backing_chain(manifest["disk"]["backing_chain"])
+
+    out = (args.out or args.manifest.resolve().parent / "restores" / args.tag).resolve()
+    monitor = Path("/tmp/dvm") / f"{args.tag}.restore.sock"
+    uart = Path("/tmp/dvm") / f"{args.tag}.restore.uart.sock"
+    pid_file = out / "qemu.pid"
+    serial = out / "serial.log"
+    stderr = out / "qemu.stderr.log"
+    disk = out / "disk.qcow2"
+    report_path = out / "restore-report.json"
+    for path in (monitor, uart):
+        if path.exists():
+            raise RuntimeError(f"refusing to reuse existing socket path {path}")
+
+    qemu = Path(manifest["qemu_argv"][0]).resolve()
+    qemu_img = qemu.with_name("qemu-img")
+    expected_qemu = manifest["qemu_inputs"].get(str(qemu), {}).get("sha256")
+    if expected_qemu and sha256(qemu) != expected_qemu:
+        raise RuntimeError("QEMU binary differs from the checkpoint source")
+    for name, expected in manifest["qemu_inputs"].items():
+        path = Path(name)
+        if not path.is_file() or sha256(path) != expected["sha256"]:
+            raise RuntimeError(f"QEMU input differs from checkpoint source: {path}")
+    # Preserve the restore tag when immutable inputs fail verification.
+    out.mkdir(parents=True, exist_ok=False, mode=0o700)
+    subprocess.run([
+        str(qemu_img), "create", "-f", "qcow2", "-F", "qcow2",
+        "-b", str(source_disk), str(disk),
+    ], check=True)
+
+    argv = restore_argv(
+        manifest["qemu_argv"], source_disk, disk, monitor, serial, uart,
+        state, args.gdb_port,
+    )
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("DARWIN_") and not key.startswith("GXFSTAT_")
+    }
+    env.update(manifest.get("qemu_env", {}))
+    started = time.monotonic()
+    stderr_file = stderr.open("wb")
+    proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL, stderr=stderr_file,
+                            env=env, start_new_session=True)
+    pid_file.write_text(f"{proc.pid}\n", encoding="ascii")
+    try:
+        wait_for_path(monitor, time.monotonic() + 120)
+        hmp = HMP(monitor)
+        deadline = time.monotonic() + 120
+        while True:
+            if proc.poll() is not None:
+                raise RuntimeError(f"restored QEMU exited with status {proc.returncode}")
+            status = hmp.command("info status")
+            migration = hmp.command("info migrate -a")
+            migration_status = parse_migration_status(migration)
+            if "paused" in status and migration_status == "completed":
+                break
+            if migration_status in {"failed", "cancelled"}:
+                raise RuntimeError(migration)
+            if time.monotonic() >= deadline:
+                raise RuntimeError(
+                    "restored QEMU did not finish incoming migration in the "
+                    f"paused state: {status}\n{migration}"
+                )
+            time.sleep(0.2)
+        registers = hmp.command("info registers")
+        restored_pc = parse_pc(registers)
+        (out / "pre-resume-registers.txt").write_text(registers + "\n")
+        if restored_pc != manifest["source_pc"]:
+            raise RuntimeError(
+                f"restored PC {restored_pc} != checkpoint PC {manifest['source_pc']}"
+            )
+        stderr_before_resume = stderr.stat().st_size if stderr.exists() else 0
+        serial_before_resume = serial.stat().st_size if serial.exists() else 0
+        restore_seconds = time.monotonic() - started
+        hmp.command("cont")
+        peak_rss_kib = 0
+        observation_started = time.monotonic()
+        observe_deadline = time.monotonic() + args.observe_seconds
+        serial_scan_offset = serial_before_resume
+        serial_scan_tail = b""
+        panic_seen = False
+        while time.monotonic() < observe_deadline:
+            if proc.poll() is not None:
+                raise RuntimeError(f"restored QEMU exited with status {proc.returncode}")
+            rss = subprocess.check_output(
+                ["ps", "-p", str(proc.pid), "-o", "rss="], text=True
+            ).strip()
+            if rss:
+                peak_rss_kib = max(peak_rss_kib, int(rss))
+            if serial.exists() and serial.stat().st_size > serial_scan_offset:
+                with serial.open("rb") as serial_file:
+                    serial_file.seek(serial_scan_offset)
+                    new_serial = serial_file.read()
+                serial_scan_offset += len(new_serial)
+                scan = serial_scan_tail + new_serial
+                if b"panic(cpu" in scan:
+                    panic_seen = True
+                    break
+                serial_scan_tail = scan[-32:]
+            time.sleep(min(0.5, observe_deadline - time.monotonic()))
+        observed_seconds = time.monotonic() - observation_started
+        hmp.command("stop")
+        after_registers = hmp.command("info registers")
+        after_pc = parse_pc(after_registers)
+        sptm_panic = sptm_panic_message(hmp, after_registers)
+        (out / "post-observation-registers.txt").write_text(after_registers + "\n")
+        serial_bytes = serial.read_bytes()[serial_before_resume:] if serial.exists() else b""
+        serial_text = serial_bytes.decode(errors="replace")
+        repeated = [pattern for pattern in BOOT_PATTERNS if pattern in serial_text]
+        qemu_bytes = stderr.read_bytes()[stderr_before_resume:] if stderr.exists() else b""
+        qemu_text = qemu_bytes.decode(errors="replace")
+        serial_clock_first, serial_clock_last = serial_hex_clock_bounds(serial_text)
+        source_clock_last = manifest.get("source_serial_clock_last")
+        traffic = {
+            "ans_reads": len(re.findall(r"^ans\([^\n]*\): READ\s", qemu_text,
+                                        re.MULTILINE)),
+            "ans_writes": len(re.findall(r"^ans\([^\n]*\): WRITE\s", qemu_text,
+                                         re.MULTILINE)),
+            "sks_replies": len(re.findall(r"^sep\([^\n]*\): sks code .* replied with ",
+                                          qemu_text, re.MULTILINE)),
+            "dcp_messages": len(re.findall(r"^(?:dcp:|afk\()", qemu_text,
+                                           re.MULTILINE)),
+            "iomfb_messages": len(re.findall(r"^iomfb:", qemu_text,
+                                             re.MULTILINE)),
+        }
+        first_panic = next((line for line in serial_text.splitlines()
+                            if "panic(cpu" in line), "")
+        acceptance = {
+            "different_qemu_process": proc.pid != manifest["source_pid_terminated"],
+            "exact_pc_before_resume": restored_pc == manifest["source_pc"],
+            "execution_progressed": after_pc != restored_pc,
+            "no_repeated_boot_banner": not repeated,
+            "no_xnu_panic": not first_panic,
+            "no_sptm_panic": not sptm_panic,
+            "post_resume_serial_activity": bool(serial_bytes),
+            "serial_clock_continued": (
+                source_clock_last is not None and serial_clock_first is not None and
+                serial_clock_last is not None and
+                serial_clock_first >= source_clock_last and
+                serial_clock_last >= serial_clock_first
+            ),
+            "ans_read_and_write_traffic": bool(traffic["ans_reads"] and
+                                               traffic["ans_writes"]),
+            "sks_completed_request": bool(traffic["sks_replies"]),
+            "dcp_and_iomfb_traffic": bool(traffic["dcp_messages"] and
+                                          traffic["iomfb_messages"]),
+        }
+        report = {
+            "format": "darwin-vm-restore-report-v1",
+            "tag": args.tag,
+            "source_manifest": str(args.manifest.resolve()),
+            "qemu_pid": proc.pid,
+            "monitor": str(monitor),
+            "uart": str(uart),
+            "disk_child": str(disk),
+            "source_pc": manifest["source_pc"],
+            "restored_pc": restored_pc,
+            "pc_after_observation": after_pc,
+            "pc_match_witness": restored_pc == manifest["source_pc"],
+            "execution_progress_witness": after_pc != restored_pc,
+            "restore_seconds": round(restore_seconds, 3),
+            "peak_rss_kib": peak_rss_kib,
+            "disk_child_bytes": disk.stat().st_size,
+            "observation_seconds_requested": args.observe_seconds,
+            "observation_seconds_actual": round(observed_seconds, 3),
+            "observation_ended_on_panic": panic_seen,
+            "qemu_alive": pid_alive(proc.pid),
+            "serial_bytes_before_resume": serial_before_resume,
+            "serial_bytes_after_resume": len(serial_bytes),
+            "qemu_stderr_bytes_before_resume": stderr_before_resume,
+            "qemu_stderr_bytes_after_resume": len(qemu_bytes),
+            "serial_clock": {
+                "source_last": source_clock_last,
+                "restore_first": serial_clock_first,
+                "restore_last": serial_clock_last,
+            },
+            "repeated_boot_patterns": repeated,
+            "first_panic": first_panic,
+            "sptm_panic": sptm_panic,
+            "traffic_counts": traffic,
+            "acceptance_witnesses": acceptance,
+            "argv": argv,
+        }
+        atomic_json(report_path, report)
+        summary = {
+            "report": str(report_path), "qemu_pid": proc.pid,
+            "restored_pc": restored_pc,
+            "restore_seconds": round(restore_seconds, 3),
+            "serial_bytes": report["serial_bytes_after_resume"],
+            "repeated_boot_patterns": repeated,
+            "first_panic": report["first_panic"],
+            "sptm_panic": sptm_panic,
+            "acceptance_witnesses": acceptance,
+            "guest_left_running": not (first_panic or sptm_panic),
+        }
+        if first_panic or sptm_panic:
+            # A panicked restore is not useful to leave consuming host memory.
+            # Reap only the child whose argv and PID this invocation owns.
+            hmp.command("quit")
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.terminate()
+                proc.wait(timeout=10)
+            print(json.dumps(summary, indent=2))
+            return 1
+        hmp.command("cont")
+        print(json.dumps(summary, indent=2))
+        return 0
+    except Exception:
+        # Reap only the exact child this invocation created.
+        if proc.poll() is None:
+            try:
+                HMP(monitor, timeout=5).command("quit")
+            except Exception:
+                proc.terminate()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        raise
+    finally:
+        stderr_file.close()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -24,6 +24,7 @@
 #   --uart-socket FILE expose the logged UART on a UNIX socket for guest input
 #   --stop-file FILE   stop when FILE appears; its first line becomes the reason
 #   --pid-file FILE    write the owned QEMU PID for an outer orchestrator
+#   --launch-manifest FILE write exact QEMU argv and Darwin-model environment
 #   --keep            leave the VM running (frozen) instead of killing it
 #   NO_WATCHDOG=1     disable panic/quiet checks (a --stop-file still works)
 #   STALL_AFTER_PANIC seconds of silence after a panic before giving up (20)
@@ -61,6 +62,7 @@ KEEP=0
 UART_SOCKET=""
 STOP_FILE=""
 PID_FILE=""
+LAUNCH_MANIFEST=""
 QEMU_PID=""
 PROBE_COMPLETE=0
 EXTRA_QEMU=()
@@ -98,6 +100,7 @@ while [[ $# -gt 0 ]]; do
         --uart-socket) UART_SOCKET="$2"; shift 2 ;;
         --stop-file) STOP_FILE="$2"; shift 2 ;;
         --pid-file) PID_FILE="$2"; shift 2 ;;
+        --launch-manifest) LAUNCH_MANIFEST="$2"; shift 2 ;;
         --keep)     KEEP=1; shift ;;
         --)         shift; EXTRA_QEMU=("$@"); break ;;
         -h|--help)  sed -n '2,30p' "$0"; exit 0 ;;
@@ -160,6 +163,25 @@ else
 fi
 [[ -f "$REPO/firmware/sptm" ]] && ARGS+=(-sptm "$REPO/firmware/sptm" -txm "$REPO/firmware/txm")
 [[ ${#EXTRA_QEMU[@]} -gt 0 ]] && ARGS+=("${EXTRA_QEMU[@]}")
+
+if [[ -n "$LAUNCH_MANIFEST" ]]; then
+    mkdir -p "$(dirname "$LAUNCH_MANIFEST")"
+    python3 - "$LAUNCH_MANIFEST" "$QEMU" "${ARGS[@]}" <<'PY'
+import json, os, sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+value = {
+    "format": "darwin-vm-qemu-launch-v1",
+    "argv": sys.argv[2:],
+    "env": {k: v for k, v in os.environ.items()
+            if k.startswith("DARWIN_") or k.startswith("GXFSTAT_")},
+}
+tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+os.replace(tmp, path)
+PY
+fi
 
 if [[ -n "$QEMU_WRAPPER" ]]; then
     DVM_HOST_QEMU_STDERR="$ERR" \
