@@ -68,13 +68,13 @@ and every other device. Preserve direct boot and all existing device behavior.
 Use only isolated firmware copies and disposable disk overlays; never modify
 the active checkout or its durable/base disk artifacts.
 
-Current iBoot checkpoint (QEMU `7014188`, 2026-09-04): both pinned d47
+Current iBoot checkpoint (QEMU `e706f05`, 2026-09-04): both pinned d47
 research and release images pass the bounded LLC/SEP/APIA/root, CPM, unlock,
-GPIO, PMGR topology, MCC, and signed range-3 tuning models, then first touch
-physical `0x300040000` (`pmgr[2]+0x40000`). The exact next range-2 table and
-runtime/static addresses are in `docs/re/iboot-runtime.md`. A real-device
-capture is optional fidelity evidence, not a prerequisite for continuing the
-firmware-defined path.
+GPIO, PMGR topology, MCC, signed range-3 tuning, and the first 25 range-2
+table RMWs, then first touch physical `0x300040068`
+(`pmgr[2]+0x40068`). The exact next record and runtime/static addresses are
+in `docs/re/iboot-runtime.md`. A real-device capture is optional fidelity
+evidence, not a prerequisite for continuing the firmware-defined path.
 
 Current SEPROM checkpoint (2026-09-04): direct SPTM boot can opt in to an
 authentic encrypted d47 `sepi` with `-sepfw`. The loader preserves the exact

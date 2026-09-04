@@ -9,8 +9,10 @@ The available release and research iBoot payloads execute under the current
 device-free work has advanced both images through `LLC_RAM_CONFIG`, SEP
 entropy, EL2 APIA-key aliases, root scratch, CPM/bootstrap unlock, early PMGR
 power and topology setup, GPIO setup, MCC configuration, and two signed PMGR
-tuning passes.  Both now stop at the same physical access,
-`0x300040000` (`pmgr` reg[2] + `0x40000`).
+tuning passes. The latest bounded increment also executes 25 exact range-2
+table RMWs, including the intervening descriptor `0x64` update. Both images
+now stop at the same physical access, `0x300040068` (`pmgr` reg[2] +
+`0x40068`).
 
 Follow-up device-free analysis and an opt-in, fail-closed behavioral probe are
 recorded in [`iboot-device-free-feasibility.md`](iboot-device-free-feasibility.md).
@@ -39,9 +41,12 @@ existing local submodule object store.  The integrated QEMU commits are:
 - `8f4a7ad` — minimal raw iBoot loader and first-MMIO stop instrumentation
 - `5fcf6dd` — mutually exclusive machine wiring and `-iboot` command line
 - `6ae2067` — bounded d47 bootstrap, PMGR, GPIO, and MCC protocols
+- `42448a1` and `7014188` — strict authentic-SEP-image transport state
+- `e43bae6` — first 16 range-2 RMWs and descriptor `0x64` update
+- `e706f05` — next eight exact range-2 RMWs through `+0x40064`
 
 The tested QEMU binary SHA-256 is
-`a4a7517d89137b91f90fdb48b626204d2672fc298ebaf6073bffdbb611f58955`.
+`4a20eb0623a7c43f70dcd9db38e36ef479239f13f21d8e3cb19f20476ea7caca`.
 It was built with `make -j18` from this worktree's own
 `qemu-sptm/build`; the build completed successfully.
 
@@ -189,8 +194,9 @@ plausible reset/watchdog implementation cannot make the parked caller resume.
 
 ## Current bounded checkpoint
 
-QEMU commit `6ae2067` implements only the finite, observed d47 bootstrap
-transactions.  In addition to the earlier LLC/SEP/APIA/root work, it validates:
+QEMU commits through `e706f05` implement only finite, observed d47 bootstrap
+transactions. In addition to the earlier LLC/SEP/APIA/root work, they
+validate:
 
 - the PMGR-to-CPM payload copy and command `0x55a01`, without claiming that
   the firmware-insensitive representative payload zero is a hardware reset;
@@ -202,24 +208,43 @@ transactions.  In addition to the earlier LLC/SEP/APIA/root work, it validates:
 - the exact second range-3 selector requests for words
   `0..3,6,7,13,14,23,25,29..33,35,38..40`; and
 - the literal range-3 tuning groups through `pmgr[3]+0x62010`, followed by the
-  five exact `0x21000000` writes whose bit-30 polls remain clear.
+  five exact `0x21000000` writes whose bit-30 polls remain clear;
+- 16 range-2 masked RMWs through `+0x40040`, followed by the exact later
+  `0x05000000` update to the already-observed descriptor `0x64` at
+  `+0x40044`; and
+- eight more ordered range-2 RMWs at `+0x40048..+0x40064`.
 
 No completion value is synthesized for the topology or MCC loops: their prior
 firmware writes leave the polled bit clear. Invalid order, width, mask, value,
-or an unobserved extra transaction terminates QEMU. The bounded research log
-is `/tmp/dvm/iboot-main/probe/IBOOT_RANGE3_SECOND_EXACT_20260904.stderr.log`;
-its line 358 is the final modeled `pmgr[3]+0x62010` record and lines 370--374
-are the five second request/poll transactions.
+or an unobserved extra transaction terminates QEMU.
 
-The next first unsupported access is line 375:
+The range-2 values and masks are firmware literals, not hardware reset-value
+guesses. The first 16 descriptor starts are at research raw
+`+0x2745a8..+0x2746a8`, with the last literal pointer at `+0x2746b0`;
+the descriptor `0x64` record starts at `+0x2746b8`; and the eight-record
+continuation starts are at `+0x2746c8..+0x274738`, with the last pointer at
+`+0x274740`. The equivalent release ranges begin at `+0x272158`,
+`+0x272268`, and `+0x272278`. The table entry layout is an
+encoded register word followed by a literal-data pointer; treating the
+preceding pointer as part of the following entry shifts the masks by one
+record and is incorrect. The corrected parsing agrees with both runtime
+traces.
+
+The research probe records both completion messages at
+`IBOOT_RANGE2_CONT1.stderr.log:375-377`. Its new first unsupported access is
+line 378:
 
 ```text
-unimp: read  0x300040000 (pmgr[2]+0x40000) -> 0x0 size 4 pc=0xfffffc01fc10b610 el=0 pstate=0x800004c0 sp=0x300002f3e20 x0=0x300040000 x1=0x4 x2=0xfffffc01fc10b5dc x3=0xfffffc01fc10b67c
+unimp: read  0x300040068 (pmgr[2]+0x40068) -> 0x0 size 4 pc=0xfffffc01fc10b610 el=0 pstate=0x800004c0 sp=0x30000283e20 x0=0x300040068 x1=0x4 x2=0xfffffc01fc10b5dc x3=0xfffffc01fc10b67c
 ```
 
-The diagnostic continuation shows a finite signed-table block at range-2
-offsets `0x40000,0x40008..0x40040`, followed by a write to the already-read
-topology selector `0x64` at `+0x40044`. The exact records are:
+The release image independently completes the same block and first reads the
+same physical address at `IBOOT_RELEASE_RANGE2_CONT1.stderr.log:378`, from
+runtime `0xfffffc01fc10a6ec`. The associated write helpers are research
+`0xfffffc01fc10b6b0` and release `0xfffffc01fc10a78c`; both diagnostic
+continuations write zero at `+0x40068`.
+
+The exact implemented records are:
 
 | offsets | mask | values in offset order |
 |---|---:|---|
@@ -232,16 +257,17 @@ topology selector `0x64` at `+0x40044`. The exact records are:
 | `0x4003c` | `0x3f000000` | `0x05000000` |
 | `0x40040` | `0x30000000` | zero |
 | `0x40044` (`descriptor 0x64`) | `0x3f000000` | `0x05000000` |
+| `0x40048..0x4005c` | `0x30000000` | six zeroes |
+| `0x40060..0x40064` | `0x3f000000` | `0x05000000`, `0x05000000` |
 
-The masks and values are the literals following descriptors at research raw
-`+0x2745a8..+0x2746b8`; runtime writes are in
-`IBOOT_RANGE3_SECOND_EXACT_20260904.stderr.log:376-407`. The next
-implementation should add these exact one-shot RMW records and extend
-selector `0x64` from its earlier read-only topology query to this one exact
-later RMW. It must then stop at the next unsupported access. The release image
-independently reaches the same physical boundary at runtime
-`0xfffffc01fc10a6ec` in
-`IBOOT_RELEASE_RANGE3_CHECKPOINT_20260904.stderr.log`.
+The next record is already implementation-ready without a device capture.
+Research raw `+0x274748` encodes range-2 `+0x40068` and points to raw
+`+0x2f0408`, whose mask/value pair is `0x30f00000/0x00000000`. Release raw
+`+0x2722f8` points to raw `+0x2ed698` and contains the identical pair. The
+next increment should admit exactly one 32-bit read/write RMW at `+0x40068`,
+only after the eight-record continuation is complete, require the cold-zero
+result observed in both diagnostic logs, and then stop again. It must not
+synthesize a completion bit or generalize the rest of the PMGR window.
 
 ## Regressions and controls
 
@@ -259,6 +285,8 @@ After the changes:
 | `IBOOT_FEATURE_POST_20260904` | negative ANS-without-backing smoke: reached `BSD root: md0`, then the existing SPTM queue-entry validation rejected `0x41` | `/tmp/dvm/iboot-main/probe/IBOOT_FEATURE_POST_20260904.*.log` |
 | `IBOOT_DIRECT_PMGR_CHECKPOINT_20260904` | 303 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_DIRECT_PMGR_CHECKPOINT_20260904.*.log` |
 | `IBOOT_DCP_SEP_FB_PMGR_CHECKPOINT_20260904` | DCP + SEP + 828x1792@2 framebuffer, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_DCP_SEP_FB_PMGR_CHECKPOINT_20260904.*.log` |
+| `IBOOT_RANGE2_CONT_DIRECT_REG1` | final direct-boot regression, 294 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE2_CONT_DIRECT_REG1.*.log` |
+| `IBOOT_RANGE2_CONT_DCP_SEP_FB_REG1` | final DCP + SEP + 828x1792@2 framebuffer regression, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE2_CONT_DCP_SEP_FB_REG1.*.log` |
 
 The ANS smoke is not claimed as a working storage regression: the documented
 ANS path requires `tools/ans/dt_ans_fixup.py`, the ANS firmware region, and a
