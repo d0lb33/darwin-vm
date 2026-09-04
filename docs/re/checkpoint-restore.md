@@ -21,9 +21,9 @@ explicitly advertises `-incoming file:filename`, `-incoming defer`, and
 `-dump-vmstate`; its HMP table supplies asynchronous `migrate -d`,
 `info migrate`, and `migrate_set_parameter`.  The implementation therefore
 uses the supported external file migration transport rather than `savevm`.
-The owner-authorized build's dump is
-`/tmp/dvm/ckpt-aicasc-vmstate-inventory.json` (SHA-256
-`7f19e5e8b2a1f2b7dc523710cf31b2d8524675aedd766885c54925cd8bd8811f`).
+The power-transition build's dump is
+`/tmp/dvm/ckpt-power-v2-vmstate-inventory.json` (SHA-256
+`5c951af9dc134df4f7dec22c4809a250a3a09fd6cf0fcc1bbbcbcc37b245f01d`).
 It contains the QOM sections for AIC, ASC, SEP, ANS, DART, SART, framebuffer,
 and AMCC.  AFK, DCP, IOMFB (when configured), and sparse-unimplemented state
 are registered non-QOM sections and do not appear in this type-schema dump;
@@ -117,7 +117,9 @@ The qemu-sptm implementation covers every listed entry.  AIC and ASC support
 was applied after explicit owner authorization in QEMU commit `60e1fd0`: it
 serializes pending/masked AIC interrupts and ASC mailbox/RTKit endpoint state,
 validates bounds, migrates the optional virtual timer, and reasserts
-destination-process IRQ lines in `post_load`.
+destination-process IRQ lines in `post_load`.  QEMU commit `d35d9ce` versions
+the subsequently added ASC firmware-status field and reconstructs it when
+loading a version-1 stream.
 
 ## Test ladder and acceptance evidence
 
@@ -149,6 +151,7 @@ support and successful new-process restores after that support was applied:
 | `CKPT_EARLY_BOOT2` | after `Early boot complete` and a live SEP/SKS request | PC `0xfffffff02ac72da8`; 1,117,096,894-byte stream; 1.024 s migration; source PID 58979 exited | PID 59233 loaded the exact PC, advanced, emitted new serial output, and did not repeat a boot banner | failed after resume: SKS timeout strikes followed by an IONVMeFamily panic at 27 s |
 | `CKPT_AICASC_EARLY2` | after `Early boot complete`, using the migrated Data/User parent and the owner-authorized AIC/ASC build | PC `0xfffffff00709a610`; 663,051,921-byte stream; 1.530 s migration; source PID 65586 exited | PIDs 66009 and 67448 each loaded the exact PC in 0.940/0.941 s from independent fresh disk children and ran 120 s; both showed execution and serial progress, ANS reads/writes, SKS replies, DCP/IOMFB traffic, no repeated boot banner, and no XNU/SPTM panic | passed twice; this directly fixes the prior 27 s failure |
 | `CKPT_SB_STAGE1_PROGRESS` | 14+ minutes after restoring the early checkpoint, while Data-volume metadata and SEP traffic were still progressing but before `SB_ADFL_ENTRY` | PC `0xfffffff02aaf76e4`; 3,542,058,441-byte stream; 1.537 s migration; source PID 68274 exited | PID 75975 loaded the exact PC in 1.053 s, advanced for 60 s, emitted 8,318 serial bytes, completed ANS and SKS traffic, and showed no repeated boot banner or XNU/SPTM panic | resumable investigation point, not SpringBoard acceptance evidence |
+| `CKPT_POWER_V2_EARLY1` | native ASC VMState version 2 after merging the committed RTKit sleep/restart model | PC `0x18ceab46c`; 2,113,782,729-byte stream; 1.523 s migration; bridge source PID 80960 exited | PIDs 81713 and 82432 each loaded the exact PC in 1.012/1.007 s from independent fresh disk children and ran 120 s; both advanced, emitted 14,132/13,559 serial bytes, completed ANS and SKS traffic, and showed no repeated boot banner or XNU/SPTM panic | passed twice; DCP/IOMFB was quiescent in both native post-resume windows, while the preceding 120 s compatibility run did show live DCP/IOMFB traffic |
 
 The first post-resume request printed by the failed pre-AIC/ASC restore was an
 already submitted QID 1 NVMe read.  ANS queue indices, disk generation, and
@@ -162,10 +165,9 @@ The progressed SpringBoard-stage run did not hit `SB_ADFL_ENTRY` within its
 bounded condition windows.  It also did not reproduce the other display
 experiment's runaway DCP restart loop: there was no repeated coprocessor
 handshake/power-cycle storm and no endpoint-11 DCP NMI.  This is deliberately
-not a claim that the late DCP power path is fixed.  The main checkout has a
-separate uncommitted ASC power-transition experiment; it was not copied into
-this isolated branch.  `CKPT_SB_STAGE1_PROGRESS` exists so that work can resume
-at this exact state after the two checkpoint commits are integrated.
+not a claim that the late DCP power path is fixed.  The committed ASC
+power-transition implementation was subsequently merged and is included in
+`CKPT_POWER_V2_EARLY1`.
 
 `COLD_REG_CKPT1` was an ordinary 30-second cold boot from a fresh qcow2 child
 after the general device-state implementation.  It produced 634 serial lines,
@@ -177,3 +179,9 @@ The development-only manifest
 `/tmp/dvm/CKPT_EARLY_BOOT1.development-bridge.json` was used solely to carry an
 older early-boot state across one validator-only rebuild.  It is labeled
 `not_acceptance_evidence` and is not one of the results above.
+
+`/tmp/dvm/CKPT_AICASC_EARLY2.power-v2-bridge.json` is likewise explicitly
+labeled development-only.  It loaded the version-1 early checkpoint through
+the version-2 compatibility path, ran for 120 seconds with ANS, SKS, DCP and
+IOMFB traffic and no panic, and was consumed only to create the native
+`CKPT_POWER_V2_EARLY1` artifact.
