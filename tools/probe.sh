@@ -10,6 +10,7 @@
 #   tools/probe.sh [options]
 #
 # options:
+#   --iboot FILE      boot a raw iBoot payload instead of the direct XNU path
 #   --dtree FILE      device tree (default: firmware/dtree)
 #   --bootkc FILE     kernelcache (default: firmware/bootkc)
 #   --secs N          seconds to let the guest run before freezing (default: 60)
@@ -28,6 +29,7 @@
 #   NO_WATCHDOG=1     disable panic/quiet checks (a --stop-file still works)
 #   STALL_AFTER_PANIC seconds of silence after a panic before giving up (20)
 #   STALL_SECS        seconds of total silence before calling it hung (180)
+#   PROBE_STOP_STDERR_REGEX stop on the first matching QEMU stderr line
 #   DVM_QEMU_WRAPPER  executable that launches QEMU (for example
 #                     tools/re/qemu_under_lldb.sh); receives QEMU then its args
 #   DVM_HOST_LLDB_LOG host-LLDB transcript when that wrapper is used
@@ -49,6 +51,7 @@ HMP="$REPO/tools/hmp.py"
 
 DTREE="$REPO/firmware/dtree"
 BOOTKC="$REPO/firmware/bootkc"
+IBOOT=""
 SECS=60
 BOOTARGS="rd=md0 serial=3 -v wdt=-1 wlan-olyhal-abort"
 OUT=/tmp/dvm/probe
@@ -85,6 +88,7 @@ trap 'exit 130' INT TERM HUP
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --iboot)     IBOOT="$2"; shift 2 ;;
         --dtree)    DTREE="$2"; shift 2 ;;
         --bootkc)   BOOTKC="$2"; shift 2 ;;
         --secs)     SECS="$2"; shift 2 ;;
@@ -110,7 +114,13 @@ done
 [[ -z "$RAMDISK" ]] && RAMDISK="$REPO/firmware/ramdisk.dmg"
 [[ -z "$TC" ]] && TC="$REPO/firmware/ramdisk.tc"
 
-for f in "$QEMU" "$DTREE" "$BOOTKC" "$RAMDISK" "$TC"; do
+REQUIRED_FILES=("$QEMU" "$DTREE")
+if [[ -n "$IBOOT" ]]; then
+    REQUIRED_FILES+=("$IBOOT")
+else
+    REQUIRED_FILES+=("$BOOTKC" "$RAMDISK" "$TC")
+fi
+for f in "${REQUIRED_FILES[@]}"; do
     [[ -e "$f" ]] || { echo "probe: missing $f" >&2; exit 1; }
 done
 
@@ -141,15 +151,21 @@ rm -f "$SOCK" "$SERIAL" "$ERR"
 
 ARGS=(
     -M darwin
-    -bootkc "$BOOTKC"
     -dtree "$DTREE"
-    -tc "$TC"
-    -ramdisk "$RAMDISK"
-    -args "$BOOTARGS"
     -display none
     -monitor "unix:$SOCK,server,nowait"
     -m "$MEM"
 )
+if [[ -n "$IBOOT" ]]; then
+    ARGS+=(-iboot "$IBOOT")
+else
+    ARGS+=(
+        -bootkc "$BOOTKC"
+        -tc "$TC"
+        -ramdisk "$RAMDISK"
+        -args "$BOOTARGS"
+    )
+fi
 if [[ -n "$UART_SOCKET" ]]; then
     ARGS+=(
         -chardev "socket,id=probe_uart,path=$UART_SOCKET,server=on,wait=off,logfile=$SERIAL"
@@ -158,7 +174,9 @@ if [[ -n "$UART_SOCKET" ]]; then
 else
     ARGS+=(-serial "file:$SERIAL")
 fi
-[[ -f "$REPO/firmware/sptm" ]] && ARGS+=(-sptm "$REPO/firmware/sptm" -txm "$REPO/firmware/txm")
+if [[ -z "$IBOOT" && -f "$REPO/firmware/sptm" ]]; then
+    ARGS+=(-sptm "$REPO/firmware/sptm" -txm "$REPO/firmware/txm")
+fi
 [[ ${#EXTRA_QEMU[@]} -gt 0 ]] && ARGS+=("${EXTRA_QEMU[@]}")
 
 if [[ -n "$QEMU_WRAPPER" ]]; then
@@ -217,12 +235,13 @@ fi
 # --no-watchdog restores the old blind wait.
 STOP_REASON=""
 STOP_KIND=""
-if [[ -n "${NO_WATCHDOG:-}" && -z "$STOP_FILE" ]]; then
+if [[ -n "${NO_WATCHDOG:-}" && -z "$STOP_FILE" &&
+      -z "${PROBE_STOP_STDERR_REGEX:-}" ]]; then
     perl -e "sleep $SECS"
 else
     STALL_AFTER_PANIC=${STALL_AFTER_PANIC:-20}
     STALL_SECS=${STALL_SECS:-180}
-    _interval=$([[ -n "$STOP_FILE" ]] && echo 1 || echo 3)
+    _interval=$([[ -n "$STOP_FILE" || -n "${PROBE_STOP_STDERR_REGEX:-}" ]] && echo 1 || echo 3)
     _elapsed=0; _last_size=0; _quiet=0
     while (( _elapsed < SECS )); do
         perl -e "sleep $_interval"; _elapsed=$((_elapsed+_interval))
@@ -232,6 +251,12 @@ else
         if [[ -n "$STOP_FILE" && -f "$STOP_FILE" ]]; then
             STOP_REASON=$(head -1 "$STOP_FILE" 2>/dev/null)
             STOP_REASON="${STOP_REASON:-external stop requested}"
+            STOP_KIND="condition"
+            break
+        fi
+        if [[ -n "${PROBE_STOP_STDERR_REGEX:-}" ]] &&
+           grep -qam1 -E "$PROBE_STOP_STDERR_REGEX" "$ERR" 2>/dev/null; then
+            STOP_REASON="matched QEMU stderr regex: $PROBE_STOP_STDERR_REGEX"
             STOP_KIND="condition"
             break
         fi
@@ -309,6 +334,11 @@ TRACE=$(grep -cE '^(aic|asc|dart|unimp|afk|dcp|sep)[:(]' "$ERR" 2>/dev/null)
 if [[ "${TRACE:-0}" -gt 0 ]]; then
     echo "--- device model trace: $TRACE lines (see $ERR) ---"
     grep -vE ': (read|write) ' "$ERR" 2>/dev/null | grep -v terminating | head -15
+fi
+
+if grep -qam1 '^unimp:' "$ERR" 2>/dev/null; then
+    echo "--- first unsupported MMIO ---"
+    grep -am1 '^unimp:' "$ERR" | cut -c1-240
 fi
 
 echo "logs: $SERIAL  $ERR"
