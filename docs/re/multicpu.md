@@ -4,7 +4,8 @@
 CPU power-management adapter. Two CPUs are verified simultaneously executing
 separate userspace workloads.** Display is not a prerequisite. This remains
 experimental: physical ApplePMGR, suspend, hotplug and checkpoint restore are
-not supported by this path.
+not supported by this path. Six-core first-boot migration also failed to make
+sustained metadata progress in two bounded tests; use two cores for that workload.
 
 Worktree: `/Users/jdolbe1/Downloads/darwin-vm-multicpu`, branch `codex/multicpu`
 in both the parent and nested QEMU repository. Based on parent `487f8aa` and
@@ -215,6 +216,64 @@ wall time, host load and the QEMU binary hash; adjacent files contain each
 trial's complete serial/stderr logs. The other checkout's existing VM was left
 untouched. The results describe this host/session, not an isolated laboratory
 or a Windows host.
+
+## Partial first-boot migration sample (2026-09-04)
+
+The user requested an estimate from fresh first-boot migration work, explicitly
+without finishing migration. These tests used fresh qcow2 children of
+`/tmp/dvm/data-seed/rebuild/marker.qcow2`, the prepared Data/User image **before
+its first normal system boot**, not the later `persistent-parent.qcow2` or a
+settled display checkpoint. All configurations used the same parent, QEMU,
+12 GiB RAM, device tree and display configuration. Originals were not changed.
+No host disk mounts or disk-image rebuilds were needed.
+
+The sampled work is the long first-boot migration's directory-metadata phase,
+not the restore helper's initial template copy. The observable proxy is a
+unique `(volume, inode)` in `set_dir_stats:3247: disk1s5 setting dir-stats for
+ino ...` lines. These are logged progress events, not measured bytes, durable
+transaction commits, or a percentage of the complete migration. Each owned
+VM stops at 100 User-volume events, 200 combined Data/User events, panic, or
+180 host seconds. Earlier evidence has over 1,000 such events and later work;
+none of these partial tests completed the migration.
+
+| Configuration | First 100 User events, from QEMU launch | Events 20–100 interval | Rate during that interval |
+|---|---|---|---|
+| Original 1 CPU | 157.745 s | 46.941 s | **1.704 events/s** |
+| Virtual adapter, 2 CPUs | 103.142 s | 29.877 s | **2.678 events/s** |
+| Virtual adapter, 6 CPUs | not reached in 180 s; only 2 events | insufficient progress | no meaningful rate |
+| 6 CPUs, independent fresh repeat | not reached in 180 s; only 2 events | insufficient progress | no meaningful rate |
+
+Two cores reached the partial work limit in **34.6% less elapsed time**. The
+post-warmup metadata rate was **1.57x** the one-core rate, projecting about
+**36.4% less time for equivalent work in that phase**. This is an estimate
+from one bounded sample each, not a complete-migration benchmark or a full
+migration ETA. Later phases may be dominated by different work or waits.
+The comparison also retains the kernel-adapter/counter differences described
+in the early-boot benchmark above.
+
+Six cores did reach Early boot complete in 11.406 / 10.513 seconds, but neither
+run produced sustained progress in this sampled metadata phase before the
+180-second cutoff. Each emitted 11 combined Data/User events, including only
+2 User events. There was no first XNU panic in either serial log. The first
+run was observed consuming about 307% host CPU despite this lack of metadata
+progress. This is a repeatable progress failure under this workload, **not a
+measured six-core migration speed or proof that every guest task is stalled**.
+The cause is not yet diagnosed. Two cores are the supported experimental
+recommendation for this workload; six-core early-boot success does not prove
+six-core migration works.
+
+Evidence: `/tmp/dvm/SMP_MIG_PARTIAL1/results.json` and
+`/tmp/dvm/SMP_MIG_PARTIAL6_REPEAT/results.json`, with adjacent full serial and
+stderr logs. Every result records the QEMU binary hash, exact launch command,
+parent path, early-boot time, individual metadata event timestamps, and stop
+reason. The initial results file's rate over the six-core run's **two events**
+is merely a startup burst and must not be treated as sustained throughput;
+the script now omits that rate when fewer than 20 events are available.
+
+```sh
+python3 tools/re/smp_boot_bench.py --migration-sample --tag NEW_MIG_SAMPLE
+python3 tools/re/smp_boot_bench.py --migration-sample --variant pv6 --tag NEW_MIG_REPEAT
+```
 
 ## Remaining limits
 
