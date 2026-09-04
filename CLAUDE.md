@@ -68,6 +68,14 @@ and every other device. Preserve direct boot and all existing device behavior.
 Use only isolated firmware copies and disposable disk overlays; never modify
 the active checkout or its durable/base disk artifacts.
 
+Current iBoot checkpoint (QEMU `6ae2067`, 2026-09-04): both pinned d47
+research and release images pass the bounded LLC/SEP/APIA/root, CPM, unlock,
+GPIO, PMGR topology, MCC, and signed range-3 tuning models, then first touch
+physical `0x300040000` (`pmgr[2]+0x40000`). The exact next range-2 table and
+runtime/static addresses are in `docs/re/iboot-runtime.md`. A real-device
+capture is optional fidelity evidence, not a prerequisite for continuing the
+firmware-defined path.
+
 Boot-arg `io=0x1f` makes IOKit log every driver match and start, which is how you
 see where a driver chain stalls.
 

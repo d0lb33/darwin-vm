@@ -18,13 +18,16 @@ previously unsupported bootstrap command. Static command-table and caller
 analysis identified it as a 32-bit entropy request; returning host entropy with
 the evidenced response opcode advances iBoot past that protocol boundary.
 
-The first unsupported operation after that increment is now exact: writes to
-Apple EL2 aliases for the low and high halves of the APIA pointer-authentication
-key. The later observed zero-fill abort for iBoot's `root` region is recorded
-separately and has not been papered over with unowned RAM.
+Those boundaries are now historical. Device-free static/runtime correlation
+has subsequently advanced both pinned d47 images through the EL2 APIA writes,
+the page-table-proven `root` scratch mapping, CPM/bootstrap unlock, early PMGR
+and GPIO initialization, the topology and MCC protocols, and the signed PMGR
+tuning tables through range-3 offset `0x62010`. Both images now stop at the
+same range-2 physical access, `0x300040000`; see
+[`iboot-runtime.md`](iboot-runtime.md#current-bounded-checkpoint).
 
-This does **not** prove the literal T8140 register reset value, a kernel
-handoff, or a bootable SEP path.  It proves the narrower question needed here:
+This does **not** prove every literal T8140 reset value or a kernel handoff. It
+does prove the narrower question needed here:
 missing early state can be constrained by firmware behavior and Apple device
 trees, tested behind a fail-closed gate, and checked against the next observed
 boundary without fabricating a chain of successful device replies.
@@ -422,30 +425,31 @@ upstream m1n1 reference at commit
 The cross-image scan therefore constrains ownership, width, ordering,
 destination, commands, and lifecycle, but not the payload value.
 
-### Evidence-backed blocker and next implementation
+### Historical blocker, resolved behaviorally
 
-No PMGR model is justified yet. The missing datum is the 64-bit value observed
-at physical `0x3082b8074..0x3082b807b` before the CPM initialization routine,
-plus enough repeated cold/warm observations to determine whether it is a
-fixed T8140 reset/fuse value or variable Boot ROM state. This can come from a
-published trace or another operator's capture; it does not require this VM
-host to own the phone. Without any T8140 observation, firmware alone cannot
-recover state originating outside the firmware image.
+The earlier analysis correctly found that firmware cannot reveal the literal
+power-on contents of `0x3082b8074..0x3082b807b`, but it overstated that fact as
+an execution blocker. Cross-build analysis showed that iBoot only copies this
+opaque pair into the per-core CPM tail and never branches on it along the
+observed bootstrap path. The VM can therefore expose an explicit representative
+payload while validating the independently known transport and command
+protocol; this is behavioral equivalence, not a claim about T8140 reset state.
 
-Once that evidence exists, the minimum implementation is:
+QEMU commit `6ae2067` implements that narrow model:
 
-1. Add an iBoot-only PMGR subregion covering exactly range-1 offsets
-   `0x38074..0x3807b`; direct boot must retain its current mapping.
-2. If repeated observations prove the pair immutable for d47, expose the two
-   read-only 32-bit words in device little-endian order, pin them to the d47
-   device-tree/image evidence, and log both reads. If they vary, model the
-   identified Boot ROM-to-PMGR state transfer instead of freezing one sample.
-3. Assert in a debugger that iBoot writes the combined payload to
-   `0x210e4c000` and `0x55a01` to `0x210e4c008`; do not infer success merely
-   from absence of the first unimplemented-access line.
-4. Re-run with `DARWIN_UNIMP_STOP_FIRST=1` and attribute the next access. Do
-   not accept the catchall zero, invent a reset value, bypass the copy, or
-   pre-map later filesystem, storage, or USB dependencies.
+1. an iBoot-only subregion covers exactly range-1 offsets
+   `0x38074..0x3807b` and returns an explicitly logged representative zero;
+2. the CPM sink accepts only the exact 64-bit copied payload followed by
+   command `0x55a01` at `0x210e4c000/+8`;
+3. out-of-order, wrong-width, wrong-value, or extra accesses terminate QEMU;
+   and
+4. direct boot does not instantiate this model.
+
+The validated log line is
+`/tmp/dvm/iboot-main/probe/IBOOT_RANGE3_SECOND_EXACT_20260904.stderr.log:50`.
+The same run reaches `0x300040000` at line 375. A real device capture could
+replace the representative payload and improve fidelity, but the completed
+transport experiment proves it is not required to continue iBoot execution.
 
 ## Regression
 
