@@ -22,13 +22,12 @@ Those boundaries are now historical. Device-free static/runtime correlation
 has subsequently advanced both pinned d47 images through the EL2 APIA writes,
 the page-table-proven `root` scratch mapping, CPM/bootstrap unlock, early PMGR
 and GPIO initialization, topology and MCC protocols, the signed PMGR tuning
-tables, the late range-2 table, 13 exact boot-on target preconditions, and the
-first four range-43 cold-start latches. Static and runtime correlation then
-justified a fifth range-43 latch and twelve ordered range-1 table RMWs. Both
-images now stop at the same existing PMGR state word: physical `0x308284098`
-(`pmgr[1]+0x4098`, `AOP_CPU`) is read as `0x000000ff`, then an active
-cross-build-identical descriptor requests `0x000020ff`. This proves bit 13 is
-a firmware-authored control field, but not yet its device semantics; see
+tables, the late range-2 table, 13 exact boot-on target preconditions, and five
+range-43 cold-start latches. Static and runtime correlation then justified
+twelve ordered range-1 table RMWs, five exact per-device state-control
+transactions, and the first post-state RMW at `pmgr[1]+0x1c000`. Both images
+now stop at physical `0x30829c010` (`pmgr[1]+0x1c010`). Their selected records
+independently agree on `(mask,value)=(0x00ffffff,0x00001001)`; see
 [`iboot-runtime.md`](iboot-runtime.md#current-bounded-checkpoint).
 
 This does **not** prove every literal T8140 reset value or a kernel handoff. It

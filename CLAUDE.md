@@ -68,21 +68,22 @@ and every other device. Preserve direct boot and all existing device behavior.
 Use only isolated firmware copies and disposable disk overlays; never modify
 the active checkout or its durable/base disk artifacts.
 
-Current iBoot checkpoint (QEMU `53a1b1a`, 2026-09-05): both pinned d47
+Current iBoot checkpoint (QEMU `d03bc88`, 2026-09-05): both pinned d47
 research and release images pass the bounded LLC/SEP/APIA/root, CPM, unlock,
 GPIO, PMGR topology, MCC, signed range-3 tuning, late range-2 RMWs through
 `+0x6f100`, all 13 firmware-asserted boot-on target preconditions, five exact
 range-43 cold-start latch words, and twelve cross-build-identical range-1
-table RMWs through `+0x38060`. Both now fail closed on the same existing PMGR
-state word: `AOP_CPU`, physical `0x308284098` (`pmgr[1]+0x4098`), is read as
-`0x000000ff` and the selected table requests `0x000020ff`. Research writes at
-`0xfffffc01fc10b6b0`; release writes at `0xfffffc01fc10a78c`. The exact active
-descriptors prove `(mask,value)=(0x2000,0x2000)`, but bit 13 is not yet an
-accepted state-control field. Model it only as a per-device, ordered stored
-control bit after auditing its consumers; do not broaden the global state mask
-or synthesize completion. Runtime/static addresses and regressions are in
-`docs/re/iboot-runtime.md`. A real-device capture is optional fidelity
-evidence, not a prerequisite for continuing the firmware-defined path.
+table RMWs through `+0x38060`. They then pass five exact device-specific bit-13
+state controls (`AOP_CPU`, `AOP2_CPU`, `SMC_FABRIC`, `SMC_PTD`, `SMC_CPU`) and
+one cross-build-identical RMW at `pmgr[1]+0x1c000`. Both now stop at physical
+`0x30829c010` (`pmgr[1]+0x1c010`): research reads at
+`0xfffffc01fc10b610`, release at `0xfffffc01fc10a6ec`, and the selected record
+requests `(mask,value)=(0x00ffffff,0x00001001)`. Keep it behind the completed
+`+0x1c000` transaction and model only its exact read/write order; do not infer
+the remaining table or synthesize completion. Runtime/static addresses and
+regressions are in `docs/re/iboot-runtime.md`. A real-device capture is
+optional fidelity evidence, not a prerequisite for continuing the
+firmware-defined path.
 
 Current SEPROM checkpoint (2026-09-04): direct SPTM boot can opt in to an
 authentic encrypted d47 `sepi` with `-sepfw`. The loader preserves the exact

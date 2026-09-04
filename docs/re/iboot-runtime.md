@@ -11,8 +11,10 @@ entropy, EL2 APIA-key aliases, root scratch, CPM/bootstrap unlock, early PMGR
 power and topology setup, GPIO setup, MCC configuration, and two signed PMGR
 tuning passes. The current bounded path executes 90 exact range-2 table RMWs,
 including the intervening descriptor `0x64`/`0x82` updates and late sparse
-groups, plus the exact late selector requests described below. Both images now
-stop at the same physical access, `0x30006f000` (`pmgr` reg[2] + `0x6f000`).
+groups, plus the exact late selector requests described below. It also passes
+the ordered range-43/range-1 tail, five per-device bit-13 state controls, and
+the first post-state RMW. Both images now stop at `0x30829c010`
+(`pmgr` reg[1] + `0x1c010`).
 
 Follow-up device-free analysis and an opt-in, fail-closed behavioral probe are
 recorded in [`iboot-device-free-feasibility.md`](iboot-device-free-feasibility.md).
@@ -46,9 +48,10 @@ existing local submodule object store.  The integrated QEMU commits are:
 - `e706f05` — next eight exact range-2 RMWs through `+0x40064`
 - `8503414` — range-2 table through `+0x40140` and descriptor `0x82`
 - `862b31c` — late range-2 sparse groups and selectors through `+0x6f000`
+- `d03bc88` — ordered AOP/SMC controls and first post-state RMW
 
 The tested QEMU binary SHA-256 is
-`f6d87040a446664cd719647f05c6c0c3d4e30043ea35eefd3cacb3205e128628`.
+`99d3eb7c8515018faf4c69efd64f774aef84d92dcca5c0c96deac0b60531a37d`.
 It was built with `ninja -C qemu-sptm/build qemu-system-aarch64` from this
 worktree's own build directory; the build completed successfully.
 
@@ -196,7 +199,7 @@ plausible reset/watchdog implementation cannot make the parked caller resume.
 
 ## Current bounded checkpoint
 
-QEMU commits through `53a1b1a` implement only finite, observed d47 bootstrap
+QEMU commits through `d03bc88` implement only finite, observed d47 bootstrap
 transactions. In addition to the earlier LLC/SEP/APIA/root work, they
 validate:
 
@@ -231,7 +234,11 @@ validate:
 - five range-43 cold-start latch words at `+0x8ac000`, `+0x800000`,
   `+0x8ac028`, `+0x864000`, and `+0x8aa0bc`; and
 - twelve ordered range-1 table RMWs at `+0x50400`, `+0x50408`,
-  `+0x3c000..+0x3c330`, and `+0x38060`.
+  `+0x3c000..+0x3c330`, and `+0x38060`;
+- five exact, ordered bit-13 state controls for `AOP_CPU`, `AOP2_CPU`,
+  `SMC_FABRIC`, `SMC_PTD`, and `SMC_CPU`; and
+- the selected range-1 `+0x1c000` RMW with
+  `(mask,value)=(0x80ffff00,0x80040300)`.
 
 No completion value is synthesized for the topology or MCC loops: their prior
 firmware writes leave the polled bit clear. Invalid order, width, mask, value,
@@ -359,38 +366,54 @@ later phases cannot be reached accidentally.
 
 ### Current first unsupported boundary
 
-After the twelve range-1 RMWs, both images reach the existing `AOP_CPU` PMGR
-state word at physical `0x308284098`, range 1 `+0x4098`. Its accepted earlier
-transition left target and actual nibbles at 15 (`0x000000ff`). The selected
-table reads that word and requests `0x000020ff`; the state model rejects the
-new bit 13 rather than silently broadening its global control mask:
+After the twelve range-1 RMWs, both images execute five adjacent selected
+records in this exact order:
+
+| physical address | range offset | device | mask | selected value |
+|---:|---:|---|---:|---:|
+| `0x308284098` | `+0x4098` | `AOP_CPU` | `0x00002000` | `0x00002000` |
+| `0x3082840a0` | `+0x40a0` | `AOP2_CPU` | `0x00002000` | `0x00002000` |
+| `0x308288000` | `+0x8000` | `SMC_FABRIC` | `0x00002000` | `0x00002000` |
+| `0x308288060` | `+0x8060` | `SMC_PTD` | `0x00002000` | `0x00000000` |
+| `0x308288068` | `+0x8068` | `SMC_CPU` | `0x00002000` | `0x00002000` |
+
+Runtime identifies the records at research raw
+`+0x265cf8,+0x265d08,+0x265d18,+0x265d28,+0x265d38` and release raw
+`+0x2638a8,+0x2638b8,+0x2638c8,+0x2638d8,+0x2638e8`. The shared set tuples
+are research raw `+0x2ee7c8` and release raw `+0x2eba58`; the clear tuples are
+research raw `+0x2ee7b8` and release raw `+0x2eba48`. The model admits bit 13
+only on these named words, in this order, after `+0x38060`. `SMC_PTD` is
+already clear, but its exact no-op write still consumes an ordered transaction.
+No target/actual nibble rule was weakened and no completion is synthesized.
+
+The next selected record applies
+`(mask,value)=(0x80ffff00,0x80040300)` to physical `0x30829c000`, range 1
+`+0x1c000`. At its read, x20 points to research raw `+0x265db0` and release
+raw `+0x263960`; their tuple pointers resolve to research raw `+0x2ee7f8` and
+release raw `+0x2eba88`. Both builds execute the exact cold-zero read/write,
+which is modeled as a non-polling RMW only after all five controls.
+
+Both images then stop at physical `0x30829c010`, range 1 `+0x1c010`:
 
 ```text
-research: write pc=0xfffffc01fc10b6b0, changed-outside-model=0x00002000
-release:  write pc=0xfffffc01fc10a78c, changed-outside-model=0x00002000
+research: read pc=0xfffffc01fc10b610, x0=0x30829c010, x20=0xfffffc01fc2e5e00
+release:  read pc=0xfffffc01fc10a6ec, x0=0x30829c010, x20=0xfffffc01fc2e39b0
 ```
 
-Runtime identifies the active descriptor at research raw `+0x265cf8` and
-release raw `+0x2638a8`; both encode width 4 and offset `0x4098`. Their tuple
-pointers resolve to research raw `+0x2ee7c8` and release raw `+0x2eba58`, where
-both images contain `(mask,value)=(0x00002000,0x00002000)`. The immediately
-adjacent records apply the same tuple to range-1 offsets `+0x40a0` and
-`+0x8000`, but they have not executed because the first write fails closed.
+The active records point to research raw `+0x2ee988` and release raw
+`+0x2ebc18`, where both contain
+`(mask,value)=(0x00ffffff,0x00001001)`. The diagnostic catch-all run observed
+the resulting `0x00001001` write, but the checkpoint deliberately does not
+accept it. The implementation-ready next increment is one ordered, 32-bit,
+cold-zero RMW at `+0x1c010`, after the completed `+0x1c000` transaction, with
+no status response. It must then stop again before generalizing the rest of
+the table.
 
-The next implementation increment should add a per-device bit-13 capability,
-not change `D47_PMGR_STATE_CONTROL_MASK` globally. First admit only the exact
-ordered `AOP_CPU` transaction `read32; write32(old | 0x2000)` after the
-`+0x38060 <- 0x1c` phase, store bit 13 without changing target/actual nibbles,
-and return no completion. Then stop and verify whether the adjacent `AOP2_CPU`
-and `SMC_FABRIC` descriptors execute in the predicted order before extending
-that explicit allowlist. Audit later consumers before assigning a semantic
-name to bit 13.
-
-Boundary logs are
-`IBOOT_AOP_CPU_BOUNDARY_RESEARCH.stderr.log:425-437` and
-`IBOOT_AOP_CPU_BOUNDARY_RELEASE.stderr.log:425-437`. Descriptor/register
-captures are in `IBOOT_AOP_BIT13_TARGET_RESEARCH.lldb.log` and
-`IBOOT_AOP_BIT13_TARGET_RELEASE.lldb.log`.
+Boundary logs are `IBOOT_1C000_MODELED_RESEARCH.stderr.log:437-450` and
+`IBOOT_1C000_MODELED_RELEASE.stderr.log:437-450`. Descriptor/register captures
+are `IBOOT_1C000_TARGET_{RESEARCH,RELEASE}.lldb.log` and
+`IBOOT_1C010_TARGET_{RESEARCH,RELEASE}.lldb.log` under
+`/tmp/dvm/iboot-main/probe/`.
 
 ## Regressions and controls
 
@@ -421,6 +444,9 @@ After the changes:
 | `IBOOT_AOP_DIRECT_REG1` | current direct-boot regression, 303 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_AOP_DIRECT_REG1.*.log` |
 | `IBOOT_AOP_DCP_SEP_FB_REG1` | current DCP + SEP + 828x1792@2 framebuffer regression, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_AOP_DCP_SEP_FB_REG1.*.log` |
 | `IBOOT_AOP_SEPI_STRICT_REG1` | authentic encrypted d47 `sepi` transport, full 7,673,931-byte mapped-container SHA-256 `db0d02a7...28ed817` verified, SEP protocol accepted, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_AOP_SEPI_STRICT_REG1.*.log` |
+| `IBOOT_1C010_DIRECT_REG2` | final clean-build direct regression, 293 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_1C010_DIRECT_REG2.*.log` |
+| `IBOOT_1C010_DCP_SEP_FB_REG2` | final clean-build DCP + SEP + 828x1792@2 framebuffer regression, 376 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_1C010_DCP_SEP_FB_REG2.*.log` |
+| `IBOOT_1C010_SEPI_STRICT_REG2` | clean build with authentic encrypted d47 `sepi`; all 7,673,931 mapped bytes verified at SHA-256 `db0d02a7...28ed817`, SEP protocol accepted, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_1C010_SEPI_STRICT_REG2.*.log` |
 
 The ANS smoke is not claimed as a working storage regression: the documented
 ANS path requires `tools/ans/dt_ans_fixup.py`, the ANS firmware region, and a
@@ -436,5 +462,5 @@ Host-only regressions also passed:
 - `bash -n tools/probe.sh tools/re/setup_gate_probe.sh tools/re/setup_gate_sweep.sh`
 - `git diff --check` in both the superproject and QEMU submodule
 
-No disk was attached to either iBoot execution, no active-checkout firmware or
-disk artifact was modified, and nothing was pushed.
+No disk was attached to either iBoot execution, and no active-checkout firmware
+or disk artifact was modified.
