@@ -75,6 +75,69 @@ can be cold-booted twice without reseeding or protected-file unwrap failures.
 It still does not prove a complete iOS graphical boot or a Welcome/Hello frame;
 that is the separate display goal.
 
+## Wrapped-record op09 during directory-stat migration (2026-09-04)
+
+The first long settlement boot exposed a second, later filesystem-unwrapping
+request.  `ROOT_SKS_LATE_HOST2` accepted and replied to two 164-byte tagged
+User-volume op0f requests, but then rejected a 148-byte op09 without replying
+(`/tmp/dvm/probe/ROOT_SKS_LATE_HOST2.stderr.log:14157-14172,14373`).  The first
+real panic is consequently the AppleSEPKeyStore request timeout at serial line
+2054; the later byte-identical nested-panic blocks are not independent faults.
+
+The endpoint-18 OOL page remained intact after that panic.  DART sid 0 mapped
+its DVA `0x1000004c000` through TTBR `0x1001bf45` to PA
+`0x1001a478000`, where the exact 148-byte request showed variant 1, class 4, a
+40-byte wrapped record, and output selector 2.  Its SHA-256 is
+`e400aae31fd6fff8b662d28c262ca2e0c345e23eb97b99664eae1e2e7f77ee0e`.
+The pure parser replay in `tests/unit/test-darwin-sks-migrate.c` keeps the
+header, version, fixed fields, five observed classes, record length, total
+length, and selector fail-closed while treating only the cryptographic record
+bytes as opaque.
+
+The untouched-parent positive control `ROOT_SKS_OP09_LONG_POS2` reproduces the
+complete request bytes at stderr lines 14427-14437.  The model accepts the
+wrapped-record form at line 14438, constructs the already established
+three-blob-plus-scalar response at line 14439, and sends the authenticated
+128-byte reply at line 14441.  A subsequent op10 request is accepted and
+replied at lines 14442-14445, independently proving that the guest consumed the
+op09 response and continued.  The same guest then reached `gxfstat` time
+1010.681 at line 15353, about 157 guest seconds past the formerly rejected
+request, with zero `sks timeout strike` and zero `panic(cpu` matches in its
+serial log.  The resulting clean child is
+`/tmp/dvm/data-seed/root-sks-op09-long-pos2.qcow2`.
+
+The chained cold-boot regression `ROOT_SKS_OP09_LONG_REBOOT1` uses that child
+as its parent.  It mounts Data at serial line 493, completes the encrypted User
+mount at line 589, and reaches Early Boot Complete at line 641.  Its 180-second
+probe verdict reports `xnu panics: 0`; the serial log also has zero
+`sks timeout strike` matches.  The clean descendant is exposed for the next
+migration run as `/tmp/dvm/data-seed/post-op09-parent.qcow2`.  It is an
+intermediate checkpoint, not proof that the later Data-volume migration has
+settled.  This is a new alias rather than a replacement for
+`persistent-parent.qcow2`: every descendant records that original symlink as a
+backing filename, so repointing it to a descendant would create a qcow2 backing
+cycle.
+
+The seconds-long positive control for future parser changes is:
+
+```bash
+ninja -C qemu-sptm/build tests/unit/test-darwin-sks-migrate && \
+  qemu-sptm/build/tests/unit/test-darwin-sks-migrate --verbose
+```
+
+The real-guest control remains condition-bounded rather than sleeping through
+the whole requested duration:
+
+```bash
+PARENT=/tmp/dvm/data-seed/persistent-parent.qcow2 \
+CALLBACKS=sks_selector142_callbacks \
+PROBE_STOP_STDERR_REGEX='sks op09 accepted wrapped-record filesystem unwrap request' \
+AUTO_POSTMORTEM=0 KEEP_GUEST=1 HOLD_GUEST=1 \
+DARWIN_DCP_IOMFB_RPC_TRACE=0 DARWIN_SKS_REQUEST_DEBUG_CODE=0x09 \
+SECS=1200 STALL_SECS=1200 GDB_PORT=1235 \
+  tools/re/setup_gate_probe.sh ROOT_SKS_OP09_LONG_POS2
+```
+
 ## Repeatable stages
 
 Use a fresh qcow2 child for each mutating restore-ramdisk stage. The script's
