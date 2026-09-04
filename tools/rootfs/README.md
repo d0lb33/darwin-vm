@@ -63,6 +63,16 @@ credentials** (see `docs/re/rootfs-boot.md`):
 | `094-13150-145.dmg` | OS cryptex |
 | `094-14052-182.dmg` | ExclaveOS |
 
+ExclaveOS is required by AP userspace too: SILManager loads camera/microphone
+indicator manifests from its Preboot directory. `bootstrap_data_volume.sh image`
+now installs the full payload automatically (`EXCLAVE` overrides its source).
+`rebuild_persistent_parent.sh` provisions a private clone of an older base before
+creating a new fresh-format child, preserving existing checkpoint backing files.
+For an offline image, `OUT=/path/to/image.dmg bootstrap_data_volume.sh exclave`
+installs it at `/private/preboot/Cryptexes/ExclaveOS` and verifies file hashes and
+symlinks. A differing existing tree is rejected. See
+[`docs/re/exclave-assets.md`](../../docs/re/exclave-assets.md) for runtime evidence.
+
 **4. Rebuild the images.** `docs/re/rootfs-assembly.md` has the full recipe under
 "Build recipe (reproducible, no sudo anywhere)", including `merge_tc.py`'s
 source inline. `docs/re/userspace-boot-state.md` documents the cryptex merge

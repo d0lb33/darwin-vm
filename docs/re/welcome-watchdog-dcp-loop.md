@@ -116,3 +116,18 @@ the former long-running loop into a checkpoint replay measured in seconds.
 The run used diagnostic guest-memory/register writes, so it is not a storage
 or display regression result. No QEMU device-model behavior from this run is
 committed.
+
+
+## Bounded retry after native protocol fixes (2026-09-04)
+
+`DISPLAY_INSTALL_PROGRESS9` is an unchanged-guest checkpoint with native DCP
+state ACKs, valid first-unlock DER, and all currently observed SKS class
+transfers fixed. During `DISPLAY_NATIVE_R10`, AccessibilityUIServer repeatedly
+exhausts its 30-second launch watchdog while receiving roughly 0.1 seconds of
+CPU (decoded RunningBoard termination records in that run's guest LLDB log).
+A one-provision timing diagnostic enables the existing FrontBoard callback,
+sets its duration to 600 seconds, and stops at static `0x1c49eb358` immediately
+after the modified duration load. The extension is then disabled again.
+Do not call later results from this branch an unchanged-guest boot; use the
+saved `DISPLAY_INSTALL_PROGRESS9` checkpoint for that control. This diagnostic
+does not skip BKS migration, switcher assertions, or secure-indicator checks.

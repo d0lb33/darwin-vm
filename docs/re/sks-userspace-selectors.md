@@ -1,5 +1,43 @@
 # Post-Early-Boot AppleSEPKeyStore selectors
 
+## Correction: semantic device state, 2026-09-04
+
+The earlier nine-byte blob below is a **historical false positive**. It passes
+transport framing but lacks the SEQUENCE around each key/value pair. The real
+parser returns success with an entirely zeroed record; it does not decode
+`bh=-6` or populate the kernel cache. `DISPLAY_UNLOCK_R1` observed this at
+`0xfffffff029559d8c` and found the `-6` cache entry still invalid. Consequently
+`aks_get_lock_state` returned state zero, `MKBDeviceUnlockedSinceBoot` returned
+false, and the photo and installation migration workers waited for first unlock.
+
+The corrected 20-byte DER is `SET OF SEQUENCE { UTF8String key, INTEGER value }`:
+
+```
+31 12 30 07 0c 02 62 68 02 01 fa 30 07 0c 02 73 73 02 01 04
+```
+
+The guest decoder at `0xfffffff009581144` returned zero and produced `ss=4`
+at record+0 and `bh=-6` at record+0x2a from these exact bytes. The bounded input
+experiment used temporary scratch storage, restored it afterward, and is recorded
+in `/tmp/dvm/DISPLAY_UNLOCK_R1.guest-lldb.log`. Public selector 7 publishes
+record+0 at `0xfffffff009559d90..9d98`. MobileKeyBag reads its bit 2 at unslid
+`0x1ae4da598..5a0`. Descriptor `0xfffffff00b821868` names `ss`; the SEQUENCE
+iterator at `0xfffffff00a9d08e8` expects constructed tag 0x30. The native model
+now emits selector 0, length 20 and that record (104 total IPC bytes), modeling
+the existing unlocked fake-key environment. This is not an implementation of
+SEP secrecy or persistent keybag security.
+
+`DISPLAY_NATIVE_R2` then exercised the corrected native model without guest
+memory/register overrides: `AKS_STATE_DECODE_OK` recorded `ss=4, bh=-6`,
+`MKB_UNLOCK_RESULT` returned 1, and the photo plugin's first-unlock waiter finished.
+Evidence is `/tmp/dvm/DISPLAY_NATIVE_R2.guest-lldb.log` and the `.wrapper2.json` /
+`.assetsd2.json` saved-thread snapshots. The installation plugin progressed into
+pending-install cancellation; it was still outstanding at this observation.
+
+The following sections preserve the original transport investigation. Their
+claims of decoded semantic state and successful cache population are superseded
+by this direct parser witness.
+
 ## Source metadata
 
 | Item | Value |

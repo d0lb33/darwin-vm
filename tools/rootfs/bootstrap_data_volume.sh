@@ -37,7 +37,7 @@
 #      pipeline can already populate Data.
 #
 # Usage:
-#   tools/rootfs/bootstrap_data_volume.sh [all|image|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|debug-shell|normal|verify]
+#   tools/rootfs/bootstrap_data_volume.sh [all|image|exclave|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|debug-shell|normal|verify]
 #
 # Env:
 #   SRC   cryptex-merged system volume  (default ~/dvm-artifacts/build/rootfs_cx.dmg)
@@ -57,6 +57,7 @@ OUT=${OUT:-$HOME/dvm-artifacts/build/rootfs_cx_dual.dmg}
 OVL=${OVL:-$HOME/dvm-artifacts/build/rootfs_cx_dual-overlay.qcow2}
 TC=${TC:-$HOME/dvm-artifacts/tc/merged_sysvol_cryptex_tc.bin}
 WORK=${WORK:-/tmp/dvm/bootstrap}
+EXCLAVE=${EXCLAVE:-$HOME/dvm-artifacts/aea/out/094-14052-182.dmg}
 QEMU_IMG="$REPO/qemu-sptm/build/qemu-img"
 BOOTARGS_COMMON='ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort'
 SERIAL_CHAR_DELAY=${SERIAL_CHAR_DELAY:-0.002}
@@ -233,13 +234,22 @@ fi
 # ---------------------------------------------------------------- phase 1 ----
 # Add the Data / Preboot / Hardware volume slots. Host-side, no mounting.
 phase_image() {
+    [ -f "$EXCLAVE" ] || die "missing ExclaveOS payload: $EXCLAVE (run fetch_payloads.sh)"
     say "[image] build $OUT from $SRC"
     SRC="$SRC" "$REPO/tools/rootfs/build_data_volume.sh" "$OUT" 4 \
         || die "build_data_volume.sh failed"
+    phase_exclave
     say "[image] fresh overlay $OVL"
     rm -f "$OVL"
     "$QEMU_IMG" create -f qcow2 -F raw -b "$OUT" "$OVL" >/dev/null \
         || die "could not create overlay"
+}
+
+phase_exclave() {
+    say "[exclave] install matching payload on the offline Preboot volume"
+    python3 "$REPO/tools/rootfs/merge_exclave.py" --image "$OUT" \
+        --exclave "$EXCLAVE" --report "$WORK/exclave-merge.json" \
+        || die "ExclaveOS provisioning failed"
 }
 
 # ---------------------------------------------------------------- phase 2 ----
@@ -558,6 +568,7 @@ phase_verify() {
 }
 
 case "$MODE" in
+    exclave) phase_exclave ;;
     image)  phase_image ;;
     format) phase_format ;;
     ramdisk-helper) phase_ramdisk_helper ;;

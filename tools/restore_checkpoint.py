@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -21,18 +22,61 @@ from checkpoint_common import (
 BOOT_PATTERNS = ("Darwin Kernel Version", "Darwin Bootstrapper Version", "launchd[1]")
 
 
+def activate_paused_disks(qmp_path: Path) -> None:
+    """Acquire incoming disk ownership without running a guest instruction.
+
+    QEMU's HMP/QMP cont activates migrated block nodes, but gdbstub continue
+    calls vm_start directly (gdbstub/system.c). A first LLDB continue would
+    otherwise abort on BDRV_O_INACTIVE at the first ANS write.
+    """
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(30)
+        connection.connect(str(qmp_path))
+        with connection.makefile("rwb") as stream:
+            greeting = json.loads(stream.readline())
+            if "QMP" not in greeting:
+                raise RuntimeError(f"invalid QMP greeting: {greeting}")
+            for index, command in enumerate((
+                {"execute": "qmp_capabilities"},
+                {"execute": "blockdev-set-active", "arguments": {"active": True}},
+            )):
+                command["id"] = index
+                stream.write(json.dumps(command).encode() + b"\n")
+                stream.flush()
+                while True:
+                    line = stream.readline()
+                    if not line:
+                        raise RuntimeError("QMP closed before block activation")
+                    response = json.loads(line)
+                    if response.get("id") != index:
+                        continue
+                    if "error" in response:
+                        raise RuntimeError(f"QMP {command['execute']}: {response['error']}")
+                    if "return" not in response:
+                        raise RuntimeError(f"invalid QMP response: {response}")
+                    break
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=Path)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--gdb-port", type=int)
     parser.add_argument("--observe-seconds", type=int, default=120)
+    parser.add_argument("--leave-paused", action="store_true",
+                        help="load and verify the exact checkpoint PC without executing; "
+                             "attach debugger probes before resuming")
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--qemu", type=Path,
+                        help="explicit compatible QEMU override for development replay; "
+                             "records both binary hashes, never changes the checkpoint")
     args = parser.parse_args()
     if not SAFE_TAG.fullmatch(args.tag):
         parser.error("--tag must use 1-64 letters, digits, dots, underscores or dashes")
     if args.observe_seconds < 0:
         parser.error("--observe-seconds must be non-negative")
+    if args.leave_paused:
+        args.observe_seconds = 0
 
     manifest = json.loads(args.manifest.read_text())
     if manifest.get("format") != "darwin-vm-external-checkpoint-v1":
@@ -50,22 +94,27 @@ def main() -> int:
     out = (args.out or args.manifest.resolve().parent / "restores" / args.tag).resolve()
     monitor = Path("/tmp/dvm") / f"{args.tag}.restore.sock"
     uart = Path("/tmp/dvm") / f"{args.tag}.restore.uart.sock"
+    qmp = Path("/tmp/dvm") / f"{args.tag}.restore.qmp.sock"
     pid_file = out / "qemu.pid"
     serial = out / "serial.log"
     stderr = out / "qemu.stderr.log"
     disk = out / "disk.qcow2"
     report_path = out / "restore-report.json"
-    for path in (monitor, uart):
+    for path in (monitor, uart, qmp):
         if path.exists():
             raise RuntimeError(f"refusing to reuse existing socket path {path}")
 
-    qemu = Path(manifest["qemu_argv"][0]).resolve()
+    source_qemu = Path(manifest["qemu_argv"][0]).resolve()
+    qemu = (args.qemu or source_qemu).resolve()
     qemu_img = qemu.with_name("qemu-img")
-    expected_qemu = manifest["qemu_inputs"].get(str(qemu), {}).get("sha256")
-    if expected_qemu and sha256(qemu) != expected_qemu:
+    expected_qemu = manifest["qemu_inputs"].get(str(source_qemu), {}).get("sha256")
+    actual_qemu = sha256(qemu)
+    if not args.qemu and expected_qemu and actual_qemu != expected_qemu:
         raise RuntimeError("QEMU binary differs from the checkpoint source")
     for name, expected in manifest["qemu_inputs"].items():
         path = Path(name)
+        if args.qemu and path.resolve() == source_qemu:
+            continue
         if not path.is_file() or sha256(path) != expected["sha256"]:
             raise RuntimeError(f"QEMU input differs from checkpoint source: {path}")
     # Preserve the restore tag when immutable inputs fail verification.
@@ -79,6 +128,9 @@ def main() -> int:
         manifest["qemu_argv"], source_disk, disk, monitor, serial, uart,
         state, args.gdb_port,
     )
+    argv[0] = str(qemu)
+    if args.leave_paused:
+        argv += ["-qmp", f"unix:{qmp},server=on,wait=off"]
     env = {
         key: value for key, value in os.environ.items()
         if not key.startswith("DARWIN_") and not key.startswith("GXFSTAT_")
@@ -117,10 +169,16 @@ def main() -> int:
             raise RuntimeError(
                 f"restored PC {restored_pc} != checkpoint PC {manifest['source_pc']}"
             )
+        if args.leave_paused:
+            activate_paused_disks(qmp)
+            if ("paused" not in hmp.command("info status") or
+                    parse_pc(hmp.command("info registers")) != restored_pc):
+                raise RuntimeError("guest advanced during paused block activation")
         stderr_before_resume = stderr.stat().st_size if stderr.exists() else 0
         serial_before_resume = serial.stat().st_size if serial.exists() else 0
         restore_seconds = time.monotonic() - started
-        hmp.command("cont")
+        if not args.leave_paused:
+            hmp.command("cont")
         peak_rss_kib = 0
         observation_started = time.monotonic()
         observe_deadline = time.monotonic() + args.observe_seconds
@@ -197,6 +255,11 @@ def main() -> int:
             "format": "darwin-vm-restore-report-v1",
             "tag": args.tag,
             "source_manifest": str(args.manifest.resolve()),
+            "qemu_binary": {
+                "source_sha256": expected_qemu, "restore_sha256": actual_qemu,
+                "override": args.qemu is not None,
+                "development_replay": actual_qemu != expected_qemu,
+            },
             "qemu_pid": proc.pid,
             "monitor": str(monitor),
             "uart": str(uart),
@@ -210,6 +273,7 @@ def main() -> int:
             "peak_rss_kib": peak_rss_kib,
             "disk_child_bytes": disk.stat().st_size,
             "observation_seconds_requested": args.observe_seconds,
+            "left_paused": args.leave_paused,
             "observation_seconds_actual": round(observed_seconds, 3),
             "observation_ended_on_panic": panic_seen,
             "qemu_alive": pid_alive(proc.pid),
@@ -239,7 +303,7 @@ def main() -> int:
             "first_panic": report["first_panic"],
             "sptm_panic": sptm_panic,
             "acceptance_witnesses": acceptance,
-            "guest_left_running": not (first_panic or sptm_panic),
+            "guest_left_running": not (args.leave_paused or first_panic or sptm_panic),
         }
         if first_panic or sptm_panic:
             # A panicked restore is not useful to leave consuming host memory.
@@ -252,7 +316,8 @@ def main() -> int:
                 proc.wait(timeout=10)
             print(json.dumps(summary, indent=2))
             return 1
-        hmp.command("cont")
+        if not args.leave_paused:
+            hmp.command("cont")
         print(json.dumps(summary, indent=2))
         return 0
     except Exception:

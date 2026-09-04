@@ -42,11 +42,12 @@ attach)
     [ -n "$img" ] || die "usage: safe_attach.sh attach <image> [--readonly] [--owners on|off]"
     [ -e "$img" ] || die "no such image: $img"
 
-    ro=""; owners="on"
+    ro=""; owners="on"; volume_name=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --readonly) ro="-readonly"; shift ;;
             --owners)   owners="$2"; shift 2 ;;
+            --volume-name) volume_name="$2"; shift 2 ;;
             *) die "unknown option: $1" ;;
         esac
     done
@@ -60,12 +61,15 @@ attach)
     out=$(hdiutil attach -nobrowse -owners "$owners" $ro "$img" 2>&1) || {
         echo "$out" >&2; die "attach failed"
     }
-    mnt=$(printf '%s\n' "$out" | grep -oE '/Volumes/.*$' | tail -1 | sed 's/[[:space:]]*$//')
-    [ -n "$mnt" ] || { printf '%s\n' "$out"; die "attached but no mount point (nomount image?)"; }
+    mounts=$(printf '%s\n' "$out" | grep -oE '/Volumes/.*$' | sed 's/[[:space:]]*$//')
+    [ -n "$mounts" ] || { printf '%s\n' "$out"; die "attached but no mount point (nomount image?)"; }
+    selected=""; matches=0
 
     # Keep Spotlight and fseventsd off it. Best effort: a read-only mount cannot
     # take the marker, which is fine because nothing changes on it either.
-    if [ -z "$ro" ]; then
+    while IFS= read -r mnt; do
+      last_mount="$mnt"
+      if [ -z "$ro" ]; then
         touch "$mnt/.metadata_never_index" 2>/dev/null \
             && echo "safe_attach: Spotlight excluded via .metadata_never_index" >&2
         # .metadata_never_index stops Spotlight (mds) but NOT fseventsd, which
@@ -76,9 +80,24 @@ attach)
         mkdir -p "$mnt/.fseventsd" 2>/dev/null \
             && touch "$mnt/.fseventsd/no_log" 2>/dev/null \
             && echo "safe_attach: fseventsd disabled via .fseventsd/no_log" >&2
+      fi
+      if [ -z "$volume_name" ]; then
+          selected="$mnt"
+      else
+          actual=$(diskutil info -plist "$mnt" | python3 -c 'import plistlib,sys; print(plistlib.loads(sys.stdin.buffer.read()).get("VolumeName", ""))')
+          if [ "$actual" = "$volume_name" ]; then
+              selected="$mnt"; matches=$((matches + 1))
+          fi
+      fi
+    done <<< "$mounts"
+    if [ -n "$volume_name" ] && [ "$matches" != 1 ]; then
+        # This attachment belongs to us; detach its whole image on selection
+        # failure, using one of its actual mountpoints.
+        hdiutil detach "$last_mount" >&2 || true
+        die "expected one volume named $volume_name, found $matches"
     fi
 
-    echo "$mnt"
+    echo "$selected"
     ;;
 
 detach)

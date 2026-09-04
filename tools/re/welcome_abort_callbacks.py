@@ -133,23 +133,13 @@ def on_invalid_indicator_return(frame, _bp_loc, _dict):
             frame.FindRegister("w0").GetValueAsUnsigned() != 0xffffffff):
         return False
     INVALID_INDICATOR_HITS[0] += 1
-    sp = frame.GetSP()
-    name = _u64(process, sp)
-    raw = _read(process, name, 64) if name else b""
-    print("WELCOME_INVALID_INDICATOR hit=%d object=0x%x raw=%s" %
-          (INVALID_INDICATOR_HITS[0], name, raw.hex()), flush=True)
-    # NSString subclasses vary.  Preserve every pointer-like word and a
-    # bounded candidate string so a constant, heap, or tagged representation
-    # can be distinguished without executing guest Objective-C code.
-    for offset in range(0, len(raw) - 7, 8):
-        value = int.from_bytes(raw[offset:offset + 8], "little")
-        candidate = _read(process, value, 128)
-        if candidate:
-            print("WELCOME_INVALID_INDICATOR_WORD offset=0x%x value=0x%x "
-                  "bytes=%s string=%r" %
-                  (offset, value, candidate[:64].hex(),
-                   candidate.split(b"\0", 1)[0].decode("utf-8", "replace")),
-                  flush=True)
+    # At this boundary x21 is the layer. The name is not stored at sp until
+    # the subsequent exception construction (static 0x184569000). Reading
+    # sp as an NSString here previously labelled unrelated stack data a name.
+    layer = frame.FindRegister("x21").GetValueAsUnsigned()
+    manifest = _u64(process, SLIDE[0] + 0x2ce831590)
+    print("WELCOME_INVALID_INDICATOR hit=%d layer=0x%x sil_manifest=0x%x" %
+          (INVALID_INDICATOR_HITS[0], layer, manifest), flush=True)
     if BYPASS_INVALID_INDICATOR:
         changed = frame.FindRegister("w0").SetValueFromCString("0")
         print("WELCOME_INVALID_INDICATOR_BYPASS from=0xffffffff to=0 "

@@ -133,7 +133,16 @@ the retained copy after one use.  It must be debug-disabled by default.
 This is preferable to a generic "force SKS success" command: the latter would
 hide parser, response-digest, mailbox, and completion bugs.
 
-### 5. Defer whole-VM checkpoints
+### 5. Whole-VM checkpoints are now available
+
+**Update 2026-09-04:** the paragraph below describes the pre-migration model.
+Device-state migration and paired immutable disks are now implemented. Use
+`tools/create_checkpoint.py` and `tools/restore_checkpoint.py --leave-paused` as
+documented in [checkpoint-restore.md](checkpoint-restore.md). Capture a healthy
+boundary before a rejected request reaches the SKS timeout; a post-panic snapshot
+preserves evidence but cannot resume normal execution.
+
+Historical limitation:
 
 QEMU can save generic CPU/RAM and block state, but the custom Darwin ANS, SEP,
 DCP, IOMFB, ASC, AFK, and EPIC models currently declare no

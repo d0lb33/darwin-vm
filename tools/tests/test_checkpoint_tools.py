@@ -1,6 +1,7 @@
 """Host-only tests for exact checkpoint restore command rewriting."""
 
 import os
+import json
 import sys
 import tempfile
 import unittest
@@ -15,9 +16,38 @@ from checkpoint_common import (  # noqa: E402
     parse_migration_status, process_argv_env, qcow2_backing_chain, restore_argv,
     sptm_panic_message, serial_hex_clock_bounds, verify_backing_chain,
 )
+from restore_checkpoint import activate_paused_disks  # noqa: E402
 
 
 class CheckpointCommandTests(unittest.TestCase):
+    def test_paused_activation_handles_events_without_resuming_cpu(self):
+        stream = mock.MagicMock()
+        stream.readline.side_effect = [
+            b'{"QMP": {}}\n', b'{"event": "STOP"}\n',
+            b'{"return": {}, "id": 0}\n',
+            b'{"return": {}, "id": 1}\n',
+        ]
+        with mock.patch("restore_checkpoint.socket.socket") as socket_factory:
+            connection = socket_factory.return_value.__enter__.return_value
+            connection.makefile.return_value.__enter__.return_value = stream
+            activate_paused_disks(Path("/tmp/test.qmp"))
+        commands = [json.loads(call.args[0]) for call in stream.write.call_args_list]
+        self.assertEqual([command["execute"] for command in commands],
+                         ["qmp_capabilities", "blockdev-set-active"])
+        self.assertEqual(commands[1]["arguments"], {"active": True})
+
+    def test_paused_activation_error_is_not_ignored(self):
+        stream = mock.MagicMock()
+        stream.readline.side_effect = [
+            b'{"QMP": {}}\n', b'{"return": {}, "id": 0}\n',
+            b'{"error": {"desc": "locked"}, "id": 1}\n',
+        ]
+        with mock.patch("restore_checkpoint.socket.socket") as socket_factory:
+            connection = socket_factory.return_value.__enter__.return_value
+            connection.makefile.return_value.__enter__.return_value = stream
+            with self.assertRaisesRegex(RuntimeError, "locked"):
+                activate_paused_disks(Path("/tmp/test.qmp"))
+
     def test_qemu_11_migration_status_format(self):
         self.assertEqual(parse_migration_status("Status:\t\tcompleted\n"),
                          "completed")
@@ -73,6 +103,7 @@ class CheckpointCommandTests(unittest.TestCase):
             "-serial", "chardev:probe_uart",
             "-drive", "if=none,id=ans,file=/images/source.qcow2,format=qcow2",
             "-gdb", "tcp::1234", "-pidfile", "/tmp/source.pid", "-S",
+            "-qmp", "unix:/tmp/source.qmp,server=on,wait=off",
         ]
         result = restore_argv(
             source, Path("/images/source.qcow2"), Path("/restore/disk.qcow2"),
@@ -87,6 +118,7 @@ class CheckpointCommandTests(unittest.TestCase):
         self.assertIn("tcp::2345", result)
         self.assertNotIn("tcp::1234", result)
         self.assertNotIn("/tmp/source.pid", result)
+        self.assertNotIn("unix:/tmp/source.qmp,server=on,wait=off", result)
         self.assertEqual(result.count("-S"), 1)
 
     @unittest.skipUnless(sys.platform == "darwin", "kern.procargs2 is macOS-only")

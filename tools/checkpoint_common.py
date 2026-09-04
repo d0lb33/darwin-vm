@@ -265,7 +265,7 @@ def restore_argv(
     saw_monitor = saw_drive = saw_serial = False
     while i < len(source):
         arg = source[i]
-        if arg in {"-incoming", "-gdb", "-pidfile"} and i + 1 < len(source):
+        if arg in {"-incoming", "-gdb", "-pidfile", "-qmp"} and i + 1 < len(source):
             i += 2
             continue
         if arg == "-monitor" and i + 1 < len(source):

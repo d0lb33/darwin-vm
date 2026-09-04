@@ -57,7 +57,14 @@ stage() {  # stage NAME -- runs the command only once START_AT has been reached
 
 do_format() {
     if [[ ! -e "$RUN/fresh-format.qcow2" ]]; then
-        "$QIMG" create -f qcow2 -F raw -b "$BASE_DMG" "$RUN/fresh-format.qcow2" >/dev/null || return 1
+        # Old durable bases predate ExclaveOS provisioning. Clone one for this
+        # rebuild so existing qcow2/checkpoint backing chains stay immutable.
+        local prepared="$RUN/base-exclave.dmg"
+        if [[ ! -e "$prepared" ]]; then
+            cp -c "$BASE_DMG" "$prepared" || return 1
+        fi
+        OUT="$prepared" WORK="$WORK" "$B" exclave || return 1
+        "$QIMG" create -f qcow2 -F raw -b "$prepared" "$RUN/fresh-format.qcow2" >/dev/null || return 1
     fi
     OUT="$BASE_DMG" OVL="$RUN/fresh-format.qcow2" WORK="$WORK" "$B" format
 }

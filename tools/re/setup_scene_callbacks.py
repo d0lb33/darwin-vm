@@ -19,6 +19,7 @@ PROGNAME_PTR = 0x1e6ef1590
 SHARED_CACHE_SLIDE = [0]
 CONFIG = {}
 HITS = {}
+ARMED_LAUNCHES = set()
 
 
 CHECKPOINTS = (
@@ -90,3 +91,30 @@ def install(debugger, shared_cache_slide, setup_image_slide):
     for identifier, label, address in created:
         print("WELCOME_SETUP_SCENE_BREAKPOINT id=%d label=%s address=0x%x" %
               (identifier, label, address), flush=True)
+
+
+def on_application_main(frame, _bp_loc, _dict):
+    """Install the executable probes before UIKit can connect the scene."""
+    if _progname(frame.GetThread().GetProcess()) != "Setup":
+        return False
+    # The launch call's return address is established in Setup's executable.
+    address = frame.FindRegister("lr").GetValueAsUnsigned() & 0x0000ffffffffffff
+    slide = address - 0x100005d74
+    if slide < 0 or slide & 0x3fff:
+        print("WELCOME_SETUP_SCENE_INVALID_LAUNCH_RETURN lr=0x%x" % address,
+              flush=True)
+        return True
+    if slide not in ARMED_LAUNCHES:
+        install(frame.GetThread().GetProcess().GetTarget().GetDebugger(),
+                SHARED_CACHE_SLIDE[0], slide)
+        ARMED_LAUNCHES.add(slide)
+    return False
+
+
+def install_on_launch(debugger, shared_cache_slide):
+    SHARED_CACHE_SLIDE[0] = int(shared_cache_slide)
+    breakpoint = debugger.GetSelectedTarget().BreakpointCreateByAddress(
+        int(shared_cache_slide) + 0x18490d11c)
+    breakpoint.SetScriptCallbackFunction(__name__ + ".on_application_main")
+    print("WELCOME_SETUP_SCENE_LAUNCH_ANCHOR id=%d" % breakpoint.GetID(),
+          flush=True)

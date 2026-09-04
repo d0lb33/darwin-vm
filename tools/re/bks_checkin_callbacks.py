@@ -74,15 +74,24 @@ def _write_event(name, payload):
 def on_break(frame, bp_loc, _dict):
     breakpoint = bp_loc.GetBreakpoint()
     cfg = CONFIG[breakpoint.GetID()]
+    process = frame.GetThread().GetProcess()
+    name = _progname(process)
+    # PIE addresses are shared across unrelated address spaces. A hit at a
+    # backboardd offset in e.g. fairplayd must neither consume the hit budget
+    # nor report a successful migration return (DISPLAY_NATIVE_R2, bp 50).
+    allowed = cfg.get("allowed")
+    if allowed is None and cfg["label"].startswith(("BKD_", "BKM_")):
+        allowed = ("backboardd",)
+    if allowed and name not in allowed:
+        return False
     hit = HITS.get(cfg["label"], 0) + 1
     HITS[cfg["label"]] = hit
-    process = frame.GetThread().GetProcess()
     registers = {name: _reg(frame, name) for name in cfg["regs"]}
     payload = {
         "address": cfg["address"],
         "hit": hit,
         "label": cfg["label"],
-        "progname": _progname(process),
+        "progname": name,
         "registers": registers,
         "thread": frame.GetThread().GetThreadID(),
         "time": time.time(),

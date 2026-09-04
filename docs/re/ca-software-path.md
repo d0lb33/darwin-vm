@@ -341,10 +341,13 @@ building:
   the *only* remaining display work rather than one of two.
 - Framebuffer compression: `AccelServer::renderer()` consults
   `_CADeviceUseFramebufferCompression` (**[dev]** `0x18440f8dc`, **[mac]**
-  `0x18b0c3ec4`) only on the Metal path, so the software path produces uncompressed surfaces; the DCP side
-  logs `IOMFB: Surface %d has cacheMode 0x%x, needs to be 0x%x for display RT
-  fetch` and `GP Decompression Error` for the compressed case, which we then
-  never enter. Risk, not blocker.
+  `0x18b0c3ec4`) only on the Metal path. However, the cache-mode gate is
+  independent of compression: `surface_map_dcp` at `0xfffffff00a0b9190`
+  requires `0x700` for the software surface too. In `DISPLAY_RT_R23` the
+  native software allocator explicitly requested `0x400`, causing
+  `kIOReturnBadMedia`. In `DISPLAY_RT_R24`, changing the request before
+  allocation to `0x700` produced a native successful mapping and the first
+  A408. See [surface-cache-and-completion.md](surface-cache-and-completion.md).
 - Rotation/scaling copies: `CA::WindowServer::Display` has
   `iosurface_accelerator_supports_{scale,size,color_remap}` and the env
   `CA_FORCE_COPY_SURFACE_{GPU,MSR}` (**[dev]**/**[sim]** strings). The MSR is
