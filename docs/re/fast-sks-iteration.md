@@ -183,11 +183,27 @@ input zero and returned success with the established DER record
 (`/tmp/dvm/ROOT_SKS_SELECTOR7_CALLERS1.lldb.log:19-24`).  Selector 7 is a
 shared state API, not one identifiable daemon spinning on a failed request.
 
+Reproduce that caller sample without a fixed sleep:
+
+```sh
+CALLBACKS=sks_selector7_callbacks \
+PROBE_SUCCESS_LABELS=SKS_SELECTOR7_THREE_RESULTS \
+AUTO_POSTMORTEM=0 KEEP_GUEST=0 DARWIN_DCP_IOMFB_RPC_TRACE=0 SECS=90 \
+  tools/re/setup_gate_probe.sh SKS_SELECTOR7_CALLERS
+```
+
 A second breakpoint at the shared wire-op19 wrapper filtered specifically for
 state `-501`.  The first three calls were all `backboardd`: public selector 17,
 then 35, then 17, on one thread and context
 (`/tmp/dvm/ROOT_SKS_OP19_FILTERED1.lldb.log:16-20`).  They occur during the
 first normal userspace boot window, not at minute 41.
+
+```sh
+CALLBACKS=sks_op19_state_callbacks \
+PROBE_SUCCESS_LABELS=SKS_OP19_NEG501_THREE \
+AUTO_POSTMORTEM=0 KEEP_GUEST=0 DARWIN_DCP_IOMFB_RPC_TRACE=0 SECS=90 \
+  tools/re/setup_gate_probe.sh SKS_OP19_NEG501
+```
 
 The return-following control then broke on the userspace
 `aks_get_device_state` and `aks_get_extended_device_state` wrappers.  It
@@ -200,6 +216,13 @@ first normal state read to `_MKBGetDeviceLockState` in the
 BiometricKit/Pearl HID-filter construction path.  The extended call, and the
 following normal call, are in Biome stream/datastore publisher setup through
 `_PASDeviceState isDeviceUnlocked`.
+
+```sh
+CALLBACKS=aks_backboard_state_callbacks \
+PROBE_SUCCESS_LABELS=AKS_BKD_STATE_THREE \
+AUTO_POSTMORTEM=0 KEEP_GUEST=0 DARWIN_DCP_IOMFB_RPC_TRACE=0 SECS=90 \
+  tools/re/setup_gate_probe.sh AKS_BKD_STATE
+```
 
 This proves that the current reply is accepted by those early clients.  It
 does **not** yet name every late caller among the 362,450 requests.  The best
