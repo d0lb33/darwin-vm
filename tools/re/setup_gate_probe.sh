@@ -237,6 +237,20 @@ fi
 wait "$LLDB_PID" 2>/dev/null || true
 echo "hits: $(grep -c '^=== ' "/tmp/dvm/$TAG.lldb.log" 2>/dev/null)  proofs: $(grep -c COMMAND_LIST_PROOF "/tmp/dvm/$TAG.lldb.log" 2>/dev/null)"
 
+# probe.sh freezes QEMU before returning, but detaching the guest-side LLDB
+# session above resumes a gdbstub inferior.  Reassert the stop after LLDB is
+# gone so KEEP_GUEST really preserves the exact condition boundary for a
+# post-mortem or same-boot follow-up.  ROOT_WELCOME_CHECKPOINT1 caught this:
+# the driver reported a frozen guest while gxfstat and IOMFB traffic continued.
+if [[ "$KEEP_GUEST" == 1 ]]; then
+    if python3 "$REPO/tools/hmp.py" "$SOCK" stop >/dev/null 2>&1; then
+        echo "guest re-frozen after LLDB detach: $SOCK"
+    else
+        echo "setup_gate_probe: could not re-freeze kept guest after LLDB detach" >&2
+        PROBE_RC=1
+    fi
+fi
+
 STOP_REASON=$([[ -f "$STOP_FILE" ]] && head -1 "$STOP_FILE" || true)
 RUN_POSTMORTEM=0
 case "$AUTO_POSTMORTEM" in
