@@ -196,7 +196,7 @@ plausible reset/watchdog implementation cannot make the parked caller resume.
 
 ## Current bounded checkpoint
 
-QEMU commits through `862b31c` implement only finite, observed d47 bootstrap
+QEMU commits through `a56e663` implement only finite, observed d47 bootstrap
 transactions. In addition to the earlier LLC/SEP/APIA/root work, they
 validate:
 
@@ -223,8 +223,13 @@ validate:
   `+0x69248`, `+0x69b6c`, `+0x6a490`, `+0x6adb4`, and `+0x6b6d8`;
 - exact second selector requests `0x84000002` and `0x85000002` for words 0
   and 1, followed by cold-zero RMWs at `+0x58010` and `+0x5c008`;
-- one ordered repeat of the `+0x40140` zero RMW; and
-- the selected word-8 request `0x82000024`.
+- one ordered repeat of the `+0x40140` zero RMW;
+- the selected word-8 request `0x82000024`, followed by the exact range-2
+  RMWs at `+0x6f000` and `+0x6f100`;
+- 13 exact PMGR target-nibble reset preconditions proven by the firmware's
+  source-line-500 assertion; and
+- four range-43 cold-start latch words at `+0x8ac000`, `+0x800000`,
+  `+0x8ac028`, and `+0x864000`.
 
 No completion value is synthesized for the topology or MCC loops: their prior
 firmware writes leave the polled bit clear. Invalid order, width, mask, value,
@@ -254,33 +259,88 @@ post-sparse RMWs are ordered behind selector-word-1 phase 5; and the repeated
 `+0x40140` RMW is unavailable until that pair completes. An extra, reordered,
 wrong-width, or wrong-value transaction terminates QEMU.
 
-The research and release checkpoint logs agree line-for-line on the late
-sequence at `IBOOT_RANGE2_SELECTOR8_R1.stderr.log:380-391` and
-`IBOOT_RELEASE_RANGE2_SELECTOR8_R1.stderr.log:380-391`. Their new first
-unsupported accesses are line 392:
+The two post-selector RMWs are now attributed to exact table records. The
+`+0x6f000` record is research raw `+0x23c318 -> +0x2e5580` and release raw
+`+0x239ec8 -> +0x2e2810`, with mask/value `1/1`. The `+0x6f100` record is
+research `+0x24b780 -> +0x2eac58` and release `+0x249330 -> +0x2e7ee8`, with
+mask/value `0x8000ffff/0x80005110`. Both are ordered behind selector-word-8
+phase 5 and neither has a completion poll.
+
+The failure after those RMWs was initially misattributed to
+`pmgr[1]+0x38004`. That write is only iBoot's panic marker. The panic buffer at
+research VA `0xfffffc01fc44b000` contains:
 
 ```text
-unimp: read  0x30006f000 (pmgr[2]+0x6f000) -> 0x0 size 4 pc=0xfffffc01fc10b610 el=0 pstate=0x800004c0 sp=0x30000053e60 x0=0x30006f000 x1=0x4 x2=0xfffffc01fc10b5dc x3=0xfffffc01fc10b67c
+iBoot Panic: : 9ccf861420ca495:500
 ```
 
-The release image reaches the same physical boundary from runtime
-`0xfffffc01fc10a6ec`; research uses `0xfffffc01fc10b610`. The associated write
-helpers remain research `0xfffffc01fc10b6b0` and release
-`0xfffffc01fc10a78c`.
+The real assertion is research `0xfffffc01fc093d20` (release
+`0xfffffc01fc093a5c`). Before changing a PMGR device state, the helper requires
+the existing target nibble `[3:0]` to be `0xf`. The following exact d47 table
+records were observed successively at that assertion and are now validated
+against device ID, PMGR range, state offset, flags, and name before being
+initialized:
 
-The bounded continuation supplies the next implementation target without
-admitting it. In both checkpoint logs, lines 393-395 show an exact 32-bit
-read/RMW pair at `+0x6f000` producing `0x00000001`, immediately followed by
-one at `+0x6f100` producing `0x80005110`. The latter literal appears in a
-mask/value record (`0x8000ffff/0x80005110`) at research raw `+0x2eac50` and
-release raw `+0x2e7ee0`. Before implementation, the next increment must pin
-the table/DT selection that computes these two target offsets, then admit only
-these two ordered transactions behind selector-word-8 phase 5. The diagnostic
-continuation subsequently reaches existing PMGR power-state transitions and
-then writes failure code `0x401fc44b` to `pmgr[1]+0x38004` from research
-runtime `0xfffffc01fc0c4864`
-(`IBOOT_RANGE2_6F000_DIAG_R1.stderr.log:396-406`); that failure path must not
-be modeled as a success response.
+| device ID | range + offset | flags | name |
+|---:|---:|---:|---|
+| `0x2c` | `0 + 0x218` | `0x09` | `AFISOCNI0` |
+| `0x2d` | `0 + 0x220` | `0x09` | `AFISOCNI1` |
+| `0x2e` | `0 + 0x228` | `0x09` | `AFISOCNI2` |
+| `0x26` | `0 + 0x1e8` | `0x00` | `AFINS0` |
+| `0x21` | `0 + 0x1c0` | `0x09` | `AFCMCCNI0` |
+| `0x1e` | `0 + 0x1a8` | `0x00` | `PIOGW` |
+| `0x1c` | `0 + 0x198` | `0x09` | `AFIMCCNI0` |
+| `0x0f` | `0 + 0x130` | `0x09` | `PMS` |
+| `0x0e` | `0 + 0x128` | `0x09` | `PMS_BUSIF` |
+| `0x09` | `0 + 0x100` | `0x09` | `SBR` |
+| `0x35` | `0 + 0x260` | `0x01` | `SIO` |
+| `0x8e` | `1 + 0x070` | `0x09` | `NUB_AON` |
+| `0x96` | `1 + 0x0b0` | `0x09` | `DEBUG_SWITCH` |
+
+Only target bits `[3:0]` start at `0xf`; actual-state bits `[7:4]` remain zero
+until an accepted firmware write drives the existing PMGR state transition.
+The research caller at `0xfffffc01fc0e9534..0xfffffc01fc0e962c` contains 12
+top-level requests; recursive dependencies account for the 13 target words.
+Once all are present, both images clear the line-500 panic and continue.
+
+The next cross-build-identical block performs four ordered, non-polling RMW
+sequences in PMGR range 43:
+
+| physical address | range offset | exact operation |
+|---:|---:|---|
+| `0x3028ac000` | `+0x8ac000` | read; write `old | 0x01` |
+| `0x302800000` | `+0x800000` | read/write `old | 0x04`; reread/write `old | 0x20` |
+| `0x3028ac028` | `+0x8ac028` | read; write `old | 0x01` |
+| `0x302864000` | `+0x864000` | read; write `old | 0x02` |
+
+Research raw `+0x69250..+0x6929c` and release raw
+`+0x68540..+0x6858c` are instruction-for-instruction equivalent for these
+accesses. The model starts only these four words at the explicit cold-clear
+representative and rejects a wrong width, value, order, or extra transaction;
+it supplies no status value.
+
+### Current first unsupported boundary
+
+After all four latches, both images enter the next helper and stop on a 32-bit
+read at physical `0x3028aa0bc`, PMGR range 43 `+0x8aa0bc`. The diagnostic zero
+is not an accepted reset-value model. The following instruction writes
+`old | 0x40`:
+
+```text
+research: read pc=0xfffffc01fc0ee468; write pc=0xfffffc01fc0ee470
+release:  read pc=0xfffffc01fc0ed758; write pc=0xfffffc01fc0ed760
+```
+
+The persisted research stop records `x0=0x39b4, x1=0, x2=0,
+x3=0xfffffc01fc10b67c`; the release stop records `x0=0x37cb, x1=0, x2=0,
+x3=0xfffffc01fc10a758`. Exact accepted latch lines and boundary registers are
+in `IBOOT_RANGE43_BOUNDARY_RESEARCH.stderr.log:419-425` and
+`IBOOT_RANGE43_BOUNDARY_RELEASE.stderr.log:419-425`. The next implementation
+increment must audit all static references and downstream consumers of this
+word, then either preserve any independently required reset bits or admit an
+explicitly labeled representative. It may accept only `read32;
+write32(old | 0x40)` at this exact address and must not add a completion
+response.
 
 ## Regressions and controls
 
@@ -305,6 +365,9 @@ After the changes:
 | `IBOOT_RANGE2_6F000_DIRECT_REG1` | current direct-boot regression, 294 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE2_6F000_DIRECT_REG1.*.log` |
 | `IBOOT_RANGE2_6F000_DCP_SEP_FB_REG1` | current DCP + SEP + 828x1792@2 framebuffer regression, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE2_6F000_DCP_SEP_FB_REG1.*.log` |
 | `IBOOT_RANGE2_6F000_SEPI_STRICT_REG1` | authentic encrypted d47 `sepi` transport, full 7,673,931-byte mapped-container SHA-256 verified, SEP protocol accepted, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE2_6F000_SEPI_STRICT_REG1.*.log` |
+| `IBOOT_RANGE43_DIRECT_REG1` | current direct-boot regression, 303 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE43_DIRECT_REG1.*.log` |
+| `IBOOT_RANGE43_DCP_SEP_FB_REG1` | current DCP + SEP + 828x1792@2 framebuffer regression, 376 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE43_DCP_SEP_FB_REG1.*.log` |
+| `IBOOT_RANGE43_SEPI_STRICT_REG1` | authentic encrypted d47 `sepi` transport, full 7,673,931-byte mapped-container SHA-256 verified, SEP protocol accepted, 375 serial lines, 0 panics, restore shell reached | `/tmp/dvm/iboot-main/probe/IBOOT_RANGE43_SEPI_STRICT_REG1.*.log` |
 
 The ANS smoke is not claimed as a working storage regression: the documented
 ANS path requires `tools/ans/dt_ans_fixup.py`, the ANS firmware region, and a

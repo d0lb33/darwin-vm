@@ -21,9 +21,11 @@ the evidenced response opcode advances iBoot past that protocol boundary.
 Those boundaries are now historical. Device-free static/runtime correlation
 has subsequently advanced both pinned d47 images through the EL2 APIA writes,
 the page-table-proven `root` scratch mapping, CPM/bootstrap unlock, early PMGR
-and GPIO initialization, the topology and MCC protocols, and the signed PMGR
-tuning tables through range-3 offset `0x62010`. Both images now stop at the
-same range-2 physical access, `0x300040000`; see
+and GPIO initialization, topology and MCC protocols, the signed PMGR tuning
+tables, the late range-2 table, 13 exact boot-on target preconditions, and four
+range-43 cold-start latches. Both images now stop at the same physical access,
+`0x3028aa0bc` (`pmgr[43]+0x8aa0bc`), where they read a word and next write
+`old | 0x40`; see
 [`iboot-runtime.md`](iboot-runtime.md#current-bounded-checkpoint).
 
 This does **not** prove every literal T8140 reset value or a kernel handoff. It
