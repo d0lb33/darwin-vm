@@ -5,6 +5,12 @@ project guide for layout, ownership, evidence standards, build and probe
 commands, host-safety constraints, current status, and known false leads. Apply
 all of those rules to Codex work.
 
+For work on `codex/iboot-main`, also apply `CLAUDE.md`'s **iBoot unsigned-boot
+research policy**. Explicit, default-off, evidenced boot-policy/signature
+bypasses are authorized on that branch. Hardware and protocol behavior remain
+fail-closed: this exception is never authority to fabricate MMIO state or
+device replies.
+
 ## Custom agent routing
 
 Project-scoped agents live under `.codex/agents/`:

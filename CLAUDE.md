@@ -44,6 +44,30 @@ message out of guest memory. Device model tracing is opt-in per model:
 `DARWIN_AIC_DEBUG=1`, `DARWIN_ASC_DEBUG=1`, `DARWIN_DART_DEBUG=1`,
 `DARWIN_UNIMP_DEBUG=1`.
 
+## iBoot unsigned-boot research policy
+
+On the `codex/iboot-main` research branch, the user explicitly authorizes
+opt-in bypasses of Apple boot-policy validation so the VM can run compatible
+unsigned or modified iOS components. This includes iBoot Image4 signature,
+IM4M/APTicket/personalization, trust-policy, root-hash/seal, SPTM/TXM policy,
+and kernel AppleImage4/AMFI gates when each gate is independently identified.
+This authorization supersedes the earlier iBoot-task restriction against
+weakening validation, but only for cryptographic and boot-policy decisions.
+
+Every bypass must remain explicit, default-off, build/hash-pinned where
+practical, and log the image, runtime/static patch address, original bytes or
+decision, and resulting control flow. Preserve structural parsing,
+decompression, bounds checks, load-address checks, and memory-safety checks.
+Keep an unmodified validation path as a control and never describe a bypassed
+chain as Apple-verified or secure boot.
+
+This exception does **not** permit invented hardware success values, fake
+protocol replies, ignored MMIO failures, or weakened device-model validation.
+Continue the first-boundary method for CPU, PMGR, SEP, ANS, storage, display,
+and every other device. Preserve direct boot and all existing device behavior.
+Use only isolated firmware copies and disposable disk overlays; never modify
+the active checkout or its durable/base disk artifacts.
+
 Boot-arg `io=0x1f` makes IOKit log every driver match and start, which is how you
 see where a driver chain stalls.
 

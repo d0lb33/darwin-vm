@@ -12,9 +12,16 @@ The first blocker, Apple system register `LLC_RAM_CONFIG`
 (`S3_3_c15_c7_0`), was reconstructed far enough from three independent Apple
 iBoot/device-tree pairs to run a bounded, explicitly gated hypothesis.  The
 probe executed iBoot's register write and completion poll, did not enter its
-PMGR failure path, and reached the next independent hardware boundary: a SEP
-ASC mailbox status read at physical `0x282608114`.  No value was added for that
-MMIO read and the stop-first probe stopped there.
+PMGR failure path, and reached a SEP ASC mailbox status read at physical
+`0x282608114`. Reusing the existing SEP ASC model for iBoot then exposed a
+previously unsupported bootstrap command. Static command-table and caller
+analysis identified it as a 32-bit entropy request; returning host entropy with
+the evidenced response opcode advances iBoot past that protocol boundary.
+
+The first unsupported operation after that increment is now exact: writes to
+Apple EL2 aliases for the low and high halves of the APIA pointer-authentication
+key. The later observed zero-fill abort for iBoot's `root` region is recorded
+separately and has not been papered over with unowned RAM.
 
 This does **not** prove the literal T8140 register reset value, a kernel
 handoff, or a bootable SEP path.  It proves the narrower question needed here:
@@ -132,9 +139,9 @@ The gate-off control is
 `PC=0x1fc0bc190`.  `IBOOT_LLC_BAD_GATE_20260904` proves an unsupported
 hypothesis is rejected before execution.
 
-## Next boundary: SEP ASC OUTBOX0 status
+## Resolved boundary: SEP ASC and entropy service
 
-The first new unsupported access is:
+The first unsupported access after the LLC increment was:
 
 ```text
 unimp: read  0x282608114 (sep[0]+0x8114) -> 0x0 size 4 pc=0x1fc09a4e4 el=2 pstate=0x800002c9 sp=0x1fc047e60 x0=0x3e1 x1=0x0 x2=0x0 x3=0x0
@@ -148,10 +155,9 @@ Attribution is exact:
 - the raw tree calls this device `iop-sep,ascwrap-v6`; and
 - research iBoot runtime `0x1fc09a4e4` (raw `+0x1a4e4`) is the 32-bit load.
 
-The stop request is asynchronous.  Two already-issued writes appear after the
-first line (`0x1000ff` to `+0x8800`, then zero to `+0x8808`), but the recorded
-boundary remains the first access above and no behavior is inferred from the
-catch-all region's zero result.
+The stop request was asynchronous. Two already-issued writes appeared after
+the first line (`0x1000ff` to `+0x8800`, then zero to `+0x8808`), but no
+behavior was inferred from the catch-all region's zero result.
 
 The caller invokes that load at `0x1fc09a368` and tests status bit 16 at
 `0x1fc09a36c`.  Existing independent BootKC analysis in
@@ -161,27 +167,83 @@ The caller invokes that load at `0x1fc09a368` and tests status bit 16 at
 four-byte SEP oracle: it is the already-understood ASC mailbox register
 window.
 
-Implementation-ready next increment:
+The implemented increment:
 
-1. In iBoot mode only, instantiate the existing `darwin-sep` MMIO model for
+1. In iBoot mode, instantiate the existing `darwin-sep` MMIO model for
    the raw-tree `iop-sep,ascwrap-v6` hardware even though the host-fixed tree
    deliberately removes `compatible` when SEP is disabled for direct boot.
 2. Preserve direct mode's existing enable/disable policy.  Do not make the
    fixed tree globally enable SEP.
-3. Re-run stop-first with SEP tracing.  Verify the first `0x8114` read reports
-   the model's actual empty/full/FIFO state; do not force a branch-specific
-   constant.
-4. Stop at the first subsequent mailbox write, CPU-control transition,
-   unhandled SEP endpoint, or other unsupported MMIO, and attribute it before
-   adding more behavior.
+3. Let the existing ASC FIFO produce its actual empty/full/count state at
+   `+0x8114`; do not force a branch-specific status constant.
 
-No SEP behavior was changed in this feasibility pass.
+This exposed request `0x10` on SEP bootstrap endpoint `0xff`. The request
+table at runtime `0x1fc2a2280` (raw `+0x22280`) pairs it with response `0x74`
+and timeout `0x1e8480`. The command wrapper at `0x1fc0995b0` is called only at
+`0x1fc0b7d20` and `0x1fc0b7d3c`; those calls consume two 32-bit reply data
+fields, combine them into a 64-bit nonzero value, and seed the xorshift routine
+at `0x1fc23fadc`. The model therefore returns a freshly generated 32-bit word
+with response opcode `0x74`. It does not return a fixed success value.
+
+The prior no-response path polled status bit 17 and entered the timeout panic
+at `0x1fc09a3e4` after 2,000,000 ticks. Its first apparent data abort was
+inside the fatal path at runtime `0x1fc1d8454`, storing through an uninitialized
+reset/watchdog object (`x9=0`, `FAR=0x1c`), rather than the original SEP
+boundary. Complete successful protocol evidence is
+`/tmp/dvm/iboot-main/probe/IBOOT_SEP_RNG_20260904.stderr.log`.
+
+## Next boundary: Apple EL2 APIA key aliases
+
+With SEP entropy available, QEMU's unsupported-register trace reports:
+
+```text
+w access to unsupported AArch64 system register S3_6_c15_c13_0 (pc = 0x00000001FC0B4120)
+w access to unsupported AArch64 system register S3_6_c15_c13_1 (pc = 0x00000001FC0B4124)
+```
+
+Static disassembly is unambiguous:
+
+```text
+0x1fc0b4120  msr  S3_6_c15_c13_0, x1
+0x1fc0b4124  msr  S3_6_c15_c13_1, x0
+0x1fc0b4128  dsb  sy
+0x1fc0b412c  isb
+```
+
+The caller at `0x1fc23fb7c` invokes the now-seeded 64-bit PRNG twice, places
+the two results in `x1` and `x0`, and calls this four-instruction routine at
+`0x1fc23fb8c`. The register map in
+`qemu-sptm/scripts/darwin/sysregs.py` identifies the encodings as
+`APIAKEYLO_EL2` and `APIAKEYHI_EL2`. QEMU already stores the architected EL1
+APIA key in `CPUARMState.keys.apia.lo` and `.hi`, and its TCG pointer-auth
+helpers consume that same state.
+
+Implementation-ready next increment:
+
+1. Add only `S3_6_c15_c13_0` and `S3_6_c15_c13_1` to the Apple CPU register
+   set as PL2 read/write aliases of `env->keys.apia.lo` and `.hi`.
+2. Do not implement them as write-ignore registers and do not synthesize key
+   values; preserve the values generated by iBoot.
+3. Re-run with unsupported-register, exception, and serial tracing. Stop at
+   the first newly exposed boundary before adding any other c13 aliases.
+
+The next observed exception after QEMU currently ignores those writes is a
+data abort at runtime `0xfffffc01fc1f33cc` (`stnp x1, x1, [x3,#0x30]`), with
+`FAR=0x3f000010000`. The function entered with `x0=0x3f000000000`, `x1=0`,
+and `x2=0x58000`; its caller zero-fills iBoot's statically declared `root`
+region (`0x3f000000000..0x3f000057ce0`, rounded to `0x58000`). Nearby
+descriptors name `fs`, `storage`, and `usb` regions at `0x3f004000000`,
+`0x3f008000000`, and `0x3f00c000000`. This is evidence for a later load-region
+or translation requirement, but it is not yet authority to map that range:
+the two unsupported APIA writes occur first and may affect subsequent control
+flow. Exception evidence is in
+`IBOOT_POST_RNG_INT_20260904.int.log`; unsupported-register evidence is in
+`IBOOT_POST_RNG_GUESTERR_20260904.debug.log`, both under the probe directory.
 
 ## Regression
 
 The rebuilt QEMU binary SHA-256 is
-`39a8cc390863783a9746e03225e0e79a14c6007008fbdd2f11dada29038ac8f4`.
-`IBOOT_LLC_DIRECT_FINAL_20260904` ran the unchanged direct path for 15 seconds:
-294 serial lines, zero XNU panics, `BSD root: md0`, and the restore shell.  A
-separate 60-second run (`IBOOT_LLC_DIRECT_REGRESSION_20260904`) produced 303
-lines and the same result.  Logs are under `/tmp/dvm/iboot-main/probe/`.
+`39401c50ba5e12e3daa14483c0b9341d0cad1447fbe74b2f037f4aed0acfef93`.
+`IBOOT_SEP_RNG_DIRECT_20260904` ran the unchanged direct path: 295 serial
+lines, zero XNU panics, `BSD root: md0`, `Early boot complete`, and the restore
+shell. Logs are under `/tmp/dvm/iboot-main/probe/`.
