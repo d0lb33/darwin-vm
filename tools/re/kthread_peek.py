@@ -31,7 +31,7 @@ def main():
     a = ap.parse_args()
     out = tempfile.NamedTemporaryFile(delete=False, suffix=".bin").name
     cmd = tempfile.NamedTemporaryFile("w", delete=False, suffix=".lldb")
-    cmd.write("gdb-remote %d\nmemory read --binary --outfile %s 0x%x 0x%x\nquit\n" %
+    cmd.write("gdb-remote %d\nmemory read --force --binary --outfile %s 0x%x 0x%x\nquit\n" %
               (a.port, out, a.thread, a.thread + a.size))
     cmd.close()
     subprocess.run(["lldb", "-b", "-s", cmd.name], capture_output=True, text=True)

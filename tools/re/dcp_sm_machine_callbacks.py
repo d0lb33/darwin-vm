@@ -28,6 +28,16 @@ STAGE2_PENDING = {}
 STAGE2_SEQUENCE = {}
 TAIL_TARGETS = {}
 TAIL_TARGET_BY_ADDRESS = {}
+TAIL_CONTEXT_BY_TP = {}
+ACTION_TARGETS = {}
+ACTION_TARGET_BY_ADDRESS = {}
+ACTION_PENDING = {}
+GATE_FIRST_TARGETS = {}
+GATE_FIRST_TARGET_BY_ADDRESS = {}
+GATE_FIRST_PENDING = {}
+GATE_ACTION_TARGETS = {}
+GATE_ACTION_TARGET_BY_ADDRESS = {}
+GATE_ACTION_PENDING = {}
 
 
 def _reg(frame, name):
@@ -117,6 +127,65 @@ def _install_tail_target(process, target_address, source):
     return breakpoint.GetID()
 
 
+def _install_action_target(process, target_address, source):
+    """Install an entry witness for the block invoked by the work loop."""
+    target = process.GetTarget()
+    existing = ACTION_TARGET_BY_ADDRESS.get(target_address)
+    if existing is not None:
+        return existing
+    before = target.GetNumBreakpoints()
+    breakpoint = target.BreakpointCreateByAddress(target_address)
+    if target.GetNumBreakpoints() != before + 1:
+        raise RuntimeError("failed SMMachine action breakpoint at 0x%x" % target_address)
+    breakpoint.SetScriptCallbackFunction("dcp_sm_machine_callbacks.on_action_target")
+    ACTION_TARGETS[breakpoint.GetID()] = {"address": target_address, "source": source}
+    ACTION_TARGET_BY_ADDRESS[target_address] = breakpoint.GetID()
+    print("DYNAMIC_BREAKPOINT_PROOF id=%d label=SMMACHINE_ACTION_TARGET address=0x%x "
+          "source-thread=0x%x" %
+          (breakpoint.GetID(), target_address, source["thread"]))
+    return breakpoint.GetID()
+
+
+def _install_gate_first_target(process, target_address, source):
+    target = process.GetTarget()
+    existing = GATE_FIRST_TARGET_BY_ADDRESS.get(target_address)
+    if existing is not None:
+        return existing
+    before = target.GetNumBreakpoints()
+    breakpoint = target.BreakpointCreateByAddress(target_address)
+    if target.GetNumBreakpoints() != before + 1:
+        raise RuntimeError("failed gate +0x98 target breakpoint at 0x%x" % target_address)
+    breakpoint.SetScriptCallbackFunction("dcp_sm_machine_callbacks.on_gate_first_target")
+    GATE_FIRST_TARGETS[breakpoint.GetID()] = {"address": target_address,
+                                              "source": source}
+    GATE_FIRST_TARGET_BY_ADDRESS[target_address] = breakpoint.GetID()
+    print("DYNAMIC_BREAKPOINT_PROOF id=%d label=SMMACHINE_GATE_FIRST_TARGET "
+          "address=0x%x source-thread=0x%x" %
+          (breakpoint.GetID(), target_address, source["thread"]))
+    return breakpoint.GetID()
+
+
+def _install_gate_action_target(process, target_address, source):
+    """Install an entry witness for IOCommandGate's vtable +0xf0 action."""
+    target = process.GetTarget()
+    existing = GATE_ACTION_TARGET_BY_ADDRESS.get(target_address)
+    if existing is not None:
+        return existing
+    before = target.GetNumBreakpoints()
+    breakpoint = target.BreakpointCreateByAddress(target_address)
+    if target.GetNumBreakpoints() != before + 1:
+        raise RuntimeError("failed gate +0xf0 target breakpoint at 0x%x" %
+                           target_address)
+    breakpoint.SetScriptCallbackFunction("dcp_sm_machine_callbacks.on_gate_action_target")
+    GATE_ACTION_TARGETS[breakpoint.GetID()] = {"address": target_address,
+                                               "source": source}
+    GATE_ACTION_TARGET_BY_ADDRESS[target_address] = breakpoint.GetID()
+    print("DYNAMIC_BREAKPOINT_PROOF id=%d label=SMMACHINE_GATE_ACTION_TARGET "
+          "address=0x%x source-thread=0x%x" %
+          (breakpoint.GetID(), target_address, source["thread"]))
+    return breakpoint.GetID()
+
+
 def on_tail_boundary(frame, bp_loc, _dict):
     """Resolve and witness the virtual tail call in AFK's stage-2 action."""
     breakpoint = bp_loc.GetBreakpoint()
@@ -136,6 +205,8 @@ def on_tail_boundary(frame, bp_loc, _dict):
           (thread, tp or 0, x0 or 0, x1 or 0, (x2 or 0) & 0xffffffff,
            x16 or 0, target, x17 or 0))
     _dump_tail_object(process, x0)
+    TAIL_CONTEXT_BY_TP[tp] = {"context": x1, "thread": thread,
+                              "gate": x0, "time": time.time()}
     dynamic_id = _install_tail_target(process, target,
                                       {"thread": thread, "tp": tp, "dynamic": x0,
                                        "context": x1, "w2": (x2 or 0) & 0xffffffff})
@@ -146,6 +217,218 @@ def on_tail_boundary(frame, bp_loc, _dict):
     if hit >= 8:
         breakpoint.SetEnabled(False)
         print("bounded-disabled breakpoint=%d after=%d" % (breakpoint.GetID(), hit))
+    return False
+
+
+def on_workloop_block_call(frame, bp_loc, _dict):
+    """Resolve the block invoke pointer for this SMMachine gate invocation.
+
+    The kernel helper is shared by every IOWorkLoop.  Filter on both the
+    thread and block/context pointer captured at SMMACHINE_TAIL_BOUNDARY so
+    unrelated work loops produce neither output nor dynamic breakpoints.
+    """
+    process = frame.GetThread().GetProcess()
+    thread = frame.GetThread().GetThreadID()
+    tp = _reg(frame, "tpidr_el1")
+    source = TAIL_CONTEXT_BY_TP.get(tp)
+    block = _reg(frame, "x0")
+    if source is None or block != source["context"]:
+        return False
+    x1, x8, x23 = (_reg(frame, name) for name in ("x1", "x8", "x23"))
+    action = _kptr(x8)
+    hit = HITS.get(bp_loc.GetBreakpoint().GetID(), 0) + 1
+    HITS[bp_loc.GetBreakpoint().GetID()] = hit
+    print("=== SMMACHINE_WORKLOOP_BLOCK_CALL hit=%d/8 ===" % hit)
+    print("thread=0x%x tpidr_el1=0x%x block=0x%x event=0x%x "
+          "x8(auth-target)=0x%x action=0x%x x23(pac-context)=0x%x" %
+          (thread, tp or 0, block or 0, x1 or 0, x8 or 0, action, x23 or 0))
+    _dump_object(process, "smmachine-block", block,
+                 (0x0, 0x8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40))
+    action_id = _install_action_target(
+        process, action, {"thread": thread, "tp": tp, "block": block,
+                          "event": x1, "gate": source["gate"]})
+    ACTION_PENDING[tp] = {"thread": thread, "block": block, "event": x1,
+                          "action": action, "time": time.time()}
+    print("PROBE_EVENT event=smmachine-action-dispatch thread=0x%x block=0x%x "
+          "event_arg=0x%x action=0x%x breakpoint=%d" %
+          (thread, block or 0, x1 or 0, action, action_id), flush=True)
+    return False
+
+
+def on_action_target(frame, bp_loc, _dict):
+    """Prove entry to the per-instance action resolved from block +0x10."""
+    breakpoint = bp_loc.GetBreakpoint()
+    cfg = ACTION_TARGETS[breakpoint.GetID()]
+    tp = _reg(frame, "tpidr_el1")
+    pending = ACTION_PENDING.get(tp)
+    if pending is None or cfg["address"] != pending["action"]:
+        return False
+    hit = HITS.get(breakpoint.GetID(), 0) + 1
+    HITS[breakpoint.GetID()] = hit
+    registers = [_reg(frame, "x%d" % index) or 0 for index in range(8)]
+    print("=== SMMACHINE_ACTION_TARGET hit=%d/8 ===" % hit)
+    print("thread=0x%x tpidr_el1=0x%x pc=0x%x lr=0x%x "
+          "x0=0x%x x1=0x%x x2=0x%x x3=0x%x x4=0x%x x5=0x%x x6=0x%x x7=0x%x" %
+          ((frame.GetThread().GetThreadID(), tp or 0, _reg(frame, "pc") or 0,
+            _reg(frame, "lr") or 0) + tuple(registers)))
+    print("PROBE_EVENT event=smmachine-action-entry thread=0x%x action=0x%x "
+          "block=0x%x event_arg=0x%x" %
+          (frame.GetThread().GetThreadID(), cfg["address"], pending["block"],
+           pending["event"] or 0), flush=True)
+    return False
+
+
+def on_workloop_block_return(frame, bp_loc, _dict):
+    """Direct witness immediately after the per-instance block invocation."""
+    tp = _reg(frame, "tpidr_el1")
+    pending = ACTION_PENDING.pop(tp, None)
+    if pending is None:
+        return False
+    hit = HITS.get(bp_loc.GetBreakpoint().GetID(), 0) + 1
+    HITS[bp_loc.GetBreakpoint().GetID()] = hit
+    print("=== SMMACHINE_WORKLOOP_BLOCK_RETURN hit=%d/8 elapsed=%.3f ===" %
+          (hit, time.time() - pending["time"]))
+    print("thread=0x%x tpidr_el1=0x%x action=0x%x result=0x%x" %
+          (frame.GetThread().GetThreadID(), tp or 0, pending["action"],
+           _reg(frame, "x0") or 0))
+    print("PROBE_EVENT event=smmachine-action-return thread=0x%x action=0x%x "
+          "result=0x%x" %
+          (frame.GetThread().GetThreadID(), pending["action"],
+           _reg(frame, "x0") or 0), flush=True)
+    return False
+
+
+def on_gate_first_call(frame, bp_loc, _dict):
+    """Resolve IOCommandGate's first owner virtual, vtable slot +0x98."""
+    process = frame.GetThread().GetProcess()
+    thread = frame.GetThread().GetThreadID()
+    tp = _reg(frame, "tpidr_el1")
+    source = TAIL_CONTEXT_BY_TP.get(tp)
+    x0, x1, x2, x8, x16 = (_reg(frame, name) for name in
+                            ("x0", "x1", "x2", "x8", "x16"))
+    expected_owner = _u64(process, source["gate"] + 0x30) if source else None
+    if source is None or x1 != source["context"] or x0 != expected_owner:
+        return False
+    target_address = _kptr(x8)
+    hit = HITS.get(bp_loc.GetBreakpoint().GetID(), 0) + 1
+    HITS[bp_loc.GetBreakpoint().GetID()] = hit
+    print("=== SMMACHINE_GATE_FIRST_CALL hit=%d/8 ===" % hit)
+    print("thread=0x%x tpidr_el1=0x%x owner=0x%x context=0x%x w2=0x%x "
+          "x8(auth-target)=0x%x target=0x%x x16(pac-context)=0x%x" %
+          (thread, tp or 0, x0 or 0, x1 or 0, (x2 or 0) & 0xffffffff,
+           x8 or 0, target_address, x16 or 0))
+    _dump_object(process, "gate-owner", x0,
+                 (0x0, 0x8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40,
+                  0x80, 0x88, 0x90, 0x98, 0xe8, 0xf0))
+    vtable_raw = _u64(process, x0) if x0 else None
+    vtable = _kptr(vtable_raw)
+    print("gate-owner-vtable raw=0x%x canonical=0x%x entry+0x98=0x%x" %
+          (vtable_raw or 0, vtable, _kptr(_u64(process, vtable + 0x98))))
+    target_id = _install_gate_first_target(
+        process, target_address, {"thread": thread, "tp": tp, "owner": x0,
+                                  "context": x1, "w2": (x2 or 0) & 0xffffffff})
+    GATE_FIRST_PENDING[tp] = {"thread": thread, "owner": x0, "context": x1,
+                              "target": target_address, "time": time.time()}
+    print("PROBE_EVENT event=smmachine-gate-first-call thread=0x%x owner=0x%x "
+          "context=0x%x target=0x%x breakpoint=%d" %
+          (thread, x0 or 0, x1 or 0, target_address, target_id), flush=True)
+    return False
+
+
+def on_gate_first_target(frame, bp_loc, _dict):
+    breakpoint = bp_loc.GetBreakpoint()
+    cfg = GATE_FIRST_TARGETS[breakpoint.GetID()]
+    tp = _reg(frame, "tpidr_el1")
+    pending = GATE_FIRST_PENDING.get(tp)
+    if pending is None or cfg["address"] != pending["target"]:
+        return False
+    hit = HITS.get(breakpoint.GetID(), 0) + 1
+    HITS[breakpoint.GetID()] = hit
+    registers = [_reg(frame, "x%d" % index) or 0 for index in range(8)]
+    print("=== SMMACHINE_GATE_FIRST_TARGET hit=%d/8 ===" % hit)
+    print("thread=0x%x tpidr_el1=0x%x pc=0x%x lr=0x%x "
+          "x0=0x%x x1=0x%x x2=0x%x x3=0x%x x4=0x%x x5=0x%x x6=0x%x x7=0x%x" %
+          ((frame.GetThread().GetThreadID(), tp or 0, _reg(frame, "pc") or 0,
+            _reg(frame, "lr") or 0) + tuple(registers)))
+    print("PROBE_EVENT event=smmachine-gate-first-target thread=0x%x target=0x%x "
+          "owner=0x%x context=0x%x" %
+          (frame.GetThread().GetThreadID(), cfg["address"], pending["owner"],
+           pending["context"]), flush=True)
+    return False
+
+
+def on_gate_first_return(frame, bp_loc, _dict):
+    tp = _reg(frame, "tpidr_el1")
+    pending = GATE_FIRST_PENDING.pop(tp, None)
+    if pending is None:
+        return False
+    hit = HITS.get(bp_loc.GetBreakpoint().GetID(), 0) + 1
+    HITS[bp_loc.GetBreakpoint().GetID()] = hit
+    print("=== SMMACHINE_GATE_FIRST_RETURN hit=%d/8 elapsed=%.3f ===" %
+          (hit, time.time() - pending["time"]))
+    print("thread=0x%x tpidr_el1=0x%x target=0x%x result=0x%x" %
+          (frame.GetThread().GetThreadID(), tp or 0, pending["target"],
+           _reg(frame, "x0") or 0))
+    print("PROBE_EVENT event=smmachine-gate-first-return thread=0x%x target=0x%x "
+          "result=0x%x" %
+          (frame.GetThread().GetThreadID(), pending["target"],
+           _reg(frame, "x0") or 0), flush=True)
+    return False
+
+
+def on_gate_action_boundary(frame, bp_loc, _dict):
+    """Resolve IOCommandGate's authenticated vtable +0xf0 tail target."""
+    process = frame.GetThread().GetProcess()
+    thread = frame.GetThread().GetThreadID()
+    tp = _reg(frame, "tpidr_el1")
+    source = TAIL_CONTEXT_BY_TP.get(tp)
+    x0, x1, x2, x3, x16, x17 = (_reg(frame, name) for name in
+                                 ("x0", "x1", "x2", "x3", "x16", "x17"))
+    if source is None or x1 != source["context"]:
+        return False
+    target_address = _kptr(x16)
+    hit = HITS.get(bp_loc.GetBreakpoint().GetID(), 0) + 1
+    HITS[bp_loc.GetBreakpoint().GetID()] = hit
+    print("=== SMMACHINE_GATE_ACTION_BOUNDARY hit=%d/8 ===" % hit)
+    print("thread=0x%x tpidr_el1=0x%x owner=0x%x context=0x%x w2=0x%x "
+          "x3(pac-context)=0x%x x16(auth-target)=0x%x target=0x%x x17=0x%x" %
+          (thread, tp or 0, x0 or 0, x1 or 0, (x2 or 0) & 0xffffffff,
+           x3 or 0, x16 or 0, target_address, x17 or 0))
+    _dump_object(process, "gate-action-owner", x0,
+                 (0x0, 0x8, 0x10, 0x18, 0x20, 0x28, 0x30, 0x38, 0x40,
+                  0x80, 0x88, 0x90, 0x98, 0xe8, 0xf0))
+    target_id = _install_gate_action_target(
+        process, target_address, {"thread": thread, "tp": tp, "owner": x0,
+                                  "context": x1, "w2": (x2 or 0) & 0xffffffff})
+    GATE_ACTION_PENDING[tp] = {"thread": thread, "owner": x0,
+                               "context": x1, "target": target_address,
+                               "time": time.time()}
+    print("PROBE_EVENT event=smmachine-gate-action-boundary thread=0x%x "
+          "owner=0x%x context=0x%x target=0x%x breakpoint=%d" %
+          (thread, x0 or 0, x1 or 0, target_address, target_id), flush=True)
+    return False
+
+
+def on_gate_action_target(frame, bp_loc, _dict):
+    """Prove entry to the concrete command-gate action target."""
+    breakpoint = bp_loc.GetBreakpoint()
+    cfg = GATE_ACTION_TARGETS[breakpoint.GetID()]
+    tp = _reg(frame, "tpidr_el1")
+    pending = GATE_ACTION_PENDING.get(tp)
+    if pending is None or cfg["address"] != pending["target"]:
+        return False
+    hit = HITS.get(breakpoint.GetID(), 0) + 1
+    HITS[breakpoint.GetID()] = hit
+    registers = [_reg(frame, "x%d" % index) or 0 for index in range(8)]
+    print("=== SMMACHINE_GATE_ACTION_TARGET hit=%d/8 ===" % hit)
+    print("thread=0x%x tpidr_el1=0x%x pc=0x%x lr=0x%x "
+          "x0=0x%x x1=0x%x x2=0x%x x3=0x%x x4=0x%x x5=0x%x x6=0x%x x7=0x%x" %
+          ((frame.GetThread().GetThreadID(), tp or 0, _reg(frame, "pc") or 0,
+            _reg(frame, "lr") or 0) + tuple(registers)))
+    print("PROBE_EVENT event=smmachine-gate-action-target thread=0x%x target=0x%x "
+          "owner=0x%x context=0x%x" %
+          (frame.GetThread().GetThreadID(), cfg["address"], pending["owner"],
+           pending["context"]), flush=True)
     return False
 
 
@@ -332,5 +615,23 @@ def install(debugger, slide):
         # The stage-2 action ends in this authenticated virtual tail call.
         # Resolve x16 here rather than guessing the dynamic object's vtable.
         (0xfffffff008b8209c, "SMMACHINE_TAIL_BOUNDARY", 8, "on_tail_boundary"),
+        # IOCommandGate eventually reaches IOWorkLoop's block dispatcher.
+        # Filter this shared site against the context captured above; +0x10
+        # is the per-instance action pointer, and +0xa4 is its direct return.
+        (0xfffffff00b17a3b4, "SMMACHINE_WORKLOOP_BLOCK_CALL", 8,
+         "on_workloop_block_call"),
+        (0xfffffff00b17a3b8, "SMMACHINE_WORKLOOP_BLOCK_RETURN", 8,
+         "on_workloop_block_return"),
+        # IOCommandGate+0x7df4a0 first asks its attached owner/work loop via
+        # vtable +0x98 before it can reach the +0xf0 block dispatcher.
+        (0xfffffff00b23f4e0, "SMMACHINE_GATE_FIRST_CALL", 8,
+         "on_gate_first_call"),
+        (0xfffffff00b23f4e4, "SMMACHINE_GATE_FIRST_RETURN", 8,
+         "on_gate_first_return"),
+        # The successful +0x98 check leads to this authenticated +0xf0 tail
+        # dispatch.  Resolve its concrete target instead of attributing it to
+        # a generic IOWorkLoop helper from a later stack frame.
+        (0xfffffff00b23f52c, "SMMACHINE_GATE_ACTION_BOUNDARY", 8,
+         "on_gate_action_boundary"),
     ):
         _install(target, interpreter, static, label, limit, callback)
