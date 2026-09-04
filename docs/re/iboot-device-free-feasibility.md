@@ -367,23 +367,85 @@ pair"; it does not establish a semantic register name or valid reset value.
 The caller is `0x1fc083ac8`, with the call at `0x1fc083ad8`, reached from
 `0x1fc1020b4`.
 
-The current public register descriptions in the in-tree m1n1 reference do not
-name PMGR range-1 offset `0x38074`. Advancing correctly therefore requires
-evidence for the two source words or their defined behavior. The next
-device-free work item is:
+### Cross-image and consumer audit
 
-1. Locate the same PMGR-to-CPM copy in other available d47/d83/d37 iBoot
-   images and compare source offsets, destination layout, constants, and all
-   downstream consumers of the copied bits.
-2. Search available Boot ROM, device-tree, firmware, and authoritative m1n1
-   material for a reset/fuse source matching the pair.
-3. Determine which bits iBoot or later firmware actually reads before choosing
-   a model. If the pair is immutable configuration, implement only two
-   read-only 32-bit PMGR registers with evidence-backed contents; if it has
-   protocol behavior, specify that behavior instead.
-4. Do not accept the catchall zero, invent a reset value, bypass the copy, or
-   pre-map later filesystem, storage, or USB dependencies merely to advance
-   execution.
+`tools/re/iboot_cpm_scan.py` reproduces an aligned ARM64 constant/signature
+scan over unwrapped payloads. The five-image control set gives:
+
+| image | SHA-256 | load base | PMGR/CPM result |
+|---|---|---:|---|
+| d37 23G83 release | `fb75c7ca35b4e83b819daa24cf63b61951b57b55e3ab67665e4af8e4ceec3aed` | `0x1fc064000` | no exact A18 pair, tail, or command signature |
+| d83 23G83 release | `cc813476e33d09b23236997381a4b9942efb55152ef0404a0f5018705f5af67b` | `0x1fc07c000` | no exact A18 pair, tail, or command signature |
+| d47 23G83 release | `0d021f9f562e09d2ee6f182cbf39122ed73317475afab1560f0cf9e3580eb153` | `0x1fc080000` | pair at raw `+0x45af0`; CPM tail at `+0x4274c`, `+0x45b0c` |
+| d47 24A5430a release | `fff9f51bf2f90487fbf04b2b9a091bc739865a5ec0793c03fbe469eeeb00d8e2` | `0x1fc080000` | pair at raw `+0x43f8c`; CPM tail at `+0x40c24`, `+0x43fa8` |
+| d47 24A5430a research | `8e2a7ee4955871de9c577b555606495b636e743e35e58b6843983d98aabbb9cb` | `0x1fc080000` | pair at raw `+0x44c3c`; CPM tail at `+0x418bc`, `+0x44c58` |
+
+This is a positive control as well as a negative comparison: all three d47
+images independently match both command signatures and both exact address
+materializations, while neither earlier-SoC image does. Their device trees
+also distinguish the layout: d37/d83 declare each `cpm-impl-reg` as length
+`0xb028`, whereas d47 declares `0xc010`; the new d47 code operates on the final
+16 bytes beginning at `+0xc000`.
+
+The d47 23G83 and 24A5430a initialization bodies are instruction-for-
+instruction identical except for the relative `bl` to the CPU-index helper.
+Each d47 image has exactly one other direct materialization of
+`0x210e4c000`. In 24A5430a release it is the teardown/reset routine at static
+`0x1fc0c0c10`:
+
+```text
+0x1fc0c0c1c  bl    0x1fc0b35f4
+0x1fc0c0c20  mov   w8, w0
+0x1fc0c0c24  mov   x9, #0xc000
+0x1fc0c0c28  movk  x9, #0x10e4, lsl #16
+0x1fc0c0c2c  movk  x9, #2, lsl #32
+0x1fc0c0c30  add   x8, x9, x8, lsl #24
+0x1fc0c0c34  str   xzr, [x8]
+0x1fc0c0c38  mov   w9, #0x5a5a
+0x1fc0c0c3c  str   x9, [x8, #8]
+```
+
+Thus the evidenced protocol is narrower than the original attribution:
+initialization copies an opaque PMGR-originated 64-bit payload then writes
+command `0x55a01`; teardown zeros the payload then writes command `0x5a5a`.
+The two exact CPM-tail materializations in each image are stores, not loads.
+This rules out an iBoot software branch on the copied bits along those direct
+paths, but it does not make the payload arbitrary: physical CPM hardware is
+the consumer.
+
+The static d47 device tree supplies the PMGR range and CPM aperture addresses
+and lengths, not contents for either word. Restore firmware contains no Boot
+ROM image from which the power-on state could be reconstructed. The current
+upstream m1n1 reference at commit
+`940439b9a407fbfc499bea933269219f3f62d4c7` names only `PS0`, `PS1`, `PS2`, and
+`PG0` in `PMGRRegs1`; it does not describe offset `0x38074` or the d47 CPM tail.
+The cross-image scan therefore constrains ownership, width, ordering,
+destination, commands, and lifecycle, but not the payload value.
+
+### Evidence-backed blocker and next implementation
+
+No PMGR model is justified yet. The missing datum is the 64-bit value observed
+at physical `0x3082b8074..0x3082b807b` before the CPM initialization routine,
+plus enough repeated cold/warm observations to determine whether it is a
+fixed T8140 reset/fuse value or variable Boot ROM state. This can come from a
+published trace or another operator's capture; it does not require this VM
+host to own the phone. Without any T8140 observation, firmware alone cannot
+recover state originating outside the firmware image.
+
+Once that evidence exists, the minimum implementation is:
+
+1. Add an iBoot-only PMGR subregion covering exactly range-1 offsets
+   `0x38074..0x3807b`; direct boot must retain its current mapping.
+2. If repeated observations prove the pair immutable for d47, expose the two
+   read-only 32-bit words in device little-endian order, pin them to the d47
+   device-tree/image evidence, and log both reads. If they vary, model the
+   identified Boot ROM-to-PMGR state transfer instead of freezing one sample.
+3. Assert in a debugger that iBoot writes the combined payload to
+   `0x210e4c000` and `0x55a01` to `0x210e4c008`; do not infer success merely
+   from absence of the first unimplemented-access line.
+4. Re-run with `DARWIN_UNIMP_STOP_FIRST=1` and attribute the next access. Do
+   not accept the catchall zero, invent a reset value, bypass the copy, or
+   pre-map later filesystem, storage, or USB dependencies.
 
 ## Regression
 
