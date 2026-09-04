@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import statistics
 import socket
 import subprocess
@@ -25,12 +26,20 @@ import time
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def terminate(signum, frame):
+    raise SystemExit(128 + signum)
+
+
 def main():
+    # Run the existing QEMU cleanup on cancellation instead of orphaning it.
+    signal.signal(signal.SIGTERM, terminate)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tag", required=True)
     parser.add_argument("--migration-sample", action="store_true",
                         help="stop after 100 User-volume dir-stats updates; never wait for completion")
     parser.add_argument("--parent", type=Path)
+    parser.add_argument("--qemu", type=Path, help="specific QEMU executable for build comparisons")
+    parser.add_argument("--pauth-cache", choices=["on", "off", "verify"], help="override optional PAuth mask cache")
     parser.add_argument("--variant", choices=["stock1", "pv2", "pv4", "pv5", "pv6"],
                         help="run one selected configuration")
     parser.add_argument("--capture-at", type=int, nargs="+", help="diagnostic CPU captures at elapsed seconds; stops after last capture")
@@ -45,7 +54,7 @@ def main():
         parser.error("invalid tag")
     out = Path("/tmp/dvm") / args.tag
     out.mkdir(exist_ok=False)
-    qemu = ROOT / "qemu-sptm/build/qemu-system-aarch64"
+    qemu = (args.qemu or ROOT / "qemu-sptm/build/qemu-system-aarch64").resolve()
     fw = ROOT / "firmware"
     parent = (args.parent or Path("/tmp/dvm/data-seed/rebuild/marker.qcow2" if args.migration_sample
                                   else "/tmp/dvm/data-seed/persistent-parent.qcow2")).resolve()
@@ -92,8 +101,11 @@ def main():
         run_env = dict(env, **({"DARWIN_SMP_PV": "1"} if pv else {}))
         if args.storage_profile:
             run_env["DARWIN_ANS_PROFILE"] = "1"
+        if args.pauth_cache:
+            run_env["DARWIN_PAUTH_CACHE"] = args.pauth_cache
         row = {"variant": name, "command": cmd, "host_load": os.getloadavg(), "seconds": None}
         row["storage_profile"] = args.storage_profile
+        row["pauth_cache"] = args.pauth_cache or "default"
         samples = sorted(set(args.host_sample_at or []))
         samplers = []
         host_stats = []

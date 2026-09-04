@@ -378,6 +378,8 @@ For the remaining runtime cost after this fix, see
 [storage versus CPU profiling](storage-performance.md): two bounded fresh-child
 probes put ANS request service at about 2.3% of elapsed time, with substantial
 TCG helper overhead and the performance cluster largely idle in host samples.
+The subsequent [ARM TCG optimization](arm-tcg-performance.md) preserves pointer
+results while reusing derived masks and adds an optimized compiler build.
 
 ## Remaining limits
 

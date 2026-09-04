@@ -18,10 +18,11 @@ ROOT = Path(__file__).resolve().parents[1]
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--cpus", type=int, choices=range(2, 7), default=2)
+    p.add_argument("--fast", action="store_true", help="use build-fast from tools/build_qemu_fast.sh")
     p.add_argument("--check", action="store_true", help="prepare kernel and print command without booting")
     a = p.parse_args()
     fw = ROOT / "firmware"
-    qemu = ROOT / "qemu-sptm/build/qemu-system-aarch64"
+    qemu = ROOT / "qemu-sptm" / ("build-fast" if a.fast else "build") / "qemu-system-aarch64"
     for path in [qemu, *(fw / f for f in ["bootkc", "dtree", "ramdisk.tc", "ramdisk.dmg", "sptm", "txm"])]:
         if not path.is_file():
             p.error(f"missing required input: {path}")

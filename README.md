@@ -275,6 +275,18 @@ cd ../..
 
 Qemu will be located at `qemu-sptm/build/qemu-system-aarch64`.
 
+For the experimental multicore branch, an optimized build is available with
+assertions and debug symbols retained:
+
+```sh
+tools/build_qemu_fast.sh
+python3 tools/run_smp.py --fast --cpus 6
+```
+
+This creates `qemu-sptm/build-fast` and boots the multicore restore shell.
+See [ARM TCG performance](docs/re/arm-tcg-performance.md) for the pointer-helper
+optimization, bounded migration comparisons, and current portability limits.
+
 ## 4. Run the VM
 
 The `run.sh` script boots qemu using the files in the `firmware` directory. It

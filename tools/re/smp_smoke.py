@@ -6,6 +6,7 @@ Writes only /tmp/dvm test artifacts and the owned QEMU's RAM.
 """
 import pathlib
 import argparse
+import os
 import socket
 import struct
 import subprocess
@@ -21,6 +22,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument("--wfe", action="store_true", help="test Apple event wakeups with all interrupts masked")
+    modes.add_argument("--pauth-cache", choices=["on", "off", "verify"], help="exercise pointer masks across randomized TCR configurations")
     modes.add_argument("--cross-cluster", action="store_true",
                         help="run CPU0/CPU4 with global IPIs in a five-CPU machine")
     options = parser.parse_args()
@@ -34,7 +36,7 @@ def main():
     size = int(chosen["dram-size"].split(":")[1], 0)
     assert size == 8 * 1024**3
     base += size - 0x100000
-    qemu = ROOT / "qemu-sptm/build/qemu-system-aarch64"
+    qemu = pathlib.Path(os.environ.get("DVM_QEMU", str(ROOT / "qemu-sptm/build/qemu-system-aarch64")))
     inputs = [str(qemu), "-M", "darwin", "-display", "none", "-smp", "2"]
     for option, filename in [("-dtree", "dtree"), ("-bootkc", "bootkc"),
                              ("-tc", "ramdisk.tc"), ("-ramdisk", "ramdisk.dmg")]:
@@ -45,11 +47,13 @@ def main():
                                  text=True, timeout=5)
         assert invalid.returncode != 0 and expected in invalid.stderr, invalid.stderr
     print("PASS: conflicting guest CPU boot arguments rejected", flush=True)
-    tag = "SMP_MACHINE_WFE" if options.wfe else "SMP_MACHINE_GLOBAL" if options.cross_cluster else "SMP_MACHINE"
+    tag = ("SMP_MACHINE_PAUTH_" + options.pauth_cache.upper() if options.pauth_cache else
+           "SMP_MACHINE_WFE" if options.wfe else "SMP_MACHINE_GLOBAL" if options.cross_cluster else "SMP_MACHINE")
     obj = pathlib.Path(f"/tmp/dvm/{tag}.o")
     definitions = ["-DSMP_CROSS_CLUSTER"] if options.cross_cluster else []
+    source = "smp_pauth_smoke.S" if options.pauth_cache else "smp_wfe_smoke.S" if options.wfe else "smp_smoke.S"
     subprocess.run(["clang", "-arch", "arm64", "-c"] + definitions + [
-                    str(ROOT / ("tools/re/smp_wfe_smoke.S" if options.wfe else "tools/re/smp_smoke.S")), "-o", str(obj)],
+                    str(ROOT / "tools/re" / source), "-o", str(obj)],
                    check=True)
     data = obj.read_bytes()
     count = struct.unpack_from("<I", data, 16)[0]
@@ -69,11 +73,14 @@ def main():
     with socket.socket() as port_socket:
         port_socket.bind(("127.0.0.1", 0))
         port = port_socket.getsockname()[1]
+    env = dict(os.environ)
+    if options.pauth_cache:
+        env["DARWIN_PAUTH_CACHE"] = options.pauth_cache
     probe = subprocess.Popen([
         str(ROOT / "tools/probe.sh"), "--secs", "15", "--tag", tag,
         "--", "-smp", "5" if options.cross_cluster else "2",
         "-accel", "tcg,thread=multi", "-S", "-gdb",
-        f"tcp:127.0.0.1:{port}"], cwd=ROOT)
+        f"tcp:127.0.0.1:{port}"], cwd=ROOT, env=env)
     remote = None
     try:
         deadline = time.monotonic() + 5
@@ -99,7 +106,11 @@ def main():
             if result[6] or time.monotonic() >= deadline:
                 break
         print("result words:", result[:7], flush=True)
-        if options.wfe:
+        if options.pauth_cache:
+            assert result[0:2] == (1024, 0) and result[6] == 0x600D, result
+            print("PASS: 1024 PAuth cases across TCR changes, address halves and EL2 regimes; checksum "
+                  f"{result[3]:08x}{result[2]:08x}", flush=True)
+        elif options.wfe:
             assert result[:7] == (16, 16, 16, 0, 0, 0, 0x600D), result
             print("PASS: WFE wakes with IRQs masked, both event edges and virtual offset; disabled stream stays asleep", flush=True)
         else:

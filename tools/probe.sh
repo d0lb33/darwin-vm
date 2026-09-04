@@ -36,6 +36,7 @@
 #   --                everything after this is passed straight to qemu
 #
 # environment:
+#   DVM_QEMU alternate executable for explicit build comparisons
 #   DARWIN_AIC_DEBUG / DARWIN_ASC_DEBUG / DARWIN_DART_DEBUG / DARWIN_UNIMP_DEBUG
 #     set any of these to 1 to trace that device model into the stderr log.
 #
@@ -45,7 +46,7 @@
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-QEMU="$REPO/qemu-sptm/build/qemu-system-aarch64"
+QEMU="${DVM_QEMU:-$REPO/qemu-sptm/build/qemu-system-aarch64}"
 HMP="$REPO/tools/hmp.py"
 
 DTREE="$REPO/firmware/dtree"
