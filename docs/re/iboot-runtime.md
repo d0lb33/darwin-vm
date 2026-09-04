@@ -12,6 +12,13 @@ same early failure path because QEMU does not implement the Apple
 branches to itself.  The experiment stops on that first unsupported MMIO
 access.  No success value was added for either the system register or PMGR.
 
+Follow-up device-free analysis and an opt-in, fail-closed behavioral probe are
+recorded in [`iboot-device-free-feasibility.md`](iboot-device-free-feasibility.md).
+That probe reconstructs enough of the register contract from three Apple
+iBoot/device-tree pairs to pass this historical boundary and stop at the next
+unsupported access, SEP ASC `OUTBOX0_CTRL` at `0x282608114`.  The default
+machine behavior documented here remains unchanged.
+
 The static image contract and direct-boot responsibilities are recorded in
 [`iboot-image.md`](iboot-image.md) and
 [`iboot-loader-references.md`](iboot-loader-references.md).  This document
@@ -166,12 +173,11 @@ The next independently justified increment is an Apple CPU
 2. Model the fields that this exact iBoot routine consumes: completion/valid
    bit 63, unit shift `[13:8]`, maximum unit count `[21:16]`, and the low
    requested-count field written by the routine.
-3. Obtain the d47/T8140 reset value and write-completion semantics from a
-   real register capture, Boot ROM trace, or another primary hardware source.
-   Do not choose a value merely to satisfy the branches.  The routine requires
-   an effective capacity of at least `0x3c0000` bytes for affinity-2 zero and
-   `0x780000` otherwise; these constraints are tests, not a license to invent
-   the fields.
+3. Use the cross-image/device-tree constraints in
+   [`iboot-device-free-feasibility.md`](iboot-device-free-feasibility.md).
+   They establish the capacity policy and active-bit behavior without a real
+   device, while explicitly leaving the literal reset encoding underdetermined.
+   Keep any geometry factorization opt-in until independently corroborated.
 4. Add a focused register test covering reset read, the low-field write, and
    bit-63 completion behavior derived from that source.  Rerun this same
    stop-first probe.  If the PMGR failure write disappears, stop at the next
