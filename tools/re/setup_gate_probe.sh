@@ -180,6 +180,10 @@ LLDB_PID=$!
 echo "lldb attached (pid $LLDB_PID): $(date +%T)  log /tmp/dvm/$TAG.lldb.log"
 
 WATCH_ARGS=(--stop-file "$STOP_FILE" --max-secs "$SECS")
+# Dynamic tracers use this event to stop at the exact pre-call boundary when
+# a strict hop/call bound is reached. Watching it unconditionally is harmless
+# for callback modules that never create the file.
+WATCH_ARGS+=(--stop-on "$EVENT_DIR/instrumentation-stop.json" '.')
 if [[ -n "$PROBE_STALL_SELECTOR" ]]; then
     WATCH_ARGS+=(--event-dir "$EVENT_DIR" --selector "$PROBE_STALL_SELECTOR" --pending-secs "$PROBE_STALL_SECS")
 fi
