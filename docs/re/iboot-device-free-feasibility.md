@@ -242,7 +242,7 @@ they are not write sinks. Complete evidence is in
 `IBOOT_APIA1_20260904.{stderr,debug}.log` and
 `IBOOT_APIA_GDB_20260904.{stderr,lldb}.log` under the probe directory.
 
-## Next boundary: iBoot `root` scratch backing
+## Resolved boundary: iBoot `root` scratch backing
 
 The first exception after the APIA increment is a synchronous external data
 abort at runtime `0xfffffc01fc1f33cc`:
@@ -281,7 +281,7 @@ PA `0x1fc480000`, exactly its first unbacked byte, which explains why the first
 `0x10000` bytes clear successfully before the external abort. The full rounded
 region ends at PA `0x1fc4c8000`.
 
-Implementation-ready next increment:
+The implemented increment:
 
 1. Extend only iBoot's RAM aperture through physical `0x1fc4c8000`, covering
    the remainder of this page-table-proven `root` mapping.
@@ -297,10 +297,98 @@ The table-walk evidence is in
 `IBOOT_ROOT_PT{1,2,3}_20260904.lldb.log`; complete fault registers and matching
 APIA state are in `IBOOT_APIA_GDB_20260904.lldb.log`.
 
+The loader now grants exactly that physical backing while retaining
+`0x1fc480000` as the image/BSS acceptance ceiling. It also requires the input
+image to contain the evidenced `root` descriptor before granting the extra
+RAM. Both pinned images passed the new validation. The research image reports:
+
+```text
+iBoot experiment: mapped [0x1fc000000,0x1fc4c8000) including root scratch [0x1fc470000,0x1fc4c8000), loaded 3952376 bytes at 0x1fc080000, entry +0x0, x0=0
+```
+
+The former abort at root VA `0x3f000010000` is absent. iBoot clears its root
+scratch, returns from EL2 into EL0 at runtime `0xfffffc01fc1020a8`, issues
+`svc #4` at runtime `0xfffffc01fc0b4278`, enters EL2 with
+`ESR_EL2=0x56000004`, and returns to EL0 at `0xfffffc01fc0b427c`. This is a
+genuine exception round trip, not a skipped instruction or fabricated return.
+`IBOOT_ROOT1_20260904.debug.log` contains the exception trace. The
+condition-bounded `IBOOT_ROOT_STOP_20260904` run stops on the first new
+unsupported access, and `IBOOT_ROOT_RELEASE_20260904` confirms the release
+image reaches the same physical boundary.
+
+## Next boundary: PMGR-to-CPM bootstrap pair
+
+The first unsupported access is now an EL0 32-bit read at research runtime
+`0xfffffc01fc0c4c48` (static `0x1fc0c4c48`, raw image offset `0x44c48`):
+
+```text
+unimp: read  0x3082b8074 (pmgr[1]+0x38074) -> 0x0 size 4 pc=0xfffffc01fc0c4c48 el=0 pstate=0x800000c0 sp=0x300000a3fd0 x0=0x0 x1=0xfffffc01fc443cc8 x2=0xfffffc01fc443d38 x3=0xfffffc01fc2a3ff0
+```
+
+The immediately following instruction reads `0x3082b8078`. The zero shown in
+the log is the low-priority unimplemented-region diagnostic value, not an
+accepted device model and not evidence for a hardware reset value. The release
+image reaches the same two physical reads at static/runtime-low-canonical
+`0x1fc0c3f98` and `0x1fc0c3f9c` (raw offset `0x43f98`).
+
+The device tree attributes physical `0x3082b8074` to `/arm-io/pmgr` register
+range 1: `/arm-io` contributes base `0x210000000`, PMGR range 1 contributes
+child base `0xf8280000` and length `0x80000`, and the access is offset
+`0x38074` within the resulting `0x308280000` aperture. The boot CPU's
+`cpm-impl-reg` is `0x210e40000` with length `0xc010`.
+
+Static code at `0x1fc0c4c2c` establishes what iBoot does with the pair:
+
+```text
+0x1fc0c4c38  bl    0x1fc0b423c
+0x1fc0c4c3c  mov   x8, #0x8074
+0x1fc0c4c40  movk  x8, #0x82b, lsl #16
+0x1fc0c4c44  movk  x8, #3, lsl #32
+0x1fc0c4c48  ldr   w9, [x8]
+0x1fc0c4c4c  ldr   w8, [x8, #4]
+0x1fc0c4c50  orr   x8, x8, x9, lsl #32
+0x1fc0c4c54  mov   w9, w0
+0x1fc0c4c58  mov   x10, #0xc000
+0x1fc0c4c5c  movk  x10, #0x10e4, lsl #16
+0x1fc0c4c60  movk  x10, #2, lsl #32
+0x1fc0c4c64  add   x9, x10, x9, lsl #24
+0x1fc0c4c68  str   x8, [x9]
+0x1fc0c4c6c  mov   w8, #0x5a01
+0x1fc0c4c70  movk  w8, #5, lsl #16
+0x1fc0c4c74  str   x8, [x9, #8]
+```
+
+Helper `0x1fc0b423c` obtains and caches an 8-bit CPU index, using `svc #4` when
+uncached. The observed index is zero. The function combines the reads as
+`(word_at_0x38074 << 32) | word_at_0x38078`, copies the 64-bit result to
+`0x210e4c000 + (cpu_index << 24)`, then writes `0x55a01` eight bytes later.
+This supports the narrow attribution "per-core CPM bootstrap/configuration
+pair"; it does not establish a semantic register name or valid reset value.
+The caller is `0x1fc083ac8`, with the call at `0x1fc083ad8`, reached from
+`0x1fc1020b4`.
+
+The current public register descriptions in the in-tree m1n1 reference do not
+name PMGR range-1 offset `0x38074`. Advancing correctly therefore requires
+evidence for the two source words or their defined behavior. The next
+device-free work item is:
+
+1. Locate the same PMGR-to-CPM copy in other available d47/d83/d37 iBoot
+   images and compare source offsets, destination layout, constants, and all
+   downstream consumers of the copied bits.
+2. Search available Boot ROM, device-tree, firmware, and authoritative m1n1
+   material for a reset/fuse source matching the pair.
+3. Determine which bits iBoot or later firmware actually reads before choosing
+   a model. If the pair is immutable configuration, implement only two
+   read-only 32-bit PMGR registers with evidence-backed contents; if it has
+   protocol behavior, specify that behavior instead.
+4. Do not accept the catchall zero, invent a reset value, bypass the copy, or
+   pre-map later filesystem, storage, or USB dependencies merely to advance
+   execution.
+
 ## Regression
 
 The rebuilt QEMU binary SHA-256 is
-`4691091b9b86a39279132792f58a6d8a917059a909f046438c5ef3181f084617`.
-`IBOOT_APIA_DIRECT_20260904` ran the unchanged direct path: 294 serial lines,
+`25af47e1c31d96f172bce0aa22837be47da2167cf8b4da5d63a58223f9785107`.
+`IBOOT_ROOT_DIRECT_20260904` ran the unchanged direct path: 294 serial lines,
 zero XNU panics, `BSD root: md0`, `Early boot complete`, and the restore shell.
 Logs are under `/tmp/dvm/iboot-main/probe/`.
