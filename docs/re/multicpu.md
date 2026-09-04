@@ -180,6 +180,42 @@ a property: its heuristic interprets the 256-byte `A` random seed as a
 string and adds a terminator. `SMP_PMGR1` consequently panicked in SPTM
 with random-seed size 257. That was a test-input error, not an SMP failure.
 
+## Boot-time measurement (2026-09-04)
+
+Nine sequential fresh system boots, three per configuration, measured host
+wall time from QEMU launch to `Early boot complete`. Same QEMU binary, 12 GiB
+RAM, firmware/device tree/trustcache, DCP configuration, and persistent disk
+parent; every trial uses a new writable qcow2 child. Host filesystem caches
+were not cleared. Runs alternate configurations and reverse part of the order.
+This is early system boot, not time to a usable display or SpringBoard UI.
+
+| Configuration | Three runs (seconds) | Median |
+|---|---|---|
+| Original 1 CPU | 12.123, 11.601, 11.642 | **11.642 s** |
+| Virtual adapter, 2 CPUs | 10.213, 11.103, 10.448 | **10.448 s** |
+| Virtual adapter, 6 CPUs | 10.645, 11.184, 11.106 | **11.106 s** |
+
+Six cores save **0.536 seconds (4.6% less time; 1.05x)** against the original
+single-core configuration. Two cores save **1.194 seconds (10.3%; 1.11x)**.
+Six did not improve on two in this small sample; this is not evidence for
+six-way boot scaling. All nine runs reached the same milestone without a
+first XNU panic. No workload throughput benchmark was performed.
+
+This compares complete configurations: the one-core baseline uses the original
+kernel input and single-CPU wiring/counters, whereas SMP uses the virtual
+adapter and disables the historical global GXF counters. It does not isolate
+CPU count from those implementation differences. A preliminary one-core adapter
+control (`SMP_BOOT_TIMING1/1_pv1`) stalled and timed out at 60 seconds; that
+configuration lacks the SMP wiring and is not a supported launch mode. Its
+failure is excluded from the timing table, not counted as a slow boot.
+
+Reproduce with `python3 tools/re/smp_boot_bench.py --tag NEW_UNIQUE_TAG`.
+Evidence: `/tmp/dvm/SMP_BOOT_TIMING2/results.json` contains each command,
+wall time, host load and the QEMU binary hash; adjacent files contain each
+trial's complete serial/stderr logs. The other checkout's existing VM was left
+untouched. The results describe this host/session, not an isolated laboratory
+or a Windows host.
+
 ## Remaining limits
 
 - Deferred IPIs currently take the immediate path; retract and no-wake are
@@ -187,8 +223,8 @@ with random-seed size 257. That was a test-input error, not an SMP failure.
 - Repeated reset, timer/IPI overlap stress, SMP migration and sustained workload
   stability have not been validated. A VMState descriptor alone is not evidence
   that checkpoint restore works.
-- No measured performance improvement or near-native claim. Multithreaded TCG
-  still translates guest instructions. Windows ARM/x86 hosts and macOS guests
+- Early system boot timing is measured below; there is no near-native claim.
+  Multithreaded TCG still translates guest instructions. Windows ARM/x86 hosts and macOS guests
   have not been built or tested with this change.
 
 Reference contracts: [m1n1 CPU startup](https://github.com/AsahiLinux/m1n1/blob/main/src/smp.c)
