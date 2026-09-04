@@ -31,8 +31,11 @@ Three things stood between `AppleSEPManager::start` and a published
    `AppleSEPFirmware::fromPreload`, gated on the nub property `sepfw-loaded`
    (`0x5a33a0`). `fromPreload` wraps `/chosen/memory-map/SEPFW` in a memory
    descriptor without reading it (`0x591df4..0x591eb4`).
-   **Fix: `sepfw-loaded = u32:1` on the nub plus a zero-filled `SEPFW` region
-   reserved by the loader.**
+   **Fix: `sepfw-loaded = u32:1` on the nub plus a `SEPFW` region reserved by
+   the loader.** The compatibility default is zero-filled; opt-in `-sepfw`
+   carries an authentic encrypted `sepi` container and validates its mapped
+   envelope before BOOT_IMG4 is acknowledged. See
+   `docs/re/seprom-behavioral.md`.
 3. With the boot conversation complete and sepOS "alive", AMFI's
    `AMFIUpdateDeviceState` makes TXM read the SEP secure-channel page and TXM
    panicked `[code: 0x000000F3 | 9]`: the SCRD magic `0x5c01` was missing at
@@ -178,8 +181,15 @@ style:
   nub; add `sepfw-loaded = u32:1` to the nub; add a `SEPFW` placeholder to
   `/chosen/memory-map`.
 * `xnuboot_sptm.c`: reserve `SEPFW_RESERVED_SIZE` (2 MiB) after the RAMDisk
-  and fill the entry, only when the placeholder exists.
+  for compatibility, or the exact opt-in `-sepfw` container length, and fill
+  the entry only when the placeholder exists.
 * `darwin.c`: `darwin_sep_create()` and `"sep"` in `claimed_ascs`.
+
+The opt-in path preserves the complete encrypted container byte-for-byte and
+requires BOOT_IMG4's DART-mapped input to identify itself as `IM4P/sepi`.
+This validates the AP-to-ROM handoff but does not authenticate, decrypt, or
+execute sepOS; the precise boundary is recorded in
+`docs/re/seprom-behavioral.md`.
 
 ## Method notes worth keeping
 
