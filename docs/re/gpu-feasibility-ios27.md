@@ -1,5 +1,9 @@
 # GPU feasibility for the existing iOS 27 VM
 
+Follow-up runtime evidence: [signed guest bundle and forwarding experiments](gpu-guest-forwarding-ios27.md).
+The assessment below records the initial experiments; the follow-up updates
+the previously untested bundle-loading contract.
+
 2026-09-05. Exact scope: **iOS 27.0, 24A5430a, iPhone17,3/T8140**,
 with its existing SPTM/TXM, migrated Data lineage, software renderer,
 and display/input path. This is a feasibility assessment, not a GPU driver
