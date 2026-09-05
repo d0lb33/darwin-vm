@@ -8,7 +8,7 @@ import shutil
 
 ALLOWED={'.json','.jsonl','.log','.txt','.md','.py','.sh','.m','.c','.h','.tsv',
          '.stdout','.stderr','.exit','.plist','.tbd','.ll','.png','.command',
-         '.nm-u','.otool-l','.disass'}
+         '.nm-u','.otool-l','.disass','.csv'}
 
 
 def main():
