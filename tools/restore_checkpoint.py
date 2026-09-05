@@ -93,7 +93,8 @@ def main() -> int:
                              "records both binary hashes, never changes the checkpoint")
     parser.add_argument("--model-env", action="append", default=[], metavar="KEY=VALUE",
                         help="explicit model-only environment override for development replay")
-    parser.add_argument("--display", choices=("none", "cocoa", "cocoa,zoom-to-fit=on", "sdl"),
+    parser.add_argument("--display", choices=("none", "cocoa", "cocoa,zoom-to-fit=on",
+                                              "cocoa,zoom-to-fit=on,show-cursor=on", "sdl"),
                         help="override only the host display backend on restore")
     args = parser.parse_args()
     try:
@@ -173,6 +174,13 @@ def main() -> int:
     }
     env.update(manifest.get("qemu_env", {}))
     env.update(model_env_overrides)
+    # A restored VM can itself become a checkpoint source. Record the same
+    # exact launch schema used by fresh boots, without unrelated host env.
+    atomic_json(out / "launch.json", {
+        "format": "darwin-vm-qemu-launch-v1", "argv": argv,
+        "env": {key: value for key, value in env.items()
+                if key.startswith(("DARWIN_", "GXFSTAT_"))},
+    })
     started = time.monotonic()
     stderr_file = stderr.open("wb")
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,

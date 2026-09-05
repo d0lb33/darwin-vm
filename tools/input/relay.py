@@ -36,11 +36,23 @@ def main():
     parser.add_argument('--events', required=True)
     parser.add_argument('--uart', required=True)
     parser.add_argument('--log', required=True)
-    parser.add_argument('--char-delay', type=float, default=.001)
+    parser.add_argument('--char-delay', type=float, default=0,
+                        help='optional diagnostic pacing; fixed UART uses backpressure')
     parser.add_argument('--ack-timeout', type=float, default=10)
     parser.add_argument('--replay-existing', action='store_true')
-    parser.add_argument('--home', action='store_true')
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument('--home', action='store_true')
+    mode.add_argument('--ping', action='store_true', help='check helper without sending HID events')
+    parser.add_argument('--ping-count', type=int, default=1)
+    mode.add_argument('--release', type=int, nargs=2, metavar=('X', 'Y'),
+                      help='release a finger after a failed relay; coordinates 0..32767')
+    parser.add_argument('--backend', choices=('direct', 'recap'), default='direct',
+                        help='immediate native HID or diagnostic release-time Recap playback')
     args = parser.parse_args()
+    if args.ping_count < 1 or (args.ping_count != 1 and not args.ping):
+        parser.error('--ping-count must be positive and used with --ping')
+    if args.release and not all(0 <= v <= 32767 for v in args.release):
+        parser.error('release coordinates must be 0..32767')
     queue, partial, replies = deque(), '', b''
     sequence = int(time.time() * 1000)
     with open(args.events) as events, open(args.log, 'a', buffering=1) as log, \
@@ -50,7 +62,10 @@ def main():
         uart.connect(args.uart)
         uart.setblocking(False)
         pending = None
-        home_steps = deque([1, 0]) if args.home else deque()
+        # Finish any incomplete line left by an earlier disconnected writer.
+        uart.sendall(b'\n')
+        home_steps = deque([1, 0] if args.home else [0]*args.ping_count if args.ping
+                           else [0] if args.release else [])
         while True:
             partial += events.read()
             lines = partial.split('\n')
@@ -82,25 +97,27 @@ def main():
             if pending:
                 continue
             if home_steps:
-                record = dict(down=bool(home_steps.popleft()), x=0, y=0,
-                              observed=time.monotonic(), kind='H')
+                x, y = args.release or (0, 0)
+                record = dict(down=bool(home_steps.popleft()), x=x, y=y,
+                              observed=time.monotonic(),
+                              kind='H' if args.home else 'T' if args.release else 'S')
             elif queue:
-                record = dict(queue.popleft(), kind='T')
-            elif args.home:
+                record = dict(queue.popleft(), kind='R' if args.backend == 'recap' else 'T')
+            elif args.home or args.ping or args.release:
                 return
             else:
                 continue
             sequence += 1
             pending = dict(record, sequence=sequence, sent=time.monotonic())
-            packet = ('\nDVMINPUT1 %d %s %d %d %d\n' %
+            packet = ('DVMINPUT1 %d %s %d %d %d\n' %
                       (sequence, record['kind'], record['down'], record['x'], record['y'])).encode()
-            # Console input historically drops the first byte after idle;
-            # the leading blank line is expendable. Pace the 16-byte UART FIFO.
-            for byte in packet:
-                select.select([], [uart], [], args.ack_timeout)
-                uart.sendall(bytes([byte]))
-                if args.char_delay:
+            if args.char_delay:
+                for byte in packet:
+                    select.select([], [uart], [], args.ack_timeout)
+                    uart.sendall(bytes([byte]))
                     time.sleep(args.char_delay)
+            else:
+                uart.sendall(packet)
             log.write(json.dumps(dict(pending, event='sent'))+'\n')
 
 

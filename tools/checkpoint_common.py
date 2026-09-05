@@ -269,6 +269,12 @@ def restore_argv(
     gdb_port: int | None,
 ) -> list[str]:
     out = [source[0]]
+    # Follow the serial backend reference rather than assuming probe.sh's ID.
+    # Native input boots use input_uart; unrelated chardev sockets must retain
+    # their own endpoints instead of being redirected into the guest console.
+    serial_devices = {source[n + 1].removeprefix("chardev:")
+                      for n, option in enumerate(source[:-1])
+                      if option == "-serial" and source[n + 1].startswith("chardev:")}
     i = 1
     saw_monitor = saw_drive = saw_serial = False
     while i < len(source):
@@ -289,7 +295,8 @@ def restore_argv(
             continue
         if arg == "-chardev" and i + 1 < len(source):
             spec = source[i + 1]
-            if "id=probe_uart" in spec.split(","):
+            if spec.split(",")[0] == "socket" and any(
+                    f"id={device}" in spec.split(",") for device in serial_devices):
                 parts = [p for p in spec.split(",")
                          if not p.startswith("path=") and
                          not p.startswith("logfile=")]

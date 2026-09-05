@@ -146,6 +146,20 @@ class CheckpointCommandTests(unittest.TestCase):
         self.assertNotIn("unix:/tmp/source.qmp,server=on,wait=off", result)
         self.assertEqual(result.count("-S"), 1)
 
+    def test_restore_native_input_uart_preserves_unrelated_socket(self):
+        unrelated = "socket,id=probe_uart,path=/tmp/other.sock,logfile=/tmp/other.log"
+        source = ["qemu", "-serial", "chardev:input_uart",
+                  "-chardev", unrelated,
+                  "-chardev", "socket,id=input_uart,path=/tmp/old.sock,server=on,wait=off,logfile=/tmp/old.log",
+                  "-drive", "if=none,id=ans,file=/images/source.qcow2"]
+        result = restore_argv(
+            source, Path("/images/source.qcow2"), Path("/restore/disk.qcow2"),
+            Path("/restore/monitor"), Path("/restore/serial.log"),
+            Path("/restore/uart"), Path("/checkpoint/state"), None)
+        self.assertIn(unrelated, result)
+        self.assertIn("chardev:input_uart", result)
+        self.assertIn("socket,id=input_uart,server=on,wait=off,path=/restore/uart,logfile=/restore/serial.log", result)
+
     @unittest.skipUnless(sys.platform == "darwin", "kern.procargs2 is macOS-only")
     def test_process_argv_is_not_split_on_spaces(self):
         import subprocess

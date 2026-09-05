@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--tc', type=Path, required=True)
     parser.add_argument('--tag', required=True)
     parser.add_argument('--gdb-port', type=int, required=True)
+    parser.add_argument('--qemu', type=Path, help='explicit compatible QEMU executable override')
     args = parser.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9_-]{1,40}', args.tag):
         parser.error('invalid tag')
@@ -30,7 +31,9 @@ def main():
     replacements = {
         '-drive': f'if=none,id=ans,file={args.disk.resolve()},format=qcow2',
         '-tc': str(args.tc.resolve()),
-        '-display': 'cocoa,zoom-to-fit=on',
+        # iOS has no guest mouse cursor. Keep the outlined macOS pointer
+        # visible; it tracks host motion even while guest input is delayed.
+        '-display': 'cocoa,zoom-to-fit=on,show-cursor=on',
     }
     while i < len(argv):
         key = argv[i]
@@ -49,6 +52,8 @@ def main():
                 '-gdb', f'tcp:127.0.0.1:{args.gdb_port}',
                 '-chardev', f'socket,id=input_uart,path={out}/uart.sock,server=on,wait=off,logfile={out}/serial.log',
                 '-serial', 'chardev:input_uart']
+    if args.qemu:
+        command[0] = str(args.qemu.absolute())
     env = {k:v for k,v in os.environ.items() if not k.startswith(('DARWIN_', 'GXFSTAT_'))}
     model_env = dict(source.get('qemu_env', source.get('env', {})))
     model_env['DARWIN_TOUCH_EVENTS'] = str(out/'events.jsonl')

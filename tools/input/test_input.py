@@ -32,12 +32,18 @@ class InputTests(unittest.TestCase):
                 'DVMINPUT1 3 T 0 32768 200\n'
                 'DVMINPUT1 4 H 1 0 0\n'
                 'DVMINPUT1 5 H 0 0 0 junk\n'
+                'DVMINPUT1 6 S 0 0 0\n'
+                'DVMINPUT1 7 S 1 0 0\n'
+                'DVMINPUT1 8 R 1 0 32767\n'
+                'DVMINPUT1 9 R 0 32768 0\n'
                 'DVMINPUT1 6 T 0 100 200'),
                 text=True, capture_output=True, check=True)
             self.assertIn('DVM_INPUT_ACK 1 1', result.stderr)
             self.assertIn('DVM_INPUT_ACK 4 1', result.stderr)
-            self.assertEqual(result.stderr.count('DVM_INPUT_ACK'), 2)
-            self.assertEqual(result.stderr.count('DVM_INPUT_REJECT'), 5)
+            self.assertIn('DVM_INPUT_ACK 6 1', result.stderr)
+            self.assertIn('DVM_INPUT_ACK 8 1', result.stderr)
+            self.assertEqual(result.stderr.count('DVM_INPUT_ACK'), 4)
+            self.assertEqual(result.stderr.count('DVM_INPUT_REJECT'), 7)
 
 
 if __name__ == '__main__':
