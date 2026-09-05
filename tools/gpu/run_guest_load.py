@@ -9,7 +9,9 @@ import json
 import os
 from pathlib import Path
 import select
+import shutil
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -19,6 +21,8 @@ from checkpoint_common import HMP, SAFE_TAG, atomic_json, sha256, verify_backing
 from proxy_uart import ProxyUART
 from proxy_uart_v2 import ReliableProxyUART
 from verify_roundtrip import verify as verify_roundtrip
+from aux_probe import AuxProbe
+from aux_namespace_dt import properties, EXPECTED
 
 
 def main():
@@ -27,23 +31,47 @@ def main():
     p.add_argument('--tag', required=True)
     p.add_argument('--seconds', type=int, default=600)
     p.add_argument('--keep-paused', action='store_true')
+    p.add_argument('--aux-namespace', action='store_true',
+        help='create an owned 64 MiB raw auxiliary namespace; needs opt-in QEMU and DT')
+    p.add_argument('--aux-probe', action='store_true', help='run auxiliary bulk/response/timeout peer')
+    p.add_argument('--aux-wait-input', action='store_true',
+        help='after byte completion, require the unchanged input service sync ACK')
     p.add_argument('--worker', type=Path, help='enable one-shot forwarding bridge with this host worker')
     p.add_argument('--reliable', action='store_true')
     p.add_argument('--library-cache',type=Path)
     p.add_argument('--faults',action='store_true',help='reliable mode: inject one corrupt response and drop two ACKs')
     a = p.parse_args()
+    if a.aux_probe:
+        a.aux_namespace = True
+    if a.aux_wait_input and not a.aux_probe:
+        p.error('--aux-wait-input requires --aux-probe')
+    if a.aux_namespace and a.worker:
+        p.error('auxiliary discovery cannot also own the UART forwarding bridge')
     if a.reliable and (not a.worker or not a.library_cache):
         p.error('--reliable requires --worker and --library-cache')
     if a.faults and not a.reliable:p.error('--faults requires --reliable')
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40 or not 1 <= a.seconds <= 1200:
         p.error('invalid tag or seconds (1..1200)')
     m = json.loads(a.manifest.read_text())
+    if a.aux_namespace:
+        dt = Path(m['qemu_argv'][m['qemu_argv'].index('-dtree')+1])
+        values = [v[2] for k,v in properties(dt.read_bytes()).items()
+            if k[0].endswith('/arm-io/ans') and k[1]=='namespaces']
+        if len(values)!=1 or list(struct.iter_unpack('<III',values[0]))!=EXPECTED+[(8,6,0)]:
+            raise ValueError('auxiliary trial requires the exact namespace DT extension')
     verify_backing_chain(m['disk']['backing_chain'])
     for name, expected in m['qemu_inputs'].items():
         if sha256(Path(name)) != expected['sha256']:
             raise RuntimeError(f'changed pinned input: {name}')
     out = Path('/tmp/dvm')/a.tag
     out.mkdir(exist_ok=False)
+    for name in ('run_guest_load.py','aux_probe.py','aux_namespace_dt.py'):
+        shutil.copyfile(Path(__file__).with_name(name),out/name)
+    aux_peer = AuxProbe(out) if a.aux_probe else None
+    if a.aux_namespace and not aux_peer:
+        with (out/'aux.raw').open('xb') as f:
+            f.truncate(64 * 1024 * 1024)
+            f.write(b'DVM-AUX-TRANSPORT-v1\0' + os.urandom(32))
     subprocess.run(['qemu-img', 'create', '-f', 'qcow2', '-F', 'qcow2',
         '-b', m['disk']['path'], str(out/'disk.qcow2')], check=True)
     original, argv, i = m['qemu_argv'], [], 0
@@ -66,11 +94,17 @@ def main():
         '-chardev', f'socket,id=gpu_uart,path={out}/uart.sock,server=on,wait=off,logfile={out}/serial.log',
         '-serial', 'chardev:gpu_uart']
     model = m['qemu_env'].copy()
+    if 'DARWIN_ANS_AUX_DRIVE' in model:
+        raise ValueError('manifest must not carry an uncontrolled auxiliary backend')
+    if a.aux_namespace:
+        argv += ['-drive', f'if=none,id=gpu_aux,file={out}/aux.raw,format=raw']
+        model['DARWIN_ANS_AUX_DRIVE'] = 'gpu_aux'
     model['DARWIN_TOUCH_EVENTS'] = str(out/'events.jsonl')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DARWIN_', 'DVM_', 'GXFSTAT_'))}
     env.update(model)
     atomic_json(out/'launch.json', dict(format='darwin-vm-qemu-launch-v1', argv=argv, env=model))
     report = dict(manifest=str(a.manifest.resolve()), ram_restored=False, debugger=False, events=[])
+    input_ping_sent = False
     proc, wire, bridge = None, None, None
     started, reason = time.monotonic(), 'deadline'
     try:
@@ -87,11 +121,25 @@ def main():
             if a.reliable:report['library_cache_sha256']=sha256(a.library_cache)
         print(f'{a.tag}: own PID {proc.pid}; UART connected and continuously drained', flush=True)
         pending = b''
+        aux_complete = False
+        input_ack = False
+        input_ready_ping_sent = False
         with (out/'wire.log').open('wb') as log:
             while time.monotonic()-started < a.seconds and proc.poll() is None:
+                if aux_peer:
+                    aux_peer.pump()
+                    if 9 in aux_peer.seen and not input_ping_sent:
+                        # S is the existing input protocol's no-event sync.
+                        # Check it during the deliberate auxiliary timeout;
+                        # no touch/button event is sent to the guest UI.
+                        packet = b'\nDVMINPUT1 900001 S 0 0 0\n'
+                        if wire.send(packet) != len(packet):
+                            raise RuntimeError('short input synchronization probe write')
+                        report['input_sync_sent_seconds'] = time.monotonic()-started
+                        input_ping_sent = True
                 if bridge:
                     bridge.pump(wire)
-                if not select.select([wire], [], [], .01 if bridge else .2)[0]:
+                if not select.select([wire], [], [], .005 if aux_peer else .01 if bridge else .2)[0]:
                     continue
                 chunk = wire.recv(65536)
                 if not chunk:
@@ -106,14 +154,29 @@ def main():
                     if any(x in line for x in ('GPU_LOAD_', 'GPU_BUNDLE_', 'DVMGPU_READY', 'DVMGPU_READER_STOPPED', 'DVMGPU_DONE', 'HARNESS_', 'DVM_INPUT_', 'panic(cpu')):
                         event = dict(seconds=round(time.monotonic()-started, 3), line=line)
                         report['events'].append(event); print(json.dumps(event), flush=True)
+                    if a.aux_wait_input and 'DVM_INPUT_READY ' in line and not input_ready_ping_sent:
+                        # A boot-time input helper can restart after the early
+                        # sync. Test the actual ready reader with a fresh ID.
+                        packet = b'\nDVMINPUT1 900002 S 0 0 0\n'
+                        if wire.send(packet) != len(packet):
+                            raise RuntimeError('short ready input sync write')
+                        input_ready_ping_sent = True
+                        report['input_ready_sync_sent_seconds'] = time.monotonic()-started
+                    ack_marker = 'DVM_INPUT_ACK 900002 1' if a.aux_wait_input else 'DVM_INPUT_ACK 900001 1'
+                    if ack_marker in line:
+                        input_ack = True
                     if 'GPU_LOAD_COMPLETE' in line:
-                        reason = 'guest load probe completed'
+                        aux_complete = True
+                        if not a.aux_wait_input or input_ack:
+                            reason = 'guest load probe completed'
                     elif 'GPU_LOAD_ERROR' in line or 'GPU_BUNDLE_ERROR' in line or 'panic(cpu' in line:
                         reason = 'guest reported failure'
                     elif bridge and bridge.finished and 'DVM_INPUT_START' in line:
                         reason = 'guest forwarding diagnostic finished; original input start marker observed'
                     elif a.reliable and 'DVMGPU_DONE reason=' in line and 'reason=complete ' not in line:
                         reason = 'guest transport reported failure'
+                    if a.aux_wait_input and aux_complete and input_ack and reason == 'deadline':
+                        reason = 'guest load probe completed'
                 if reason != 'deadline':
                     break
         if a.reliable:
@@ -121,6 +184,13 @@ def main():
                 raise RuntimeError('roundtrip lacks protected successful close and original input start marker')
             report['roundtrip']=verify_roundtrip(out)
             report['passed']=True
+        if aux_peer:
+            if reason != 'guest load probe completed' or not any(
+                    'scope=auxiliary-byte-transport' in e['line'] for e in report['events']):
+                raise RuntimeError('auxiliary guest completion not verified')
+            report['auxiliary'] = aux_peer.verify()
+            report['input_sync_ack_observed'] = input_ack
+            report['passed'] = True
     except BaseException as error:
         reason = f'{type(error).__name__}: {error}'
         raise
@@ -131,6 +201,8 @@ def main():
             wire.close()
         if bridge:
             bridge.close()
+        if aux_peer:
+            aux_peer.close()
         try:
             if proc and proc.poll() is None:
                 h = HMP(out/'monitor.sock', timeout=15)

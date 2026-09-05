@@ -15,9 +15,13 @@ def main():
     p.add_argument('--output', type=Path, required=True)
     p.add_argument('--mode', choices=('load', 'forward'), default='load')
     p.add_argument('--surface-only', action='store_true', help='forward mode: independent local IOSurface check')
+    p.add_argument('--interactive-load', action='store_true',
+        help='load mode: use the original input helper ProcessType for a scheduling control')
     a = p.parse_args()
     if a.surface_only and a.mode!='forward':
         p.error('--surface-only requires --mode forward')
+    if a.interactive_load and a.mode!='load':
+        p.error('--interactive-load requires --mode load')
     repo = Path(__file__).resolve().parents[2]
     cache_bytes = a.cache.read_bytes()
     cache = plistlib.loads(cache_bytes)
@@ -28,6 +32,8 @@ def main():
         ProgramArguments=['/usr/local/libexec/dvm-gpu-load'],
         RunAtLoad=True, LaunchOnlyOnce=True, UserName='root',
         StandardOutputPath='/dev/console', StandardErrorPath='/dev/console')
+    if a.interactive_load:
+        service['ProcessType']='Interactive'
     if a.mode == 'forward':
         matches = [(key, value) for key, value in cache['LaunchDaemons'].items()
             if (value.get('ProgramArguments') or [None])[0] == '/usr/local/libexec/dvm-input']
