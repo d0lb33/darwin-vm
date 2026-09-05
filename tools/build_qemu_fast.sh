@@ -28,5 +28,5 @@ if [[ ! -f "$BUILD_DIR/config-host.mak" ]]; then
 fi
 MESON="$BUILD_DIR/pyvenv/bin/meson"
 "$MESON" configure -Doptimization=3 -Db_lto=true -Db_ndebug=false -Ddebug=true "$BUILD_DIR"
-make -C "$BUILD_DIR" -j"$JOBS" qemu-system-aarch64
+make -C "$BUILD_DIR" -j"$JOBS" qemu-system-aarch64 qemu-img
 echo "Fast QEMU with assertions: $BUILD_DIR/qemu-system-aarch64"

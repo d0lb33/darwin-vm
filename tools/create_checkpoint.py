@@ -77,6 +77,14 @@ def main() -> int:
     if disk not in disk_paths:
         raise RuntimeError(f"pid {pid} does not use disk {disk}")
 
+    # The fast build may contain only the system emulator. Check this before
+    # migration quits the source, so a missing disk verifier cannot strand an
+    # otherwise complete stream without its manifest.
+    qemu = Path(argv[0]).resolve()
+    qemu_img = qemu.with_name("qemu-img")
+    if not qemu_img.is_file() or not os.access(qemu_img, os.X_OK):
+        raise RuntimeError(f"build the checkpoint disk verifier first: {qemu_img}")
+
     # Do not consume the tag with an empty directory when ownership or argv
     # validation fails.  From here onward the exact source has been verified.
     out.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -160,7 +168,6 @@ def main() -> int:
     # before any analysis or hashing that could itself fail.
     disk.chmod(0o444)
 
-    qemu = Path(argv[0]).resolve()
     analyzer = qemu.parent.parent / "scripts" / "analyze-migration.py"
     if analyzer.is_file():
         analyzed = subprocess.run(
@@ -170,7 +177,6 @@ def main() -> int:
         (evidence / "migration-description.txt").write_text(
             analyzed.stdout, encoding="utf-8"
         )
-    qemu_img = qemu.with_name("qemu-img")
     check = subprocess.run(
         [str(qemu_img), "check", "-f", "qcow2", str(disk)],
         text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True,
