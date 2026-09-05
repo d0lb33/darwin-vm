@@ -15,11 +15,22 @@ from pathlib import Path
 from checkpoint_common import (
     HMP, SAFE_TAG, atomic_json, parse_migration_status, parse_pc, pid_alive,
     restore_argv, sha256, serial_hex_clock_bounds, sptm_panic_message,
-    verify_backing_chain, wait_for_path,
+    verify_backing_chain, wait_for_path, selected_cpu_index,
 )
 
 
 BOOT_PATTERNS = ("Darwin Kernel Version", "Darwin Bootstrapper Version", "launchd[1]")
+
+
+def checkpoint_source_cpu(manifest: dict) -> int:
+    index = manifest.get("source_cpu_index")
+    if index is None:
+        # Earlier v1 captures preserved this choice in the CPU inventory.
+        inventory = manifest.get("inventory", {}).get("cpus")
+        index = selected_cpu_index(Path(inventory).read_text()) if inventory else 0
+    if type(index) is not int or index < 0:
+        raise RuntimeError("invalid source CPU index")
+    return index
 
 
 def activate_paused_disks(qmp_path: Path) -> None:
@@ -81,6 +92,7 @@ def main() -> int:
     manifest = json.loads(args.manifest.read_text())
     if manifest.get("format") != "darwin-vm-external-checkpoint-v1":
         raise RuntimeError("unsupported checkpoint manifest format")
+    source_cpu_index = checkpoint_source_cpu(manifest)
     state = Path(manifest["vmstate"]["path"])
     source_disk = Path(manifest["disk"]["path"])
     if sha256(state) != manifest["vmstate"]["sha256"]:
@@ -162,6 +174,9 @@ def main() -> int:
                     f"paused state: {status}\n{migration}"
                 )
             time.sleep(0.2)
+        hmp.command(f"cpu {source_cpu_index}")
+        if selected_cpu_index(hmp.command("info cpus")) != source_cpu_index:
+            raise RuntimeError("restored VM does not have the source witness CPU")
         registers = hmp.command("info registers")
         restored_pc = parse_pc(registers)
         (out / "pre-resume-registers.txt").write_text(registers + "\n")
@@ -265,6 +280,7 @@ def main() -> int:
             "uart": str(uart),
             "disk_child": str(disk),
             "source_pc": manifest["source_pc"],
+            "source_cpu_index": source_cpu_index,
             "restored_pc": restored_pc,
             "pc_after_observation": after_pc,
             "pc_match_witness": restored_pc == manifest["source_pc"],

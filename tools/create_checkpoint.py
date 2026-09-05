@@ -14,7 +14,7 @@ from pathlib import Path
 from checkpoint_common import (
     HMP, SAFE_TAG, atomic_json, parse_migration_status, parse_pc, pid_alive,
     process_argv_env, qcow2_backing_chain, qemu_input_files,
-    serial_hex_clock_bounds, sha256, wait_pid_exit,
+    serial_hex_clock_bounds, sha256, wait_pid_exit, selected_cpu_index,
 )
 
 
@@ -106,7 +106,9 @@ def main() -> int:
     )
     (evidence / "qtree.txt").write_text(hmp.command("info qtree") + "\n")
     (evidence / "mtree.txt").write_text(hmp.command("info mtree") + "\n")
-    (evidence / "cpus.txt").write_text(hmp.command("info cpus") + "\n")
+    cpus = hmp.command("info cpus")
+    source_cpu_index = selected_cpu_index(cpus)
+    (evidence / "cpus.txt").write_text(cpus + "\n")
     (evidence / "block.txt").write_text(hmp.command("info block") + "\n")
 
     serial_text = args.serial_log.read_text(errors="replace")
@@ -201,6 +203,7 @@ def main() -> int:
         "created_unix": time.time(),
         "source_pid_terminated": pid,
         "source_pc": pc,
+        "source_cpu_index": source_cpu_index,
         "guest_marker": marker,
         "source_serial_clock_last": source_clock_last,
         "source_serial_log": {

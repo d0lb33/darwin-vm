@@ -14,12 +14,28 @@ sys.path.insert(0, str(TOOLS))
 
 from checkpoint_common import (  # noqa: E402
     parse_migration_status, process_argv_env, qcow2_backing_chain, restore_argv,
-    sptm_panic_message, serial_hex_clock_bounds, verify_backing_chain,
+    sptm_panic_message, serial_hex_clock_bounds, verify_backing_chain, selected_cpu_index,
 )
-from restore_checkpoint import activate_paused_disks  # noqa: E402
+from restore_checkpoint import activate_paused_disks, checkpoint_source_cpu  # noqa: E402
 
 
 class CheckpointCommandTests(unittest.TestCase):
+    def test_checkpoint_preserves_nonzero_witness_cpu(self):
+        cpus = "  CPU #0: thread_id=42\n* CPU #3: thread_id=42\n"
+        self.assertEqual(selected_cpu_index(cpus), 3)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cpus.txt"
+            path.write_text(cpus)
+            self.assertEqual(checkpoint_source_cpu({"inventory": {"cpus": str(path)}}), 3)
+        self.assertEqual(checkpoint_source_cpu({"source_cpu_index": 2}), 2)
+        self.assertEqual(checkpoint_source_cpu({}), 0)
+        for bad in (-1, "3", True):
+            with self.assertRaises(RuntimeError):
+                checkpoint_source_cpu({"source_cpu_index": bad})
+        for bad in ("CPU #0: thread_id=42", "* CPU #0:\n* CPU #1:"):
+            with self.assertRaises(RuntimeError):
+                selected_cpu_index(bad)
+
     def test_paused_activation_handles_events_without_resuming_cpu(self):
         stream = mock.MagicMock()
         stream.readline.side_effect = [

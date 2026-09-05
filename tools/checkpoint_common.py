@@ -128,6 +128,14 @@ class HMP:
         return "\n".join(lines).strip()
 
 
+def selected_cpu_index(cpus: str) -> int:
+    """HMP's register witness belongs to the starred CPU, not always CPU 0."""
+    matches = re.findall(r"^\s*\* CPU #(\d+):", cpus, re.MULTILINE)
+    if len(matches) != 1:
+        raise RuntimeError("expected one selected CPU in HMP info cpus")
+    return int(matches[0])
+
+
 def parse_pc(registers: str) -> str:
     match = re.search(r"\bPC=([0-9a-fA-F]+)\b", registers)
     if not match:

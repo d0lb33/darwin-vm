@@ -66,3 +66,42 @@ The WARM2 stopped state is preserved at
 11.759 seconds. The mailbox's retained last message had already become a
 SCRD message (`0x0028040a`), so its failed SKS correlation ID was not guessed
 for replay. WARM3 is the clean cold-boot control.
+
+
+## SpringBoard launch checkpoint and the disk-persistence boundary
+
+The same WARM3 boot subsequently returns from eligibilityd initialization
+at runtime `0x10012e5f0`, with its process identity verified by LLDB. The
+migration wrapper returns 1 at t=1788569141.347. SpringBoard's BKS remote
+check-in returns 0 at t=1788569262.909 and its
+`applicationDidFinishLaunching:` entry fires at t=1788569263.556, PC
+`0x239464ba4`. These are native results; no migration-return override was
+applied. The existing FrontBoard deadline diagnostic remains present.
+
+`/tmp/dvm/checkpoints/DISPLAY_SMP6_ADFL3/manifest.json` preserves this
+six-CPU state and the paired disk: 6,340,834,666 state bytes, 598,671,360
+disk bytes, 2.600 seconds migration, 12.850 seconds total capture.
+`DISPLAY_SMP6_UI_R4` restores the exact CPU-3 PC in 1.336 seconds and
+continues userspace (InputUI's UIApplicationMain is observed). The restore
+report lives beneath that checkpoint's `restores/DISPLAY_SMP6_UI_R4/`.
+This is a RAM resume, not a completed cold-boot persistence test.
+
+HMP's `info registers` follows the selected CPU. Older captures already
+preserve its starred index in `inventory.cpus`; new captures also record
+`source_cpu_index`. Restore selects and verifies that CPU before comparing
+PCs. Comparing this CPU-3 launch boundary against CPU 0 would incorrectly
+reject a valid six-CPU snapshot. All 24 host tests pass, including malformed
+CPU inventory and backward-compatible inventory recovery.
+
+The native migration necessity test is at datamigrator static
+`0x100008944`. It compares current and previous build versions at
+`0x100008998`, then checks the retry sentinel at `0x100008a1c`; matching
+build and no sentinel returns false at `0x100008a6c`. The sentinel path is
+`/private/var/datamigrator/migrate`, identified at `0x100004bd8`.
+The completion method removes it at `0x1000097e8` and records the build
+preference at `0x10000980c` before replying to clients. This establishes
+that migration is not designed to run unconditionally on every boot.
+It does not by itself prove those preference writes were flushed to the
+disk copied from an earlier RAM checkpoint. The next cold-boot seed should
+be captured after that persistence has been verified. No completion marker
+was fabricated or removed by the host.
