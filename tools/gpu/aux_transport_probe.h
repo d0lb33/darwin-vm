@@ -7,6 +7,27 @@
 #include <sys/disk.h>
 #include <sys/ioctl.h>
 
+#ifdef DVM_AUX_HEADER_DIAG
+#include <pthread.h>
+#include <stdatomic.h>
+static atomic_uint aux_diag_stage;
+static void aux_diag_mark(unsigned stage) {
+    atomic_store(&aux_diag_stage,stage);
+    fprintf(stderr,"GPU_LOAD_AUX_STAGE stage=%u pid=%d\n",stage,getpid());
+}
+static void *aux_diag_heartbeat(void *unused) {
+    (void)unused;
+    for(;;) {
+        struct timespec nap={5,0};nanosleep(&nap,NULL);
+        fprintf(stderr,"GPU_LOAD_AUX_ALIVE stage=%u pid=%d\n",atomic_load(&aux_diag_stage),getpid());
+    }
+    return NULL;
+}
+static void aux_diag_exit(void) {
+    fprintf(stderr,"GPU_LOAD_AUX_EXIT stage=%u pid=%d\n",atomic_load(&aux_diag_stage),getpid());
+}
+#endif
+
 #define AUX_PAGE 4096
 #define AUX_BYTES (64u * 1024u * 1024u)
 #define AUX_BULK (1024u * 1024u)
@@ -106,7 +127,7 @@ done:
     }
     return result;
 }
-static int aux_transfer(int fd, const unsigned char *header) {
+static int __attribute__((unused)) aux_transfer(int fd, const unsigned char *header) {
     int latency=!memcmp(header+128,"DVMLAT01",8);
     uint32_t count=0,sleep_ns=0;
     memcpy(&count,header+136,4);memcpy(&sleep_ns,header+140,4);
@@ -190,16 +211,33 @@ static int aux_probe_client(io_connect_t client) {
     fprintf(stderr,"GPU_LOAD_AUX_METADATA selector=3 kr=0x%x count=%u value=%llu\n",kr,outputs,(unsigned long long)count);
     if(kr||outputs!=1||count!=AUX_BYTES/AUX_PAGE)return 1;
     unsigned char *header=NULL;
+#ifdef DVM_AUX_HEADER_DIAG
+    aux_diag_mark(1); /* Capacity verified; next call allocates the buffer. */
+#endif
     if(posix_memalign((void **)&header,16384,AUX_PAGE))return 1;
+#ifdef DVM_AUX_HEADER_DIAG
+    aux_diag_mark(2); /* Allocation returned; next operation touches the page. */
+#endif
     memset(header,0xcc,AUX_PAGE);
+#ifdef DVM_AUX_HEADER_DIAG
+    aux_diag_mark(3); /* Page initialized; next call is selector 0. */
+#endif
     ssize_t got=aux_read(client,header,AUX_PAGE,0);
+#ifdef DVM_AUX_HEADER_DIAG
+    aux_diag_mark(4); /* Synchronous read returned, including failure returns. */
+#endif
     fprintf(stderr,"GPU_LOAD_AUX_HEADER bytes=%zd prefix=",got);
     for(unsigned i=0;i<32;i++)fprintf(stderr,"%02x",header[i]);
     fprintf(stderr,"\n");
     int ok=got==AUX_PAGE&&
         !memcmp(header,aux_magic,sizeof(aux_magic));
     fprintf(stderr,"GPU_LOAD_AUX_GUARD pass=%d bytes=%u\n",ok,AUX_BYTES);
+#ifdef DVM_AUX_HEADER_DIAG
+    fprintf(stderr,"GPU_LOAD_AUX_HEADER_ONLY pass=%d bytes=%zd crc=%08x\n",ok,got,aux_crc(header,AUX_PAGE));
+    int result=!ok;
+#else
     int result=ok?aux_transfer(client,header):1;
+#endif
     free(header);return result;
 }
 #else

@@ -15,6 +15,8 @@ import struct
 import subprocess
 import sys
 import time
+import re
+import zlib
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from checkpoint_common import HMP, SAFE_TAG, atomic_json, sha256, verify_backing_chain, wait_for_path
@@ -37,6 +39,7 @@ def main():
     p.add_argument('--aux-probe', action='store_true', help='run auxiliary bulk/response/timeout peer')
     p.add_argument('--aux-latency', action='store_true',
         help='64 normal verified requests, buffered guest stage timings; implies --aux-probe')
+    p.add_argument('--aux-header-only',action='store_true',help='diagnostic: one initial4KiB read,30s no-progress and120s total')
     p.add_argument('--aux-post-boot', action='store_true',
         help='gate latency on reviewed home-screen image, input ACKs and 15-second settling')
     p.add_argument('--aux-readiness-seconds',type=int,choices=(300,450),default=300,
@@ -51,6 +54,10 @@ def main():
     p.add_argument('--library-cache',type=Path)
     p.add_argument('--faults',action='store_true',help='reliable mode: inject one corrupt response and drop two ACKs')
     a = p.parse_args()
+    if a.aux_header_only:
+        if a.seconds!=120 or a.aux_latency or a.aux_post_boot or a.aux_probe or a.worker or a.keep_paused or a.aux_wait_input:
+            p.error('header-only requires --seconds120 and no other probe modes or keep-paused')
+        a.aux_namespace=True
     if a.aux_readiness_seconds!=300 and not a.aux_post_boot:
         p.error('--aux-readiness-seconds requires --aux-post-boot')
     if a.aux_post_boot:a.aux_latency=True
@@ -73,7 +80,7 @@ def main():
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40 or not 1 <= a.seconds <= 1200:
         p.error('invalid tag or seconds (1..1200)')
     m = json.loads(a.manifest.read_text())
-    if a.aux_post_boot:
+    if a.aux_post_boot or a.aux_header_only:
         if not a.expected_manifest_sha256 or sha256(a.manifest)!=a.expected_manifest_sha256:
             raise ValueError('post-boot experiment manifest differs from explicit baseline pin')
         for flag,value in (('-fb','1179x2556'),('-fbmode','graphics')):
@@ -93,7 +100,7 @@ def main():
     out.mkdir(exist_ok=False)
     for name in ('run_guest_load.py','aux_probe.py','aux_namespace_dt.py','aux_ready.py'):
         shutil.copyfile(Path(__file__).with_name(name),out/name)
-    aux_peer = AuxProbe(out, latency=a.aux_latency,post_boot=a.aux_post_boot,readiness_seconds=a.aux_readiness_seconds) if a.aux_probe else None
+    aux_peer = AuxProbe(out, latency=a.aux_latency,post_boot=a.aux_post_boot,readiness_seconds=a.aux_readiness_seconds) if (a.aux_probe or a.aux_header_only) else None
     shutil.copyfile(a.manifest,out/'source-manifest.json')
     if a.aux_namespace and not aux_peer:
         with (out/'aux.raw').open('xb') as f:
@@ -126,6 +133,7 @@ def main():
     if a.aux_namespace:
         argv += ['-drive', f'if=none,id=gpu_aux,file={out}/aux.raw,format=raw']
         model['DARWIN_ANS_AUX_DRIVE'] = 'gpu_aux'
+    if a.aux_header_only:model['DARWIN_ANS_AUX_TRACE']='1'
     model['DARWIN_TOUCH_EVENTS'] = str(out/'events.jsonl')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DARWIN_', 'DVM_', 'GXFSTAT_'))}
     env.update(model)
@@ -135,9 +143,11 @@ def main():
     report['expected_manifest_sha256']=a.expected_manifest_sha256
     report['readiness_deadline_seconds']=a.aux_readiness_seconds
     ready=AuxReady(out,aux_peer,report) if a.aux_post_boot else None
+    report['aux_header_only']=a.aux_header_only
     input_ping_sent = False
     proc, wire, bridge = None, None, None
     started, reason = time.monotonic(), 'deadline'
+    header_progress=started
     report.update(host_runner_monotonic_origin=started, aux_latency=a.aux_latency,
         aux_post_boot=a.aux_post_boot,
         global_deadline_seconds=a.seconds,
@@ -162,6 +172,8 @@ def main():
         inventory_starts = 0
         with (out/'wire.log').open('wb') as log:
             while time.monotonic()-started < a.seconds and proc.poll() is None:
+                if a.aux_header_only and time.monotonic()-header_progress>=30:
+                    raise TimeoutError('initial header probe made no guest-stage progress for30seconds')
                 if ready:
                     now=time.monotonic()-started
                     ready.tick(wire,now)
@@ -194,6 +206,8 @@ def main():
                 lines = (pending+chunk).split(b'\n'); pending = lines.pop()[-65536:]
                 for raw in lines:
                     line = raw.decode(errors='replace').strip()
+                    if a.aux_header_only and 'GPU_LOAD_' in line and 'GPU_LOAD_AUX_ALIVE' not in line:
+                        header_progress=time.monotonic()
                     if ready:ready.feed(line,wire,time.monotonic()-started)
                     if a.aux_latency and 'GPU_LOAD_INVENTORY ' in line:
                         # A2 observed AMFI text and this marker on one serial
@@ -236,7 +250,17 @@ def main():
                 raise RuntimeError('roundtrip lacks protected successful close and original input start marker')
             report['roundtrip']=verify_roundtrip(out)
             report['passed']=True
-        if aux_peer:
+        if a.aux_header_only:
+            if reason!='guest load probe completed':raise RuntimeError('initial header completion not observed')
+            rows=[e['line'] for e in report['events'] if e['line'].startswith('GPU_LOAD_AUX_HEADER_ONLY ')]
+            if len(rows)!=1:raise RuntimeError('missing unique header result')
+            match=re.fullmatch(r'GPU_LOAD_AUX_HEADER_ONLY pass=1 bytes=4096 crc=([0-9a-f]{8})',rows[0])
+            if not match or int(match[1],16)!=zlib.crc32(os.pread(aux_peer.fd,4096,0)):
+                raise RuntimeError('guest header differs from exact host page')
+            for offset,length in ((0x10000,4096),(0x20000,4096),(0x30000,4096),(0x400000,1048576)):
+                if os.pread(aux_peer.fd,length,offset)!=bytes(length):raise RuntimeError('header-only probe wrote workload data')
+            report.update(passed=True,header_bytes_verified=4096,scope='instrumented-initial-header-read')
+        if aux_peer and not a.aux_header_only:
             if reason != 'guest load probe completed' or not any(
                     'scope=auxiliary-byte-transport' in e['line'] for e in report['events']):
                 raise RuntimeError('auxiliary guest completion not verified')

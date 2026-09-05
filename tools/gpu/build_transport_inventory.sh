@@ -14,6 +14,10 @@ case ${2:-} in
 esac
 if [[ ${3:-} != '' && ( ( ${2:-} != --uc && ${2:-} != --uc-probe ) || ${3:-} != --namespace-entitlement ) ]]; then exit 2; fi
 if [[ ${4:-} != '' && ( ${3:-} != --namespace-entitlement || ${4:-} != --class-exception ) ]]; then exit 2; fi
+if [[ ${5:-} != '' ]]; then
+    [[ ${2:-} == --uc-probe && ${4:-} == --class-exception && ${5:-} == --header-only ]] || exit 2
+    flags+=(-DDVM_AUX_HEADER_DIAG)
+fi
 bash "$repo/tools/gpu/build_guest_load.sh" "$out"
 if [[ ${3:-} == --namespace-entitlement ]]; then
     python3 - "$out/entitlements.plist" <<'PY'

@@ -26,6 +26,14 @@ int main(void) {
     /* launchd's explicit StandardErrorPath already supplies the console. */
     setvbuf(stderr,NULL,_IONBF,0);
     fprintf(stderr,"GPU_LOAD_INVENTORY version=1 pid=%d\n",getpid());
+#ifdef DVM_AUX_HEADER_DIAG
+    atexit(aux_diag_exit);
+    pthread_t heartbeat;
+    int thread_error=pthread_create(&heartbeat,NULL,aux_diag_heartbeat,NULL);
+    if(thread_error){fprintf(stderr,"GPU_LOAD_ERROR heartbeat=%d\n",thread_error);return 10;}
+    pthread_detach(heartbeat);
+    aux_diag_mark(0);
+#endif
     DIR *dir=opendir("/dev");struct dirent *entry;
     if(!dir)return 3;
     while((entry=readdir(dir))) {
@@ -126,7 +134,11 @@ int main(void) {
     p_IOObjectRelease(namespace_service);
 #ifdef DVM_AUX_UC_TRANSFER
     if(failed){fprintf(stderr,"GPU_LOAD_ERROR auxiliary-client-probe-failed\n");return 8;}
+#ifdef DVM_AUX_HEADER_DIAG
+    fprintf(stderr,"GPU_LOAD_COMPLETE result=pass scope=auxiliary-header-only\n");
+#else
     fprintf(stderr,"GPU_LOAD_COMPLETE result=pass scope=auxiliary-byte-transport\n");
+#endif
 #else
     fprintf(stderr,"GPU_LOAD_COMPLETE result=recorded scope=auxiliary-user-client-open\n");
 #endif
