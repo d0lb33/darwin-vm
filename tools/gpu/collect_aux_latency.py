@@ -28,6 +28,38 @@ def collect(run):
     assert report.get('passed') and report['aux_latency'], 'trial did not pass'
     assert not report['ram_restored'] and not report['kept_paused']
     assert report['auxiliary']['live_requests_verified'] == 64
+    post_boot=report.get('aux_post_boot',False)
+    if post_boot:
+        release=report['readiness_release']
+        review=release['review']
+        assert review['home_visible'] is True
+        assert digest(run/review['image'])==review['image_sha256']
+        assert release['seconds']<300 and report['global_deadline_seconds']==360
+        assert report['source_manifest_sha256']==digest(run/'source-manifest.json')
+        assert report['expected_manifest_sha256']==report['source_manifest_sha256']
+        assert review['source_manifest_sha256']==report['source_manifest_sha256']
+        assert digest(run/release['review_file'])==release['review_sha256']
+        assert json.loads((run/release['review_file']).read_text())==review
+        events=report['readiness_events']
+        assert [e['seconds'] for e in events]==sorted(e['seconds'] for e in events)
+        assert any(e['event']=='guest_wait' and e['seconds']<release['seconds'] for e in events)
+        captures=[e for e in events if e['event']=='image_ready' and e['image']==review['image']]
+        assert len(captures)==1
+        capture=captures[0]
+        assert capture['seconds']-capture['input_ack_seconds']>=15
+        acks=[e for e in events if e['event']=='sync_ack' and e['kind']=='settle' and e['seconds']==capture['input_ack_seconds']]
+        assert len(acks)==1
+        ack=acks[0]
+        assert any(e['event']=='sync_sent' and e['sequence']==ack['sequence'] and e['seconds']<=ack['seconds'] for e in events)
+        approves=[e for e in events if e['event']=='image_approved' and e['review_file']==release['review_file']]
+        assert len(approves)==1 and capture['seconds']<=approves[0]['seconds']<=capture['seconds']+60
+        final_acks=[e for e in events if e['event']=='sync_ack' and e['kind']=='release']
+        assert len(final_acks)==1 and final_acks[0]['seconds']==release['seconds']
+        final_ack=final_acks[0]
+        assert any(e['event']=='sync_sent' and e['sequence']==final_ack['sequence'] and approves[0]['seconds']<=e['seconds']<=final_ack['seconds'] for e in events)
+        assert not any(e['event'] in ('input_start','input_ready') and e['seconds']>ack['seconds'] for e in events)
+        launch=json.loads((run/'launch.json').read_text())
+        assert not any(flag in launch['argv'] for flag in ('-incoming','-loadvm','-S','-gdb'))
     guest = []
     for event in report['events']:
         if event['line'].startswith('GPU_LOAD_AUX_LAT seq='):
@@ -55,6 +87,12 @@ def collect(run):
         header = raw.read(4096)
         assert header[:21] == b'DVM-AUX-TRANSPORT-v1\0'
         assert header[128:144] == b'DVMLAT01'+struct.pack('<II',64,1000000)
+        if post_boot:
+            assert header[144:152]==b'DVMWAIT1'
+            assert header[:64].hex()==review['session']
+            raw.seek(0x30000);gate=raw.read(4096)
+            assert gate[:72]==header[:64]+b'DVMGO001'
+            assert struct.unpack_from('<I',gate,72)[0]==zlib.crc32(gate[:72])
         seed = bytes((i*37+(i>>8)*11+19)&255 for i in range(1024*1024))
         raw.seek(0x100000); assert raw.read(len(seed)) == seed, 'seed modified'
         raw.seek(0x400000); assert raw.read(len(seed)) == bytes(b^0x5a for b in seed), 'bulk mismatch'
@@ -63,7 +101,7 @@ def collect(run):
             assert packet[:64] == header[:64] and struct.unpack_from('<I',packet,64)[0] == 64
             assert zlib.crc32(packet[72:]) == struct.unpack_from('<I',packet,68)[0]
             assert packet[72:] == bytes(((i*13+64*17)&255)^xor for i in range(72,4096))
-    summary=dict(tag=run.name, host_poll_ms=report['aux_poll_ms'], samples=len(guest),
+    summary=dict(tag=run.name, host_poll_ms=report['aux_poll_ms'], samples=len(guest),post_boot=post_boot,
         guest_ms={key:distribution([row[key] for row in guest]) for key in guest[0] if key.endswith('_ms') and key!='host_poll_ms'},
         guest_polls=distribution([row['polls'] for row in guest]),
         host_ms={key:distribution([row[key]/1e6 for row in host])
@@ -85,7 +123,8 @@ def main():
     for run in args.runs:
         summary,g,h=collect(run)
         summaries.append(summary);guest.extend(g);host.extend(h)
-    result=dict(scope='early-cold-boot-verified-byte-transport',runs=summaries,
+    assert len({r['post_boot'] for r in summaries})==1,'do not mix workload release phases'
+    result=dict(scope='post-home-screen-verified-byte-transport' if summaries[0]['post_boot'] else 'early-cold-boot-verified-byte-transport',runs=summaries,
         cpu_gpu_speedup_tested=False, cross_clock_subtraction=False)
     if len(summaries)==4 and [r['host_poll_ms'] for r in summaries]==[5,1,1,5]:
         pairs=[]

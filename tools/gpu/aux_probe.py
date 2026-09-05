@@ -17,7 +17,9 @@ BULK = 1024 * 1024
 
 
 class AuxProbe:
-    def __init__(self, out, latency=False):
+    def __init__(self, out, latency=False, post_boot=False):
+        if post_boot and not latency:
+            raise ValueError('post-boot gate requires latency workload')
         self.out = Path(out)
         self.path = self.out/'aux.raw'
         self.header = (MAGIC + os.urandom(32)).ljust(64, b"\0")
@@ -29,6 +31,10 @@ class AuxProbe:
         self.request_count = 64 if latency else 10
         self.config = b'DVMLAT01' + struct.pack('<II', 64, 1000000) if latency else bytes(16)
         os.pwrite(self.fd, self.config, 128)
+        self.post_boot = post_boot
+        self.released = not post_boot
+        self.wait_config = b'DVMWAIT1' if post_boot else bytes(8)
+        os.pwrite(self.fd, self.wait_config, 144)
         os.pwrite(self.fd, self.seed, 0x100000)
         self.seen = set()
         self.started = time.monotonic()
@@ -42,6 +48,15 @@ class AuxProbe:
         self.records = []
         self.log = (self.out/'aux-host.jsonl').open('x')
 
+    def release(self):
+        if not self.post_boot or self.released or self.seen:
+            raise ValueError('invalid auxiliary gate release')
+        identity=self.header+b'DVMGO001'
+        gate = (identity+struct.pack('<I',zlib.crc32(identity))).ljust(4096,b'\0')
+        if os.pwrite(self.fd,gate,0x30000)!=len(gate):
+            raise OSError('short gate write')
+        self.released=True
+
     def pump(self):
         poll_ns = time.monotonic_ns()
         poll_gap_ns = poll_ns-self.last_poll_ns if self.last_poll_ns is not None else None
@@ -53,6 +68,8 @@ class AuxProbe:
         observed_ns = time.monotonic_ns()
         if packet[:64] != self.header:
             return
+        if not self.released:
+            raise ValueError('guest published a request before readiness release')
         seq, crc = struct.unpack_from('<II', packet, 64)
         if seq in self.seen or seq not in range(1, self.request_count+1) or zlib.crc32(packet[72:]) != crc:
             return
@@ -95,6 +112,8 @@ class AuxProbe:
             raise ValueError('dedicated auxiliary header changed')
         if os.pread(self.fd, 16, 128) != self.config:
             raise ValueError('auxiliary experiment configuration changed')
+        if os.pread(self.fd,8,144)!=self.wait_config or not self.released:
+            raise ValueError('auxiliary readiness contract failed')
         actual = os.pread(self.fd, BULK, 0x400000)
         if actual != bytes(b ^ 0x5a for b in self.seed):
             raise ValueError('host did not receive the exact guest bulk output')

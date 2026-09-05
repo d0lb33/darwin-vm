@@ -22,7 +22,10 @@ class AuxTests(unittest.TestCase):
     def test_c_peer_retries_incomplete_latency_response(self):
         self.run_c_peer(True, torn=True)
 
-    def run_c_peer(self, latency, torn=False):
+    def test_c_peer_waits_for_session_gate(self):
+        self.run_c_peer(True, post_boot=True)
+
+    def run_c_peer(self, latency, torn=False, post_boot=False):
         with tempfile.TemporaryDirectory(prefix='gpu-aux-test-', dir='/tmp/dvm') as temp:
             out = Path(temp)
             source = out/'peer.c'
@@ -42,14 +45,24 @@ int main(int argc,char **argv){
 ''')
             subprocess.run(['xcrun','clang','-O2','-Wall','-Wextra','-Werror',
                 '-Wno-unused-function','-Wno-unused-variable',str(source),'-o',str(out/'peer')], check=True)
-            peer = AuxProbe(out, latency=latency)
+            peer = AuxProbe(out, latency=latency,post_boot=post_boot)
             proc = None
             try:
                 with (out/'guest.log').open('w') as log:
                     proc = subprocess.Popen([str(out/'peer'),str(peer.path)],stderr=log)
                     deadline=time.monotonic()+30
                     torn_deadline=None
+                    gate_deadline=None
                     while proc.poll() is None and time.monotonic()<deadline:
+                        if post_boot and not peer.released:
+                            if 'GPU_LOAD_AUX_WAIT ' in (out/'guest.log').read_text() and gate_deadline is None:
+                                identity=bytearray(peer.header);identity[21]^=1
+                                foreign=bytes(identity)+b'DVMGO001'
+                                os.pwrite(peer.fd,(foreign+struct.pack('<I',zlib.crc32(foreign))).ljust(4096,b'\0'),0x30000)
+                                gate_deadline=time.monotonic()+.25
+                            self.assertEqual(os.pread(peer.fd,4096,0x10000),bytes(4096))
+                            self.assertEqual(os.pread(peer.fd,4096,0x400000),bytes(4096))
+                            if gate_deadline and time.monotonic()>=gate_deadline:peer.release()
                         if torn and not peer.seen:
                             request=os.pread(peer.fd,4096,0x10000)
                             if request[:64]==peer.header and torn_deadline is None:

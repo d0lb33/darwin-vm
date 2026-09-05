@@ -23,6 +23,7 @@ from proxy_uart_v2 import ReliableProxyUART
 from verify_roundtrip import verify as verify_roundtrip
 from aux_probe import AuxProbe
 from aux_namespace_dt import properties, EXPECTED
+from aux_ready import AuxReady
 
 
 def main():
@@ -36,6 +37,9 @@ def main():
     p.add_argument('--aux-probe', action='store_true', help='run auxiliary bulk/response/timeout peer')
     p.add_argument('--aux-latency', action='store_true',
         help='64 normal verified requests, buffered guest stage timings; implies --aux-probe')
+    p.add_argument('--aux-post-boot', action='store_true',
+        help='gate latency on reviewed home-screen image, input ACKs and 15-second settling')
+    p.add_argument('--expected-manifest-sha256',help='required post-boot experiment baseline pin')
     p.add_argument('--aux-poll-ms', type=int, choices=(1, 5), default=5,
         help='host mailbox polling interval; 5 is the historical default')
     p.add_argument('--aux-wait-input', action='store_true',
@@ -45,10 +49,12 @@ def main():
     p.add_argument('--library-cache',type=Path)
     p.add_argument('--faults',action='store_true',help='reliable mode: inject one corrupt response and drop two ACKs')
     a = p.parse_args()
+    if a.aux_post_boot:a.aux_latency=True
     if a.aux_latency:
         a.aux_probe = True
-        if a.seconds != 180 or a.aux_wait_input or a.keep_paused:
-            p.error('--aux-latency requires --seconds 180, no input wait, and automatic teardown')
+        expected_seconds=360 if a.aux_post_boot else 180
+        if a.seconds != expected_seconds or a.aux_wait_input or a.keep_paused:
+            p.error(f'latency mode requires --seconds {expected_seconds}, no input wait, and automatic teardown')
     if a.aux_poll_ms != 5 and not a.aux_probe:
         p.error('--aux-poll-ms requires --aux-probe')
     if a.aux_probe:
@@ -63,6 +69,12 @@ def main():
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40 or not 1 <= a.seconds <= 1200:
         p.error('invalid tag or seconds (1..1200)')
     m = json.loads(a.manifest.read_text())
+    if a.aux_post_boot:
+        if not a.expected_manifest_sha256 or sha256(a.manifest)!=a.expected_manifest_sha256:
+            raise ValueError('post-boot experiment manifest differs from explicit baseline pin')
+        for flag,value in (('-fb','1179x2556'),('-fbmode','graphics')):
+            if flag not in m['qemu_argv'] or m['qemu_argv'][m['qemu_argv'].index(flag)+1]!=value:
+                raise ValueError('post-boot trial requires the pinned native graphics geometry')
     if a.aux_namespace:
         dt = Path(m['qemu_argv'][m['qemu_argv'].index('-dtree')+1])
         values = [v[2] for k,v in properties(dt.read_bytes()).items()
@@ -75,9 +87,10 @@ def main():
             raise RuntimeError(f'changed pinned input: {name}')
     out = Path('/tmp/dvm')/a.tag
     out.mkdir(exist_ok=False)
-    for name in ('run_guest_load.py','aux_probe.py','aux_namespace_dt.py'):
+    for name in ('run_guest_load.py','aux_probe.py','aux_namespace_dt.py','aux_ready.py'):
         shutil.copyfile(Path(__file__).with_name(name),out/name)
-    aux_peer = AuxProbe(out, latency=a.aux_latency) if a.aux_probe else None
+    aux_peer = AuxProbe(out, latency=a.aux_latency,post_boot=a.aux_post_boot) if a.aux_probe else None
+    shutil.copyfile(a.manifest,out/'source-manifest.json')
     if a.aux_namespace and not aux_peer:
         with (out/'aux.raw').open('xb') as f:
             f.truncate(64 * 1024 * 1024)
@@ -114,10 +127,14 @@ def main():
     env.update(model)
     atomic_json(out/'launch.json', dict(format='darwin-vm-qemu-launch-v1', argv=argv, env=model))
     report = dict(manifest=str(a.manifest.resolve()), ram_restored=False, debugger=False, events=[])
+    report['source_manifest_sha256']=sha256(a.manifest)
+    report['expected_manifest_sha256']=a.expected_manifest_sha256
+    ready=AuxReady(out,aux_peer,report) if a.aux_post_boot else None
     input_ping_sent = False
     proc, wire, bridge = None, None, None
     started, reason = time.monotonic(), 'deadline'
     report.update(host_runner_monotonic_origin=started, aux_latency=a.aux_latency,
+        aux_post_boot=a.aux_post_boot,
         global_deadline_seconds=a.seconds,
         aux_poll_ms=a.aux_poll_ms, aux_peer_monotonic_origin=aux_peer.started if aux_peer else None)
     try:
@@ -140,6 +157,11 @@ def main():
         inventory_starts = 0
         with (out/'wire.log').open('wb') as log:
             while time.monotonic()-started < a.seconds and proc.poll() is None:
+                if ready:
+                    now=time.monotonic()-started
+                    ready.tick(wire,now)
+                    if ready.released_at is not None and not aux_peer.seen and now-ready.released_at>15:
+                        raise TimeoutError('no latency request within 15 seconds of readiness release')
                 if aux_peer:
                     aux_peer.pump()
                     if a.aux_latency and aux_peer.seen and len(aux_peer.seen)<64 and \
@@ -156,7 +178,8 @@ def main():
                         input_ping_sent = True
                 if bridge:
                     bridge.pump(wire)
-                if not select.select([wire], [], [], a.aux_poll_ms/1000 if aux_peer else .01 if bridge else .2)[0]:
+                poll_wait=.005 if ready and ready.released_at is None else a.aux_poll_ms/1000
+                if not select.select([wire], [], [], poll_wait if aux_peer else .01 if bridge else .2)[0]:
                     continue
                 chunk = wire.recv(65536)
                 if not chunk:
@@ -166,6 +189,7 @@ def main():
                 lines = (pending+chunk).split(b'\n'); pending = lines.pop()[-65536:]
                 for raw in lines:
                     line = raw.decode(errors='replace').strip()
+                    if ready:ready.feed(line,wire,time.monotonic()-started)
                     if a.aux_latency and 'GPU_LOAD_INVENTORY ' in line:
                         # A2 observed AMFI text and this marker on one serial
                         # line. Count embedded starts as well as clean lines.
@@ -217,6 +241,7 @@ def main():
                 if sequences != list(range(1,65)) or any(' valid=1 ' not in e['line'] for e in samples):
                     raise RuntimeError('latency workload did not verify all 64 guest replies')
             report['auxiliary'] = aux_peer.verify()
+            if ready and ready.released_at is None:raise RuntimeError('missing post-boot release')
             report['input_sync_ack_observed'] = input_ack
             report['passed'] = True
     except BaseException as error:

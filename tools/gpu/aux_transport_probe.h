@@ -118,6 +118,22 @@ static int aux_transfer(int fd, const unsigned char *header) {
         free(data);free(packet);free(reply);errno=ENOMEM;return 1;
     }
     int result=1;double start=aux_now();
+    if(latency&&!memcmp(header+144,"DVMWAIT1",8)) {
+        unsigned polls=0;int released=0;
+        fprintf(stderr,"GPU_LOAD_AUX_WAIT version=1 budget_seconds=330 poll_ms=100\n");
+        while(aux_now()-start<330.0) {
+            if(aux_read(fd,reply,AUX_PAGE,0x30000)!=AUX_PAGE)goto done;
+            polls++;
+            uint32_t gate_crc=0;memcpy(&gate_crc,reply+72,4);
+            if(!memcmp(reply,header,64)&&!memcmp(reply+64,"DVMGO001",8)&&gate_crc==aux_crc(reply,72)) {
+                released=1;break;
+            }
+            struct timespec nap={0,100000000};nanosleep(&nap,NULL);
+        }
+        fprintf(stderr,"GPU_LOAD_AUX_RELEASE valid=%d polls=%u wait_seconds=%.6f\n",released,polls,aux_now()-start);
+        if(!released){errno=ETIMEDOUT;goto done;}
+        start=aux_now();
+    }
     if(aux_read(fd,data,AUX_BULK,0x100000)!=AUX_BULK)goto done;
     double io_seconds=aux_now()-start;
     for(unsigned i=0;i<AUX_BULK;i++)if(data[i]!=(unsigned char)(i*37u+(i>>8)*11u+19u)){errno=EILSEQ;goto done;}
