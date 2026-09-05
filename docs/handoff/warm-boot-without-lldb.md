@@ -1,5 +1,11 @@
 # Warm booting iOS display without LLDB
 
+**2026-09-05 update:** [warm-boot-stability.md](../re/warm-boot-stability.md)
+records the fresh disk baseline, automatic native-input launch-cache/console
+fix, exact Settings icon-image trap, and remaining display/calendar/power
+work. Use its disk-only candidate manifest for startup experiments. The
+rendered-RAM checkpoint below remains a visual control, not a disk-boot proof.
+
 ## Goal and starting point
 
 The next task is to make a six-core iOS warm boot reach a visible Setup,
@@ -140,8 +146,8 @@ actual QEMU mouse input after the UI becomes visible.
 * The old fully rendered language picker checkpoint predates the native helper.
   It is useful as a visual control, but not as an input-test target.
 
-The target completion criterion is simple: restore a migrated, pre-Setup or
-Home-adjacent checkpoint under the final QEMU binary, attach no guest LLDB,
+The target completion criterion is simple: boot a fresh child of the migrated,
+Setup-complete disk under the final QEMU binary, restore no RAM, attach no guest LLDB,
 and collect two visibly different Cocoa frame dumps while the VM remains
 running.  Then test one real Cocoa click through the native input relay and
 record its corresponding visible UI transition.

@@ -1,5 +1,13 @@
 # Native input development (24A5430a)
 
+Latest disk-boot result: helper v5 opens its own console input, and the
+development launchd cache now includes its service. `WARM_INPUT_AUTO2`
+automatically registered HID and acknowledged 10/10 pings without a debugger
+endpoint. The screen remained black. See
+[warm-boot-stability.md](warm-boot-stability.md) for the preserved candidate,
+runtime evidence, and remaining startup work. The v4 result below describes
+the earlier rendered-RAM control.
+
 Status (2026-09-05, NATIVE_HOME_UART_R2): native helper v4 is installed in the
 migrated six-core Home image. Fixed UART full/empty ambiguity; 50 unpaced pings
 all ACKed (median 17.89 ms, maximum 127.90 ms). A native tap opened Home Search,
@@ -342,3 +350,38 @@ the second exited on the singleton lock. A priority-change diagnostic was
 never applied (task lookup failed); its scratch mapping was freed and the
 original caller restored. Do not claim the slow-start cause is established.
 Further touch reliability/gesture work remains paused at the user's request.
+
+
+## Native single-packet taps (2026-09-05)
+
+The current autostart and console-reader fix is helper v5;
+`WARM_DEV_NATIVE_HOME1` reached the native Home grid without debugger input.
+App tapping still needs a separate delivery test. In
+`SETTINGS_BITMAP_NATIVE3`, direct down/up records queued 150 ms apart without
+waiting for the down ACK produced a Settings long-press menu. Down returned
+after 2.501 seconds and up after 3.896 seconds. Sleeping on the helper worker
+between the same synchronous `dispatchEvent:` calls cannot enforce tap timing.
+The buffered R path (touchDown, stationary moves, liftUp) accepted ten records
+but did not launch Settings. Neither result is a reproduced Settings crash.
+
+Helper v6 adds `DVMINPUT1 <sequence> P 0 <x> <y>`. This uses the dedicated
+Recap `taps:location:withNumberOfTouches:` method, static `0x29b20041c`,
+with tap count 1, screen-space CGPoint, and touch count 1. The argument ABI
+is x2=count, d0/d1=point, x3=touches. It then finalizes the processing buffer,
+sets events, and calls `+[RCPInlinePlayer playEventStream:options:completion:]`.
+The prior working trace is `/tmp/dvm/TOUCH_INPUT_R21.lldb.log:43–55`;
+it shows delivery after releasing the stream and options, supporting their
+retention by asynchronous playback. P ACK means queued playback, not a
+completed UI action. `relay.py --tap` now emits one P packet and requires v6.
+`--backend recap --tap` retains the older R diagnostic, while live mouse
+records still use direct T events.
+
+Build/staging artifacts: `/tmp/dvm/warm-input-v6-native-tap/`; helper CDHash
+`023cff3b44925a3dc16882553f7717f5b3b144b9`.
+`INPUT_V6_INSTALL1` installed it in a new child of the native-Home disk;
+its restore-guest validator and final `DVM_INPUT_INSTALL_DONE` marker passed.
+The input-v6 disk boot and saved-state continuation reached native Home.
+`INPUT_V6_TAP1` then used one P packet to show Settings’ launch surface; a
+separate `SETTINGS_V6_TRACE1` replay caught the fresh Preferences bitmap trap.
+Thus P now supplies a reproducible application-launch trigger; it does not
+make Settings stable.

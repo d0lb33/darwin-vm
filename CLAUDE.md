@@ -4,6 +4,16 @@ Fork of jprx/darwin-vm. Upstream boots iOS/macOS to a serial root shell in QEMU.
 Our goal is real display output: get the iOS userspace display stack far enough
 to draw a setup / lock / home screen, and keep it working across iOS versions.
 
+For the 2026-09-05 warm disk-boot baseline, native-input autostart fix,
+Settings crash evidence, and remaining stability gates, read
+`docs/re/warm-boot-stability.md`. A rendered-RAM restore is not evidence of
+an independent disk boot.
+
+Use saved RAM/device checkpoints for diagnosis: reproducing Settings crashes,
+inspecting services, testing input, and trying debugger hypotheses. Reserve
+fresh disk boots for validating persistent fixes, startup ordering, initial
+clock state, and repeatability. Record which kind of run supplied each result.
+
 `origin` is the fork (d0lb33), `upstream` is jprx. Same for the `qemu-sptm`
 submodule. Never push to `upstream`.
 

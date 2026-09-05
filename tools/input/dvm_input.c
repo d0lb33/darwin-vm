@@ -125,6 +125,8 @@ static bool parse(const char *line, struct packet *packet) {
     return ((packet->kind == 'T' || packet->kind == 'R') &&
             packet->x <= 32767 && packet->y <= 32767) ||
            (packet->kind == 'H' && packet->x == 0 && packet->y == 0) ||
+           (packet->kind == 'P' && !packet->down &&
+            packet->x <= 32767 && packet->y <= 32767) ||
            (packet->kind == 'S' && !packet->down && !packet->x && !packet->y);
 }
 
@@ -172,6 +174,40 @@ static bool post_home(const struct packet *packet) {
 struct point { double x, y; };
 static Obj recap_stream;
 static unsigned recap_points;
+static bool play_recap(Obj stream) {
+    msg0(stream, "_finalizeProcessingEventBuffer");
+    void *ivar = instance_variable(class_named("RCPSyntheticEventStream"), "_processingEventBuffer");
+    if (!ivar) return false;
+    msg1(stream, "setEvents:", get_ivar(stream, ivar));
+    Obj options = msg0(msg0(class_named("RCPPlayerPlaybackOptions"), "alloc"), "init");
+    if (!options) return false;
+    msg1(options, "setDisplayUUIDOverride:", display_uuid);
+    ((void (*)(Obj, Sel, Obj, Obj, Obj))send_message)(class_named("RCPInlinePlayer"),
+        selector("playEventStream:options:completion:"), stream, options, NULL);
+    msg0(options, "release");
+    return true; /* queued, not proof of delivery or a completed UI action */
+}
+static bool post_tap(const struct packet *p) {
+    /* Use Recap's dedicated native tap generator, 24A5430a 0x29b20041c:
+     * x2=tap count, d0/d1=CGPoint, x3=touch count. Direct dispatchEvent:
+     * blocked for 2.501s after down in SETTINGS_BITMAP_NATIVE3, producing a
+     * long press even with up queued 150ms later. Host or worker sleeps
+     * between synchronous direct posts cannot enforce tap duration.
+     */
+    Obj stream = msg0(msg0(class_named("RCPSyntheticEventStream"), "alloc"), "init");
+    if (!stream) return false;
+    msg1(stream, "setSenderProperties:", touch_properties);
+    struct point size = ((struct point (*)(Obj, Sel))send_message)(stream, selector("screenSize"));
+    bool ok = false;
+    if (size.x > 0 && size.x <= 16384 && size.y > 0 && size.y <= 16384) {
+        struct point point = {p->x * size.x / 32767., p->y * size.y / 32767.};
+        ((void (*)(Obj, Sel, uintptr_t, struct point, uintptr_t))send_message)(
+            stream, selector("taps:location:withNumberOfTouches:"), 1, point, 1);
+        ok = play_recap(stream);
+    }
+    msg0(stream, "release");
+    return ok;
+}
 static bool post_recap(const struct packet *p) {
     Obj cls = class_named("RCPSyntheticEventStream");
     if (!recap_stream) {
@@ -196,18 +232,10 @@ static bool post_recap(const struct packet *p) {
     if (p->down) return true;
     ((void (*)(Obj, Sel, struct point))send_message)(recap_stream,
         selector("liftUp:"), point);
-    msg0(recap_stream, "_finalizeProcessingEventBuffer");
-    void *ivar = instance_variable(cls, "_processingEventBuffer");
-    if (!ivar) return false;
-    msg1(recap_stream, "setEvents:", get_ivar(recap_stream, ivar));
-    Obj options = msg0(msg0(class_named("RCPPlayerPlaybackOptions"), "alloc"), "init");
-    msg1(options, "setDisplayUUIDOverride:", display_uuid);
-    ((void (*)(Obj, Sel, Obj, Obj, Obj))send_message)(class_named("RCPInlinePlayer"),
-        selector("playEventStream:options:completion:"), recap_stream, options, NULL);
-    msg0(options, "release");
+    bool ok = play_recap(recap_stream);
     msg0(recap_stream, "release");
     recap_stream = NULL;
-    return true;
+    return ok;
 }
 
 static bool validate_only;
@@ -233,6 +261,7 @@ static void *input_loop(void *unused) {
         }
         void *pool = validate_only ? NULL : pool_push();
         bool ok = validate_only || p.kind == 'S' || (p.kind == 'H' ? post_home(&p) :
+                  p.kind == 'P' ? (!down && post_tap(&p)) :
                   p.kind == 'R' ? post_recap(&p) : post_touch(&p, down));
         if (p.kind == 'T' && ok) down = p.down;
         last = p.sequence;
@@ -260,7 +289,17 @@ int main(int argc, char **argv) {
     if (lock < 0 || flock(lock, LOCK_EX | LOCK_NB)) {
         perror("dvm-input singleton lock"); return 1;
     }
-    fprintf(stderr, "DVM_INPUT_START version=4 pid=%d\n", getpid());
+    fprintf(stderr, "DVM_INPUT_START version=6 pid=%d\n", getpid());
+    /* Inherited stdin was unusable in the 24A5430a cached launchd service:
+     * WARM_INPUT_AUTO1 reached HID READY, then fgets returned EOF with
+     * tcgetattr's ENOTTY still in errno. The established manual spawn opens
+     * /dev/console explicitly. Own that same input endpoint here, after the
+     * singleton lock, rather than depending on inherited launchd stdio.
+     * --validate continues to read its caller's pipe above.
+     */
+    if (!freopen("/dev/console", "r", stdin)) {
+        perror("dvm-input open console"); return 1;
+    }
     /* Direct children of launchd can inherit ignored/blocked signals. */
     signal(SIGTERM, SIG_DFL);
     signal(SIGINT, SIG_DFL);

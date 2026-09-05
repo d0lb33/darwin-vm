@@ -160,6 +160,16 @@ def del_compat(d, path=''):
     if not any(x in compat for x in SUPPORTED_DRIVERS):
       del d.props['compatible']
 
+  # IOMobileFramebuffer counts display-subsystem nodes independently of
+  # driver matching (iOS 27, 0x22a395fcc; increment at 0x22a3961ac). Leaving
+  # dispext0's type after disabling its driver makes userspace expect two
+  # framebuffers while only disp0 registers. Preserve the node and MMIO map.
+  # WARM_SINGLE_DISPLAY1 verifies expected/current counts of 1/1 in both
+  # backboardd and SpringBoard; this fixes enumeration, not every startup wait.
+  if (rel == 'arm-io/dispext0' and 'compatible' not in d.props
+      and d.props.get('device_type') == 'ext-display-subsystem'):
+    del d.props['device_type']
+
 def drop_exclave_routes(d):
   # An IOP nub's "routes" property points at a secure-rtbuddy-proxy node, i.e.
   # the exclave (secure world) side of that coprocessor's mailbox. We don't
@@ -742,6 +752,16 @@ def encode_node(d):
     outv += encode_node(c)
   return outv
 
+def fixup_development_activation(d):
+  # Explicit development-VM identity. XNU PE_init_platform reads debug-enabled
+  # into PE_i_can_has_debugger(), then commpage DEV_FIRM. In 24A5430a,
+  # os_variant_allows_internal_security_policies (0x22ffbb324) gates
+  # mobileactivationd's allow-hactivation input (0x1002ebaf8..0x1002ebbd0).
+  # Keep native opt-outs intact. See docs/re/setup-activation-contract.md.
+  d['chosen'].props['debug-enabled'] = 'u32:1'
+  d['product'].props['allow-hactivation'] = 'u32:1'
+
+
 def main():
   p = argparse.ArgumentParser(prog='dt_fixup')
   p.add_argument('dtree', type=argparse.FileType('rb', 0))
@@ -752,6 +772,9 @@ def main():
   p.add_argument('-skip-keybag', dest='skip_keybag', action='store_true',
                  help='set /product boot-ios-diagnostics so keybagd --init exits instead of '
                       'blocking forever on a SEP that is not there. A skip, not a fix.')
+  p.add_argument('-development-activation', action='store_true',
+                 help='present development boot firmware and allow native local '
+                      'hactivation; enables internal security policies in the VM')
   p.add_argument('-ephemeral-data', dest='ephemeral_data', nargs='?', const='8388608', default=None,
                  metavar='BLOCKS',
                  help='promote the ephemeral-recovery fstab so /private/var is a writable tmpfs '
@@ -778,6 +801,8 @@ def main():
   dt_root = ADTNode()
   decode_node(args.dtree.read(),dt_root)
   fixup(dt_root, nvram_file=args.nvram)
+  if args.development_activation:
+    fixup_development_activation(dt_root)
   args.out.write(encode_node(dt_root))
 
 if __name__=="__main__":

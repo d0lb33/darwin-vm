@@ -60,8 +60,11 @@ ITEM = {
     # named: current XNU does not define it as a process-name field.
     0x0805: "TASK_CRASHINFO_PID",
     0x0809: "TASK_CRASHINFO_PROC_NAME",
+    0x080B: "TASK_CRASHINFO_PROC_STARTTIME",
+    0x080E: "TASK_CRASHINFO_EXCEPTION_CODES",
     0x080F: "TASK_CRASHINFO_PROC_PATH",
     0x081A: "TASK_CRASHINFO_CRASHED_THREADID",
+    0x0838: "TASK_CRASHINFO_EXCEPTION_TYPE",
 }
 
 KCDATA_TYPE_BUFFER_END = 0xF19158ED
@@ -137,6 +140,17 @@ def render(path, off, tag, out=sys.stdout):
         elif t in (KCDATA_TYPE_PID, TASK_CRASHINFO_PID) and sz >= 4:
             pid, = struct.unpack_from("<i", data, 0)
             lines.append("  %-26s %d" % (name, pid))
+            interesting = True
+        elif t == 0x80e and sz >= 16:
+            codes = struct.unpack_from("<QQ", data)
+            lines.append("  %-26s code=0x%x subcode=0x%x" % (name, *codes))
+            interesting = True
+        elif t == 0x80b and sz >= 16:
+            secs, usecs = struct.unpack_from("<QQ", data)
+            lines.append("  %-26s %d.%06d" % (name, secs, usecs))
+            interesting = True
+        elif t == 0x838 and sz >= 4:
+            lines.append("  %-26s %d" % (name, struct.unpack_from("<I", data)[0]))
             interesting = True
         elif t == KCDATA_TYPE_NESTED_KCDATA and sz >= 16:
             nested_type, = struct.unpack_from("<I", data, 0)

@@ -1,0 +1,16 @@
+{
+  "cache_name": "dyld_shared_cache_arm64e.13",
+  "purpose": "24A5430a VM software-rendering fallback, explicitly staged for non-accelerated guests: CoverSheetKit textLabelClass uses its native UIKit branch, and CSGlassContentStyleRenderer reports the base-class non-glass capability. POWER_PERCENT_ROOT4 snapshot matrix displays time only with both changes. Not a GPU implementation; fresh disk validation required. See docs/re/lockscreen-poster-time.md.",
+  "edits": [
+    {
+      "offset": "0x34d1394",
+      "before": "e00313aad22d2195318f1d951f0400f1",
+      "after": "08000014d22d2195318f1d951f0400f1"
+    },
+    {
+      "offset": "0x34d67f0",
+      "before": "20008052c0035fd67f2303d5f44fbea9",
+      "after": "00008052c0035fd67f2303d5f44fbea9"
+    }
+  ]
+}
