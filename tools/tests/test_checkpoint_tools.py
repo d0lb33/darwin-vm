@@ -16,10 +16,19 @@ from checkpoint_common import (  # noqa: E402
     parse_migration_status, process_argv_env, qcow2_backing_chain, restore_argv,
     sptm_panic_message, serial_hex_clock_bounds, verify_backing_chain, selected_cpu_index,
 )
-from restore_checkpoint import activate_paused_disks, checkpoint_source_cpu  # noqa: E402
+from restore_checkpoint import (activate_paused_disks, checkpoint_source_cpu,
+                                parse_model_env_overrides)  # noqa: E402
 
 
 class CheckpointCommandTests(unittest.TestCase):
+    def test_model_override_cannot_change_host_loader_environment(self):
+        self.assertEqual(parse_model_env_overrides([
+            "DARWIN_DCP_IOMFB_COMPLETE=1", "GXFSTAT_OUTPUT=", "DARWIN_TEST=a=b"
+        ]), {"DARWIN_DCP_IOMFB_COMPLETE": "1", "GXFSTAT_OUTPUT": "", "DARWIN_TEST": "a=b"})
+        for item in ("PATH=/tmp", "DYLD_INSERT_LIBRARIES=/tmp/x", "DARWIN_TEST", "DARWIN_=1"):
+            with self.assertRaises(ValueError):
+                parse_model_env_overrides([item])
+
     def test_checkpoint_preserves_nonzero_witness_cpu(self):
         cpus = "  CPU #0: thread_id=42\n* CPU #3: thread_id=42\n"
         self.assertEqual(selected_cpu_index(cpus), 3)

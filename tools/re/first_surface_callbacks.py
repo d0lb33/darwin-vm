@@ -156,12 +156,17 @@ def _capture_surface(process, surface, metadata, hit):
         nonblack_pixels = 0
         opaque_pixels = 0
         color_bytes = 0
+        peak_rgb = 0
+        pixels_over_32 = 0
         for y in range(height):
             scanline = data[y * row:y * row + width * 4]
             for x in range(0, len(scanline), 4):
                 r = scanline[x + red]
                 g = scanline[x + green]
                 b = scanline[x + blue]
+                brightness = max(r, g, b)
+                peak_rgb = max(peak_rgb, brightness)
+                pixels_over_32 += int(brightness > 32)
                 color_bytes += int(r != 0) + int(g != 0) + int(b != 0)
                 nonblack_pixels += int(r != 0 or g != 0 or b != 0)
                 opaque_pixels += int(scanline[x + alpha] != 0)
@@ -170,6 +175,8 @@ def _capture_surface(process, surface, metadata, hit):
             "nonblack_pixels": nonblack_pixels,
             "opaque_pixels": opaque_pixels,
             "total_pixels": width * height,
+            "peak_rgb": peak_rgb,
+            "pixels_over_32": pixels_over_32,
         }
     CAPTURE_SEQUENCE[0] += 1
     directory = EVENT_DIR or "/tmp/dvm"
@@ -254,6 +261,11 @@ def on_break(frame, bp_loc, _dict):
         stats = payload["surface_capture"].get("pixel_stats", {})
         if stats.get("nonblack_pixels", 0) > 0:
             payload["label"] = "NONBLACK_IOSURFACE"
+        # A fade-in at RGB 1-2 is mathematically nonblack but visibly blank.
+        # This opt-in stop is a capture threshold, not recognition of a UI.
+        if ("VISIBLE_IOSURFACE" in SUCCESS_LABELS and
+                stats.get("pixels_over_32", 0) >= 128):
+            payload["label"] = "VISIBLE_IOSURFACE"
         success = payload["label"] in SUCCESS_LABELS
     if success:
         label = payload["label"]

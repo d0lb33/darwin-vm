@@ -107,7 +107,7 @@ Static iOS 27 IOMobileGraphicsFamily-DCP disassembly identifies the ID without
 assuming the first swap is zero. At `0xfffffff00a0c366c`, the input record in
 x1 is retained as x24. `0xfffffff00a0c3730` loads w19 from `[x24,#0x98]`;
 `0xfffffff00a0c3744` stores it into the pending queue item at `[x23,#0x3d4]`.
-The A408 call at `0xfffffff00a0c4644` receives that same input record. Its
+The A408 argument setup at `0xfffffff00a0c4644` uses that same input record. Its
 wrapper copies the first `0x6e0` bytes verbatim into the wire payload at
 `0xfffffff00a0c9088..0xfffffff00a0c9098`. Thus A408 wire `+0x98` supplies
 the ID D594 must echo. This establishes the identifier location; it does
@@ -120,3 +120,68 @@ capture instead of treating zero-filled optional descriptors as mapped
 surfaces. Disassembly outputs: `/tmp/dvm/DISPLAY_SMP6.a408-wrapper.txt`,
 `/tmp/dvm/DISPLAY_SMP6.a408-caller.txt`, and
 `/tmp/dvm/DISPLAY_SMP6.map-submit.txt`.
+
+## Six-core visible scanout (2026-09-04)
+
+`DISPLAY_SMP6_VISIBLE_R6` restored the new model's in-flight D594 from
+`/tmp/dvm/checkpoints/DISPLAY_SMP6_D594_ACTIVE5/manifest.json` in 1.367 s.
+At native handler return `0xfffffff02a0db164`, x0 was zero and the pending
+queue at framebuffer `0xffffffeccdfec000 + 0x4138` changed from head
+`0xffffffeb03397000` to zero. Model stderr records `swap id 0 D594 completed,
+status 0x0`. This verifies both callback execution and migration of an active
+completion, rather than just successful enqueueing.
+
+The next native `fb_swap_set_layer` at `0x19940638c` supplied IOSurface
+`0x751ad39b00`: 1179x2556, BGRA (`0x42475241`), stride 4864, allocation
+12,435,456. Its 12,432,384 captured bytes have SHA-256
+`4526e5168a2217c1109f89d82f2ac5ad0eadc3d585ec94be3680afd159ece6c3`.
+`/tmp/dvm/DISPLAY_SMP6_VISIBLE_R6.frame.png` shows the battery, home indicator,
+and Setup information button; the central Hello is still absent. There are
+5,935 pixels with a channel above 32, versus the earlier fade-in's peak of 2.
+No synthetic pixels or Welcome bypass produced this frame. The allocation-time
+cache-mode 0x700 diagnostic remains enabled and is not yet permanent policy.
+
+`DISPLAY_SMP6_FIRST_VISIBLE6` saves this exact pre-submit point (six CPUs,
+2.525 s migration, 13.220 s total capture). `DARWIN_DCP_IOMFB_SCANOUT=1`
+adds a host display sink for the measured single-primary BGRA A408 profile:
+
+- Descriptor starts at wire +0x6e0; packed fourcc +0x0b, stride +0x15,
+  width +0x21, height +0x25, allocation size +0x29. These values match the
+  native IOSurface accessors and the captured R5 A408 body.
+- Primary DVA is wire +0xf90, following native packing at `0xfffffff00a0c9128`.
+  Null flags at +0xfea..+0xfee must indicate main and primary present, the
+  other three absent. Other formats/layers are rejected, not guessed.
+- Pixel DMA uses **dart-disp0, SID 0**, MMIO `0x412300000`, separate from
+  the RPC heap's dart-dcp/SID 23. A 1 MiB read from DVA `0x10000000000`
+  byte-matched the prior native IOSurface (SHA-256 prefix
+  `d3fa79f9d36197e59ccd7093ee44c8bd05f6e02e8500608fda76e196003ca840`).
+  Evidence: `/tmp/dvm/DISPLAY_SMP6_VISIBLE_R6.disp0-1m.bin.json`.
+- Translate each 4 KiB boundary, validate stride/size/overflow, copy rows into
+  host-owned display storage before D594 can release the mapping. Guest boot
+  framebuffer RAM is untouched. An optional `darwin-fb/scanout` VMstate section
+  preserves the latest pixels, with destination geometry/size equality checks.
+
+`DISPLAY_SMP6_COCOA_R8` resumed the saved frame in 1.577 s with the Cocoa
+window. Its stderr lines 121-124 record presentation of 1179x2556 BGRA from
+DVA `0x10000bfc000` followed by D594. HMP screendump RGB bytes exactly match
+the native capture: SHA-256
+`3a2754c428f5466d7e9fc3a34719e62de3b576cc2b7b9aa3acf5f0e96a383446`.
+Caution: this QEMU revision's `ui/ui-qmp-cmds.c:ppm_save` incorrectly writes
+pixman row padding into PPM (3540 rather than 3537 bytes for width 1179).
+The byte comparison strips these three padding bytes per row; prefer PNG
+screendumps. This export issue is independent of the live console pixels.
+
+Validation: three IOMFB contract tests (completion, malformed requests, bounded
+BGRA scanout), all 21 SKS tests, and all 25 host checkpoint tests pass.
+Restore now accepts explicit `--model-env DARWIN_...=...` and `--display cocoa`
+or `--display cocoa,zoom-to-fit=on`, preserving guest CPU/machine arguments and
+recording the resulting argv/environment in the restore report.
+
+`DISPLAY_SMP6_QEMU_SCANOUT8` saves both host pixels and in-flight D594 at
+CPU3 PC `0xfffffff02a0db034` (2.528 s migration, 13.178 s total).
+`DISPLAY_SMP6_RESIZABLE_R9` restored it in 1.467 s with
+`--display cocoa,zoom-to-fit=on`. Its PNG screendump shows the same correctly
+aligned frame before any guest execution, verifying scanout-state migration.
+PNG: `/tmp/dvm/DISPLAY_SMP6_RESIZABLE_R9.qemu.png`. LLDB GDB port 1395,
+monitor `/tmp/dvm/DISPLAY_SMP6_RESIZABLE_R9.restore.sock`; the guest then resumed
+with the allocation cache diagnostic and watchdog tracing enabled.

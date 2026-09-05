@@ -22,6 +22,16 @@ from checkpoint_common import (
 BOOT_PATTERNS = ("Darwin Kernel Version", "Darwin Bootstrapper Version", "launchd[1]")
 
 
+def parse_model_env_overrides(values: list[str]) -> dict[str, str]:
+    result = {}
+    for item in values:
+        key, separator, value = item.partition("=")
+        if not separator or not re.fullmatch(r"(?:DARWIN_|GXFSTAT_)[A-Za-z0-9_]+", key):
+            raise ValueError("--model-env requires a DARWIN_/GXFSTAT_ KEY=VALUE")
+        result[key] = value
+    return result
+
+
 def checkpoint_source_cpu(manifest: dict) -> int:
     index = manifest.get("source_cpu_index")
     if index is None:
@@ -81,7 +91,15 @@ def main() -> int:
     parser.add_argument("--qemu", type=Path,
                         help="explicit compatible QEMU override for development replay; "
                              "records both binary hashes, never changes the checkpoint")
+    parser.add_argument("--model-env", action="append", default=[], metavar="KEY=VALUE",
+                        help="explicit model-only environment override for development replay")
+    parser.add_argument("--display", choices=("none", "cocoa", "cocoa,zoom-to-fit=on", "sdl"),
+                        help="override only the host display backend on restore")
     args = parser.parse_args()
+    try:
+        model_env_overrides = parse_model_env_overrides(args.model_env)
+    except ValueError as error:
+        parser.error(str(error))
     if not SAFE_TAG.fullmatch(args.tag):
         parser.error("--tag must use 1-64 letters, digits, dots, underscores or dashes")
     if args.observe_seconds < 0:
@@ -141,6 +159,12 @@ def main() -> int:
         state, args.gdb_port,
     )
     argv[0] = str(qemu)
+    if args.display is not None:
+        # Host presentation only; preserve every guest machine/CPU argument.
+        if "-display" in argv:
+            argv[argv.index("-display") + 1] = args.display
+        else:
+            argv += ["-display", args.display]
     if args.leave_paused:
         argv += ["-qmp", f"unix:{qmp},server=on,wait=off"]
     env = {
@@ -148,6 +172,7 @@ def main() -> int:
         if not key.startswith("DARWIN_") and not key.startswith("GXFSTAT_")
     }
     env.update(manifest.get("qemu_env", {}))
+    env.update(model_env_overrides)
     started = time.monotonic()
     stderr_file = stderr.open("wb")
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
@@ -281,6 +306,9 @@ def main() -> int:
             "disk_child": str(disk),
             "source_pc": manifest["source_pc"],
             "source_cpu_index": source_cpu_index,
+            "model_env_overrides": model_env_overrides,
+            "qemu_env": {key: value for key, value in env.items()
+                         if key.startswith(("DARWIN_", "GXFSTAT_"))},
             "restored_pc": restored_pc,
             "pc_after_observation": after_pc,
             "pc_match_witness": restored_pc == manifest["source_pc"],
