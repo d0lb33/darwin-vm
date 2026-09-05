@@ -99,3 +99,24 @@ That compilation failure did not send a callback.
 Open work: display-client timing, surface DMA/scanout, and visible Setup
 pixels. An A408 accepted by a zero-reply model or a successful completion
 alone is not evidence of a visible frame.
+
+
+## A408 swap-ID provenance (six-CPU preparation)
+
+Static iOS 27 IOMobileGraphicsFamily-DCP disassembly identifies the ID without
+assuming the first swap is zero. At `0xfffffff00a0c366c`, the input record in
+x1 is retained as x24. `0xfffffff00a0c3730` loads w19 from `[x24,#0x98]`;
+`0xfffffff00a0c3744` stores it into the pending queue item at `[x23,#0x3d4]`.
+The A408 call at `0xfffffff00a0c4644` receives that same input record. Its
+wrapper copies the first `0x6e0` bytes verbatim into the wire payload at
+`0xfffffff00a0c9088..0xfffffff00a0c9098`. Thus A408 wire `+0x98` supplies
+the ID D594 must echo. This establishes the identifier location; it does
+not establish a refresh interval or prove that a surface contains pixels.
+
+The wrapper's four optional surface descriptors occupy `0x22c` bytes each,
+starting at wire `+0x6e0`; null flags are at `+0xfeb..+0xfee`. The main
+record's null flag is `+0xfea`. Preserve those flags when interpreting a
+capture instead of treating zero-filled optional descriptors as mapped
+surfaces. Disassembly outputs: `/tmp/dvm/DISPLAY_SMP6.a408-wrapper.txt`,
+`/tmp/dvm/DISPLAY_SMP6.a408-caller.txt`, and
+`/tmp/dvm/DISPLAY_SMP6.map-submit.txt`.
