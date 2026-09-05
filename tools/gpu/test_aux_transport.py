@@ -14,6 +14,15 @@ from aux_namespace_dt import EXPECTED, extend, properties
 
 class AuxTests(unittest.TestCase):
     def test_c_peer_bulk_ping_timeout_recovery(self):
+        self.run_c_peer(False)
+
+    def test_c_peer_latency64(self):
+        self.run_c_peer(True)
+
+    def test_c_peer_retries_incomplete_latency_response(self):
+        self.run_c_peer(True, torn=True)
+
+    def run_c_peer(self, latency, torn=False):
         with tempfile.TemporaryDirectory(prefix='gpu-aux-test-', dir='/tmp/dvm') as temp:
             out = Path(temp)
             source = out/'peer.c'
@@ -33,17 +42,33 @@ int main(int argc,char **argv){
 ''')
             subprocess.run(['xcrun','clang','-O2','-Wall','-Wextra','-Werror',
                 '-Wno-unused-function','-Wno-unused-variable',str(source),'-o',str(out/'peer')], check=True)
-            peer = AuxProbe(out)
+            peer = AuxProbe(out, latency=latency)
             proc = None
             try:
                 with (out/'guest.log').open('w') as log:
                     proc = subprocess.Popen([str(out/'peer'),str(peer.path)],stderr=log)
                     deadline=time.monotonic()+30
+                    torn_deadline=None
                     while proc.poll() is None and time.monotonic()<deadline:
+                        if torn and not peer.seen:
+                            request=os.pread(peer.fd,4096,0x10000)
+                            if request[:64]==peer.header and torn_deadline is None:
+                                payload=bytes(4024)
+                                os.pwrite(peer.fd,request[:68]+struct.pack('<I',zlib.crc32(payload)^1)+payload,0x20000)
+                                torn_deadline=time.monotonic()+.02
+                            if torn_deadline and time.monotonic()<torn_deadline:
+                                time.sleep(.001);continue
                         peer.pump();time.sleep(.001)
                 self.assertIsNotNone(proc.poll(),'C peer exceeded its bounded test')
                 self.assertEqual(proc.returncode,0,(out/'guest.log').read_text())
-                self.assertEqual(peer.verify()['live_requests_verified'],10)
+                self.assertEqual(peer.verify()['live_requests_verified'],64 if latency else 10)
+                if latency:
+                    records=[s for s in (out/'guest.log').read_text().splitlines()
+                        if s.startswith('GPU_LOAD_AUX_LAT seq=')]
+                    self.assertEqual(len(records),64)
+                    self.assertTrue(all(' valid=1 ' in s for s in records))
+                    if torn:
+                        self.assertGreater(int(records[0].split('crc_retries=')[1].split()[0]),0)
                 os.pwrite(peer.fd,b'bad',0x400000)
                 with self.assertRaisesRegex(ValueError,'exact guest bulk'):
                     peer.verify()

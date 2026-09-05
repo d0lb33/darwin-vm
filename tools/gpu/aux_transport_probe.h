@@ -50,7 +50,67 @@ static double aux_now(void) {
     struct timespec ts;clock_gettime(CLOCK_MONOTONIC,&ts);
     return ts.tv_sec+ts.tv_nsec/1e9;
 }
+/* Optional fixed workload, configured in the host-owned first page. Timings
+ * stay in guest CLOCK_MONOTONIC; no host/guest clock subtraction is valid.
+ * Defer UART output until the batch ends so per-request logging cannot delay
+ * the next request. The old timeout/recovery workload remains unchanged. */
+static int aux_latency(int fd, const unsigned char *header,
+                       unsigned char *packet, unsigned char *reply) {
+    struct sample { double total,write,reads,max_read,sleep,max_sleep,verify; unsigned polls,crc_retries; int valid; } rows[64]={0};
+    unsigned completed=0;int result=1;
+    fprintf(stderr,"GPU_LOAD_AUX_LAT_BEGIN count=64 bytes=4096 guest_sleep_ns=1000000\n");
+    for(uint32_t seq=1;seq<=64;seq++) {
+        struct sample *r=&rows[seq-1];
+        memset(packet,0,AUX_PAGE);memcpy(packet,header,64);memcpy(packet+64,&seq,4);
+        for(unsigned i=72;i<AUX_PAGE;i++)packet[i]=(unsigned char)(i*13u+seq*17u);
+        uint32_t crc=aux_crc(packet+72,AUX_PAGE-72);memcpy(packet+68,&crc,4);
+        double start=aux_now(), t=start;
+        if(aux_write(fd,packet,AUX_PAGE,0x10000)!=AUX_PAGE)goto done;
+        r->write=aux_now()-t;
+        while(aux_now()-start<5.0) {
+            t=aux_now();
+            if(aux_read(fd,reply,AUX_PAGE,0x20000)!=AUX_PAGE)goto done;
+            double elapsed=aux_now()-t;r->reads+=elapsed;
+            if(elapsed>r->max_read)r->max_read=elapsed;
+            r->polls++;
+            t=aux_now();
+            if(!memcmp(reply,packet,68)) {
+                memcpy(&crc,reply+68,4);
+                if(crc==aux_crc(reply+72,AUX_PAGE-72)) {
+                    r->valid=1;
+                    for(unsigned i=72;i<AUX_PAGE;i++)if(reply[i]!=(unsigned char)(packet[i]^0xa5))r->valid=0;
+                    r->verify+=aux_now()-t;
+                    if(!r->valid){errno=EILSEQ;goto sample_done;}
+                    break;
+                }
+                /* A read can race reply publication. Reject this snapshot
+                 * but permit bounded polling to obtain the complete reply. */
+                r->crc_retries++;
+            }
+            r->verify+=aux_now()-t;
+            t=aux_now();struct timespec nap={0,1000000};nanosleep(&nap,NULL);
+            elapsed=aux_now()-t;r->sleep+=elapsed;
+            if(elapsed>r->max_sleep)r->max_sleep=elapsed;
+        }
+sample_done:
+        r->total=aux_now()-start;completed=seq;
+        if(r->total>=5.0){r->valid=0;errno=ETIMEDOUT;goto done;}
+        if(!r->valid){if(errno!=EILSEQ)errno=ETIMEDOUT;goto done;}
+    }
+    result=0;
+done:
+    for(unsigned i=0;i<completed;i++) {
+        struct sample *r=&rows[i];
+        fprintf(stderr,"GPU_LOAD_AUX_LAT seq=%u valid=%d polls=%u crc_retries=%u total_ms=%.6f write_ms=%.6f read_ms=%.6f max_read_ms=%.6f sleep_ms=%.6f max_sleep_ms=%.6f verify_ms=%.6f\n",
+            i+1,r->valid,r->polls,r->crc_retries,r->total*1000,r->write*1000,r->reads*1000,r->max_read*1000,r->sleep*1000,r->max_sleep*1000,r->verify*1000);
+    }
+    return result;
+}
 static int aux_transfer(int fd, const unsigned char *header) {
+    int latency=!memcmp(header+128,"DVMLAT01",8);
+    uint32_t count=0,sleep_ns=0;
+    memcpy(&count,header+136,4);memcpy(&sleep_ns,header+140,4);
+    if(latency&&(count!=64||sleep_ns!=1000000)){errno=EINVAL;return 1;}
     unsigned char *data=NULL,*packet=NULL,*reply=NULL;
     if(posix_memalign((void **)&data,16384,AUX_BULK)||
        posix_memalign((void **)&packet,16384,AUX_PAGE)||
@@ -67,6 +127,7 @@ static int aux_transfer(int fd, const unsigned char *header) {
     if(aux_write(fd,data,AUX_BULK,0x400000)!=AUX_BULK)goto done;
     io_seconds=aux_now()-start;
     fprintf(stderr,"GPU_LOAD_AUX_WRITE bytes=%u seconds=%.6f crc=%08x\n",AUX_BULK,io_seconds,aux_crc(data,AUX_BULK));
+    if(latency){result=aux_latency(fd,header,packet,reply);goto done;}
     for(uint32_t seq=1;seq<=10;seq++) {
         memset(packet,0,AUX_PAGE);memcpy(packet,header,64);
         memcpy(packet+64,&seq,4);
