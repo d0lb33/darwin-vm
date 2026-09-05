@@ -185,3 +185,10 @@ aligned frame before any guest execution, verifying scanout-state migration.
 PNG: `/tmp/dvm/DISPLAY_SMP6_RESIZABLE_R9.qemu.png`. LLDB GDB port 1395,
 monitor `/tmp/dvm/DISPLAY_SMP6_RESIZABLE_R9.restore.sock`; the guest then resumed
 with the allocation cache diagnostic and watchdog tracing enabled.
+
+R9 subsequently submitted 58 frames in 27.330 wall-clock seconds: **2.12
+presentations/s** under the current tracing and cache-allocation probes. This
+counts accepted A408 presentations, not unique images or full-animation FPS.
+Evidence: `/tmp/dvm/DISPLAY_SMP6_RESIZABLE_R9.fps-result.json`. The running PNG
+now shows the native rotating-language swipe-up instruction as well as the
+battery, info button and home indicator; central Hello remains black.
