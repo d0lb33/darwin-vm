@@ -84,6 +84,75 @@ not a QEMU change. The immutable rebuilt QEMU remains SHA-256 `6608ee6d…759c88
 New helper/stage/installed parent: `GPU_SETTLED_BUILD1`, `GPU_SETTLED_STAGE1`,
 `GPU_SETTLED_INSTALL1`, each derived again from the sealed CLOCK baseline.
 
+## Settled A1 result: initialization contract unresolved
+
+`GPU_SETTLED_A1` exited **1** at 450.233 seconds with the 450-second readiness
+error. Its source manifest SHA-256 is
+`33363cedc033ac337e4ac502375b11fd2d49de900d94de6daa2abbf2bf0ff025`;
+signed helper SHA-256 is
+`417cd3d073f48077dc566692b416edd66f846f488585a0c29701bb41a9e15174`.
+Both installations reached the restore shell, emitted the guarded install
+success marker, and had 524 serial lines with zero kernel panics.
+
+Observed in `GPU_SETTLED_A1/serial.log:1123..1125`: user-client type 0 opened
+with `kr=0`, selector 2 returned block size 4096, and selector 3 returned
+16384 blocks. Runner timestamps are 29.113, 29.114 and 29.317 seconds.
+There is no `GPU_LOAD_AUX_HEADER`, `GPU_LOAD_AUX_WAIT`, release, bulk I/O,
+or latency row anywhere in the complete logs. At 189.979 s native input
+became ready, then ACKed sequence 910001 at 189.991 s
+(`serial.log:26092,26098`). A read-only, unpaused screenshot
+`diagnostic-ui.png` shows the native lock screen and large 3:55 clock;
+`stderr.log` contains 2622 presentations, starting at line 36511. Presentation
+count is not distinct frames or FPS. No Home gesture was sent in this run:
+the gate requires helper WAIT before it requests a review.
+
+Static evidence: `tools/gpu/aux_transport_probe.h:192..202` performs aligned
+allocation, initializes the buffer, calls the first synchronous 4 KiB read
+at offset zero, then logs HEADER and validates the session before WAIT.
+The observed failure is **no completed initial-header stage after successful
+capacity query**. A blocked read is a hypothesis; without entry/exit probes
+or a live stack, these logs cannot exclude allocation/scheduling delay,
+a helper exit, or missing reporting. The configured longer WAIT budget is
+consumed only after that stage; no observation proves it was reached.
+
+Parent and Terra independently verified zero request/reply/gate pages and
+zero timed samples. Both owned measured QEMUs were reaped; neither matrix
+advanced to B1/B2/A2. Post-run SHA checks passed all **26 backing files and
+7 QEMU inputs** for each installed manifest, including the immutable rebuilt
+QEMU, exact guest BootKC, SPTM/TXM, and the migrated baseline.
+
+| Claim / route | Verdict for this rerun |
+|---|---|
+| Rebuilt merged QEMU boots the preserved guest and renders native UI | Proven in these bounded disk boots |
+| Native Home transition | Proven by MERGED_A1's post-run reviewed Home screenshot; not a timely benchmark approval |
+| Delayed 64-request auxiliary latency / 1ms versus 5ms benefit | Untested: neither matrix released a timed batch |
+| Completion of SETTLED_A1 initialization within 450s | Disproven within this one pinned run; not proof the read can never succeed |
+| Adapted PV, custom forwarding Metal plugin, interception, GPU versus CPU speedup | Untested here; prior shader/display feasibility remains separate |
+
+The next minimal diagnostic is the **first 4 KiB auxiliary read**, with guest
+allocation/read entry and exit markers plus scoped NS6 QEMU submission and
+completion records and helper-lifecycle evidence. Its pass condition is exact
+session bytes returned and every stage correlated. If it stalls, those records
+must identify whether the request reached QEMU and whether completion reached
+the guest. Also distinguish starting transport after reviewed UI readiness from
+starting it early and merely deferring the benchmark: this harness does the
+latter. No full plugin implementation or polling optimization is justified by
+these zero-sample runs, and this does not disprove GPU acceleration generally.
+
+Reproduction (use a new unused tag; sources/commands also preserved):
+
+```sh
+python3 tools/gpu/run_guest_load.py /tmp/dvm/GPU_SETTLED_INSTALL1/warm-manifest.json --expected-manifest-sha256 33363cedc033ac337e4ac502375b11fd2d49de900d94de6daa2abbf2bf0ff025 --aux-post-boot --aux-readiness-seconds 450 --aux-poll-ms 5 --seconds 510 --tag GPU_SETTLED_NEW_A1
+```
+
+Durable evidence: `~/dvm-artifacts/research/gpu-postboot-ios27-20260905`,
+including failed runs, complete small logs, images/reviews, raw auxiliary media,
+helper/TC, QEMU executable/build log and SHA indexes. Large System/Data and RAM
+images are excluded; source manifests retain their lineage/hashes. Terra
+collected the trials; parent reviewed screenshots, raw failure state, command
+inputs and the entire immutable backing chain. Code/protocol checks: 50 merged
+project tests, 12 auxiliary/readiness tests, shell syntax and diff checks passed.
+
 ## Preregistered experiment
 
 The user authorized resuming a bounded delayed-start experiment before the
