@@ -11,6 +11,7 @@
 typedef id (*CreateDevice)(int readFD, int writeFD);
 enum { Width = 64, Height = 48, Row = 256, Bytes = 12288 };
 @protocol NarrowDevice
+- (BOOL)reportVerification:(NSData *)data error:(NSError **)error;
 - (id)newLibraryWithData:(dispatch_data_t)data error:(NSError **)error;
 - (id)newComputePipelineStateWithFunction:(id)function error:(NSError **)error;
 - (id)newCommandQueue;
@@ -146,8 +147,9 @@ int main(int argc, const char *argv[]) { @autoreleasepool {
         }
         CFRelease(surface);
     }
-    if (hostOnly) { close(writeFD); close(readFD); int status = 0; waitpid(child, &status, 0); if (!WIFEXITED(status) || WEXITSTATUS(status)) Fail(@"server exit"); }
     NSDictionary *result = @{@"host_only":@(hostOnly), @"air_sha256":@(airDigest), @"air_bytes":@(air.length), @"runs":runs, @"passed":@YES}; NSError *jsonError = nil;
     NSData *json = [NSJSONSerialization dataWithJSONObject:result options:0 error:&jsonError]; if (!json) Fail(jsonError.description);
+    if(getenv("DVM_PROXY_REPORT") && ![device reportVerification:json error:&error]) Fail(error.description ?: @"verification report was not acknowledged");
+    if (hostOnly) { close(writeFD); close(readFD); int status = 0; waitpid(child, &status, 0); if (!WIFEXITED(status) || WEXITSTATUS(status)) Fail(@"server exit"); }
     fprintf(stderr, "HARNESS_RESULT %.*s\n", (int)json.length, (const char *)json.bytes); return 0;
 }}

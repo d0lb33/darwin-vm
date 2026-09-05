@@ -1,5 +1,11 @@
 # Exact-guest GPU forwarding experiments
 
+Follow-up: [the command round-trip experiment](gpu-roundtrip-ios27.md) now
+proves nine guest-issued host GPU operations with returned guest IOSurface
+verification and original input-helper startup. The upload failure below is
+retained as historical evidence. Global plugin discovery, useful UI
+acceleration, display adoption and live GPU checkpoint state remain untested.
+
 2026-09-05 follow-up to [the feasibility assessment](gpu-feasibility-ios27.md).
 Same `codex/gpu-feasibility-ios27` worktree, off `main` at `99e012c`; no QEMU
 changes or rebuild. This is a narrow diagnostic, not a globally usable Metal

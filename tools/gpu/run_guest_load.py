@@ -17,6 +17,8 @@ import time
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from checkpoint_common import HMP, SAFE_TAG, atomic_json, sha256, verify_backing_chain, wait_for_path
 from proxy_uart import ProxyUART
+from proxy_uart_v2 import ReliableProxyUART
+from verify_roundtrip import verify as verify_roundtrip
 
 
 def main():
@@ -26,7 +28,13 @@ def main():
     p.add_argument('--seconds', type=int, default=600)
     p.add_argument('--keep-paused', action='store_true')
     p.add_argument('--worker', type=Path, help='enable one-shot forwarding bridge with this host worker')
+    p.add_argument('--reliable', action='store_true')
+    p.add_argument('--library-cache',type=Path)
+    p.add_argument('--faults',action='store_true',help='reliable mode: inject one corrupt response and drop two ACKs')
     a = p.parse_args()
+    if a.reliable and (not a.worker or not a.library_cache):
+        p.error('--reliable requires --worker and --library-cache')
+    if a.faults and not a.reliable:p.error('--faults requires --reliable')
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40 or not 1 <= a.seconds <= 1200:
         p.error('invalid tag or seconds (1..1200)')
     m = json.loads(a.manifest.read_text())
@@ -74,8 +82,9 @@ def main():
         wire = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         wire.settimeout(5); wire.connect(str(out/'uart.sock')); wire.setblocking(False)
         if a.worker:
-            bridge = ProxyUART(a.worker.resolve(), out)
+            bridge = ReliableProxyUART(a.worker.resolve(),out,a.library_cache.resolve(),a.faults) if a.reliable else ProxyUART(a.worker.resolve(), out)
             report['host_worker_sha256'] = sha256(a.worker)
+            if a.reliable:report['library_cache_sha256']=sha256(a.library_cache)
         print(f'{a.tag}: own PID {proc.pid}; UART connected and continuously drained', flush=True)
         pending = b''
         with (out/'wire.log').open('wb') as log:
@@ -88,12 +97,13 @@ def main():
                 if not chunk:
                     reason = 'UART closed'; break
                 log.write(chunk); log.flush()
+                if a.reliable:bridge.feed(chunk)
                 lines = (pending+chunk).split(b'\n'); pending = lines.pop()[-65536:]
                 for raw in lines:
                     line = raw.decode(errors='replace').strip()
                     if bridge:
                         bridge.line(line)
-                    if any(x in line for x in ('GPU_LOAD_', 'GPU_BUNDLE_', 'DVMGPU_READY', 'DVMGPU_DONE', 'HARNESS_', 'DVM_INPUT_', 'panic(cpu')):
+                    if any(x in line for x in ('GPU_LOAD_', 'GPU_BUNDLE_', 'DVMGPU_READY', 'DVMGPU_READER_STOPPED', 'DVMGPU_DONE', 'HARNESS_', 'DVM_INPUT_', 'panic(cpu')):
                         event = dict(seconds=round(time.monotonic()-started, 3), line=line)
                         report['events'].append(event); print(json.dumps(event), flush=True)
                     if 'GPU_LOAD_COMPLETE' in line:
@@ -101,9 +111,16 @@ def main():
                     elif 'GPU_LOAD_ERROR' in line or 'GPU_BUNDLE_ERROR' in line or 'panic(cpu' in line:
                         reason = 'guest reported failure'
                     elif bridge and bridge.finished and 'DVM_INPUT_START' in line:
-                        reason = 'guest forwarding diagnostic finished; original input exec observed'
+                        reason = 'guest forwarding diagnostic finished; original input start marker observed'
+                    elif a.reliable and 'DVMGPU_DONE reason=' in line and 'reason=complete ' not in line:
+                        reason = 'guest transport reported failure'
                 if reason != 'deadline':
                     break
+        if a.reliable:
+            if not bridge.finished or bridge.close_status!=0 or 'original input start marker observed' not in reason:
+                raise RuntimeError('roundtrip lacks protected successful close and original input start marker')
+            report['roundtrip']=verify_roundtrip(out)
+            report['passed']=True
     except BaseException as error:
         reason = f'{type(error).__name__}: {error}'
         raise
@@ -121,6 +138,10 @@ def main():
                 (out/'status.txt').write_text(h.command('info status')+'\n')
                 (out/'registers.txt').write_text(h.command('info registers')+'\n')
                 h.command(f'screendump {out}/final.png -f png')
+        except (OSError, RuntimeError, TimeoutError) as error:
+            # Teardown can race a terminating QEMU. Preserve the workload
+            # verdict and this separate collection failure; still reap ours.
+            report['teardown_error'] = f'{type(error).__name__}: {error}'
         finally:
             if proc and proc.poll() is None and not a.keep_paused:
                 proc.terminate()

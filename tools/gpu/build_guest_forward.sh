@@ -5,9 +5,11 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:?usage: build_guest_forward.sh NEW_OUTPUT_DIRECTORY}
 surface_access=${2:-}
 test -z "$surface_access" || test "$surface_access" = --iosurface-client
+transport_source=guest_transport.c
+if test "${3:-}" = --reliable; then transport_source=guest_transport_v2.c; elif test -n "${3:-}"; then exit 2; fi
 test ! -e "$out"
 mkdir -p "$out/DVMForward.bundle" "$out/sources"
-cp "$repo"/tools/gpu/{guest_forwarding.m,guest_work.m,guest_transport.c,make_guest_link_stubs.py,verify_guest_imports.py,build_guest_forward.sh} "$out/sources/"
+cp "$repo"/tools/gpu/{guest_forwarding.m,guest_work.m,guest_transport.c,guest_transport_v2.c,uart_link.h,make_guest_link_stubs.py,verify_guest_imports.py,build_guest_forward.sh} "$out/sources/"
 python3 "$repo/tools/gpu/make_guest_link_stubs.py" "$out/stubs"
 sdk=$(xcrun --sdk macosx --show-sdk-path)
 compile=(-target arm64-apple-ios27.0 -isysroot "$sdk" -fobjc-arc -Wall -Wextra -Werror -Wno-incompatible-sysroot -fno-objc-msgsend-selector-stubs)
@@ -18,7 +20,7 @@ xcrun clang "${link[@]}" -dynamiclib -Wl,-install_name,/usr/local/libexec/DVMFor
 xcrun clang "${compile[@]}" -c "$repo/tools/gpu/guest_work.m" -o "$out/work.o"
 xcrun clang "${link[@]}" "$out/work.o" "${frameworks[@]}" -o "$out/dvm-gpu-work"
 # This C-only supervisor uses the previously proven minimal helper toolchain.
-xcrun clang -target arm64-apple-ios7.0 -isysroot "$sdk" -Os -Wall -Wextra -Werror -Wno-incompatible-sysroot "$repo/tools/gpu/guest_transport.c" -o "$out/dvm-gpu-transport"
+xcrun clang -target arm64-apple-ios7.0 -isysroot "$sdk" -Os -Wall -Wextra -Werror -Wno-incompatible-sysroot "$repo/tools/gpu/$transport_source" -o "$out/dvm-gpu-transport"
 python3 - "$out" "$surface_access" <<'PY'
 from pathlib import Path
 import plistlib,sys

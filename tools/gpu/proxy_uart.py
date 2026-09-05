@@ -14,11 +14,14 @@ import time
 
 
 class ProxyUART:
-    def __init__(self, executable, output):
+    def __init__(self, executable, output, library_cache=None):
         self.output = Path(output)
         self.errors = (self.output/'host-worker.stderr').open('wb')
+        env=os.environ.copy()
+        if library_cache is not None:
+            env['DVM_PROXY_LIBRARY_CACHE']=str(library_cache)
         self.proc = subprocess.Popen([str(executable)], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=self.errors)
+            stdout=subprocess.PIPE, stderr=self.errors,env=env)
         os.set_blocking(self.proc.stdin.fileno(), False)
         os.set_blocking(self.proc.stdout.fileno(), False)
         self.requests = (self.output/'guest-requests.bin').open('wb')

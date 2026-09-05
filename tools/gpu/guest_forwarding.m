@@ -5,6 +5,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurface.h>
+#import <CommonCrypto/CommonDigest.h>
 #include <dispatch/dispatch.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -184,6 +185,15 @@ static BOOL ExactOK(NSString *line, uint64_t ident) {
     }
     NSData *data = [NSData dataWithBytes:mapped length:length];
     uint64_t ident = [self reserveID]; NSError *local = nil;
+    if(getenv("DVM_PROXY_LIBRARY_REF")) {
+        unsigned char digest[CC_SHA256_DIGEST_LENGTH];char hex[65];
+        CC_SHA256(data.bytes,(CC_LONG)data.length,digest);
+        for(unsigned i=0;i<sizeof(digest);i++)snprintf(hex+2*i,3,"%02x",digest[i]);
+        if(![self sendHeader:[NSString stringWithFormat:@"LIBREF %" PRIu64 " %lu %s\n",ident,(unsigned long)data.length,hex] error:&local] || ![self expectOK:ident error:&local]) {
+            if(error)*error=local;return nil;
+        }
+        DVMForwardingLibrary *library=[DVMForwardingLibrary new];library.device=self;library.data=[data copy];return library;
+    }
     if (![self sendHeader:[NSString stringWithFormat:@"LIB %" PRIu64 " %lu\n", ident, (unsigned long)data.length]
                   error:&local] || !WriteAll(_writeFD, data.bytes, data.length) || ![self expectOK:ident error:&local]) {
         if (!local) local = DVMError(DVMForwardingIO, @"proxy library payload write failed");
@@ -215,6 +225,12 @@ static BOOL ExactOK(NSString *line, uint64_t ident) {
 }
 - (id)newCommandQueue { DVMForwardingCommandQueue *queue = [DVMForwardingCommandQueue new]; queue.device = self; return queue; }
 - (void)clearActive:(DVMForwardingCommandBuffer *)buffer { if (_active == buffer) _active = nil; }
+- (BOOL)reportVerification:(NSData *)data error:(NSError **)error {
+    if(_active || data.length>16384)return NO;
+    uint64_t ident=[self reserveID];
+    return [self sendHeader:[NSString stringWithFormat:@"REPORT %" PRIu64 " %lu\n",ident,(unsigned long)data.length] error:error] &&
+        WriteAll(_writeFD,data.bytes,data.length) && [self expectOK:ident error:error];
+}
 @end
 
 @implementation DVMForwardingLibrary

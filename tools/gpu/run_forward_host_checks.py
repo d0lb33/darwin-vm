@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 import subprocess
 import time
+import hashlib
+from verify_roundtrip import SHA,require
 
 
 def main():
@@ -15,6 +17,10 @@ def main():
     a.output.mkdir(exist_ok=False)
     root=Path(__file__).resolve().parent
     out=a.output.resolve()
+    # The exact fat resource's already verified, unchanged AIR slice.
+    air=a.library.read_bytes()[0x30:0x30+2705796]
+    require(hashlib.sha256(air).hexdigest()==SHA,'wrong exact-guest AIR resource')
+    (out/'exact-air.metallib').write_bytes(air)
     records=[]
     common=['xcrun','clang','-fobjc-arc','-Wall','-Wextra','-Werror']
     frameworks=['-framework','Foundation','-framework','Metal','-framework','IOSurface']
@@ -24,11 +30,21 @@ def main():
         ('work-build',common+[str(root/'guest_work.m')]+frameworks+['-o',str(out/'guest-work')]),
         ('negative-build',common+[str(root/'test_forwarding_negative.m')]+frameworks+['-o',str(out/'test-negative')]),
         ('parser-build',['xcrun','clang','-Wall','-Wextra','-Werror',str(root/'test_guest_transport.c'),'-o',str(out/'test-transport')]),
+        ('v2-build',['xcrun','clang','-Wall','-Wextra','-Werror','-DDVM_HOST_TEST',str(root/'guest_transport_v2.c'),'-o',str(out/'transport-v2')]),
+        ('codec-build',['xcrun','clang','-Wall','-Wextra','-Werror',str(root/'test_uart_codec.c'),'-o',str(out/'test-codec')]),
+        ('codec-test',[str(out/'test-codec')]),
         ('parser-test',[str(out/'test-transport')]),
         ('wrapper-test',[str(out/'guest-work'),'--spawn',str(out/'DVMForward.bundle'),str(out/'metal_proxy_server'),str(a.library.resolve())]),
         ('negative-test',[str(out/'test-negative'),str(out/'DVMForward.bundle')]),
         ('uart-test',['python3',str(root/'test_proxy_uart.py'),'--harness',str(out/'guest-work'),'--bundle',str(out/'DVMForward.bundle'),'--worker',str(out/'metal_proxy_server'),'--library',str(a.library.resolve()),'--output',str(out/'uart')]),
     ]
+    v2=['python3',str(root/'test_uart_v2.py'),'--transport',str(out/'transport-v2'),
+        '--worker',str(out/'metal_proxy_server'),'--harness',str(out/'guest-work'),
+        '--bundle',str(out/'DVMForward.bundle'),'--library',str(a.library.resolve()),'--cache',str(out/'exact-air.metallib')]
+    commands += [('v2-noise-test',v2+['--output',str(out/'v2-noise')]),
+        ('v2-disconnect-test',v2+['--disconnect','--output',str(out/'v2-disconnect')]),
+        ('cache-negative-test',['python3',str(root/'test_library_reference.py'),'--worker',str(out/'metal_proxy_server'),'--cache',str(out/'exact-air.metallib'),'--output',str(out/'cache-negative.json')]),
+        ('evidence-negative-test',['python3','-O',str(root/'test_roundtrip_evidence.py'),str(out/'v2-noise')])]
     try:
         for name,argv in commands:
             started=time.monotonic()

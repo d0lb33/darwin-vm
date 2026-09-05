@@ -3,6 +3,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <IOSurface/IOSurface.h>
+#import <CommonCrypto/CommonDigest.h>
 #include <dispatch/dispatch.h>
 #include <errno.h>
 #include <inttypes.h>
@@ -137,6 +138,7 @@ static NSUInteger split_words(char *line, char *words[8]) {
 @property(nonatomic) IOSurfaceRef surface;
 @property(nonatomic) uint64_t textureGeneration;
 @property(nonatomic) bool hasTextureGeneration;
+@property(nonatomic) NSUInteger completedRuns;
 @end
 
 @implementation Server
@@ -204,16 +206,8 @@ static bool check_id(uint64_t ident, uint64_t *lastID) {
     return true;
 }
 
-static bool handle_library(Server *server, uint64_t ident, uint64_t bytes) {
-    if (bytes > kMaxLibraryBytes) {
-        protocol_error(ident, "PROTO", EFBIG, @"library byte count exceeds 12 MiB");
-        return false;
-    }
-    NSMutableData *contents = [NSMutableData dataWithLength:(NSUInteger)bytes];
-    if (!read_exact(contents.mutableBytes, contents.length)) {
-        protocol_error(ident, "IO", EPIPE, @"short library payload read");
-        return false;
-    }
+static bool handle_library_data(Server *server,uint64_t ident,NSData *contents) {
+    uint64_t bytes=contents.length;
     NSError *error = nil;
     dispatch_data_t data = dispatch_data_create(contents.bytes, contents.length, NULL,
                                                 DISPATCH_DATA_DESTRUCTOR_DEFAULT);
@@ -229,6 +223,46 @@ static bool handle_library(Server *server, uint64_t ident, uint64_t bytes) {
     fflush(stdout);
     diag(@"library", ident, 0, [NSString stringWithFormat:@"bytes=%" PRIu64, bytes]);
     return true;
+}
+
+static bool handle_library(Server *server, uint64_t ident, uint64_t bytes) {
+    if (bytes > kMaxLibraryBytes) {
+        protocol_error(ident, "PROTO", EFBIG, @"library byte count exceeds 12 MiB");
+        return false;
+    }
+    NSMutableData *contents = [NSMutableData dataWithLength:(NSUInteger)bytes];
+    if (!read_exact(contents.mutableBytes, contents.length)) {
+        protocol_error(ident, "IO", EPIPE, @"short library payload read");
+        return false;
+    }
+    return handle_library_data(server,ident,contents);
+}
+
+static bool handle_library_reference(Server *server,uint64_t ident,uint64_t bytes,const char *digest) {
+    const char *path=getenv("DVM_PROXY_LIBRARY_CACHE");
+    NSData *contents=path?[NSData dataWithContentsOfFile:@(path)]:nil;
+    if(!contents || contents.length!=bytes || bytes>kMaxLibraryBytes || strlen(digest)!=64) {
+        protocol_error(ident,"LIBCACHE",ENOENT,@"no cached library with requested length");return false;
+    }
+    unsigned char raw[CC_SHA256_DIGEST_LENGTH];char hex[65];
+    CC_SHA256(contents.bytes,(CC_LONG)contents.length,raw);
+    for(unsigned i=0;i<sizeof(raw);i++)snprintf(hex+2*i,3,"%02x",raw[i]);
+    if(strcmp(hex,digest)) {protocol_error(ident,"LIBCACHE",EILSEQ,@"cached library SHA256 differs from guest");return false;}
+    diag(@"library-reference",ident,0,[NSString stringWithFormat:@"sha256=%s bytes=%" PRIu64,hex,bytes]);
+    return handle_library_data(server,ident,contents);
+}
+
+static bool handle_report(Server *server,uint64_t ident,uint64_t bytes) {
+    if(bytes>16384 || server.completedRuns!=9) {protocol_error(ident,"REPORT",EINVAL,@"report requires nine completed GPU operations");return false;}
+    NSMutableData *data=[NSMutableData dataWithLength:(NSUInteger)bytes];
+    if(!read_exact(data.mutableBytes,data.length))return false;
+    id object=[NSJSONSerialization JSONObjectWithData:data options:0 error:NULL];
+    if(![object isKindOfClass:NSDictionary.class] || ![object[@"passed"] isEqual:@YES] ||
+       ![object[@"runs"] isKindOfClass:NSArray.class] || [object[@"runs"] count]!=9) {
+        protocol_error(ident,"REPORT",EINVAL,@"malformed guest verification");return false;
+    }
+    diag(@"guest-verification",ident,0,[[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding]);
+    fprintf(stdout,"OK %" PRIu64 "\n",ident);fflush(stdout);return true;
 }
 
 static bool handle_pipeline(Server *server, uint64_t ident) {
@@ -347,6 +381,7 @@ static bool handle_run(Server *server, uint64_t ident, uint64_t generation,
         diag(@"io-error", ident, generation, @"short stdout write of GPU output");
         return false;
     }
+    server.completedRuns++;
     return true;
 }
 
@@ -397,6 +432,14 @@ int main(void) {
                 } else {
                     okay = handle_library(server, ident, bytes);
                 }
+            } else if(count==4 && strcmp(words[0],"LIBREF")==0) {
+                uint64_t bytes=0;
+                if(parse_u64(words[2],&bytes))okay=handle_library_reference(server,ident,bytes,words[3]);
+                else protocol_error(ident,"PROTO",EINVAL,@"invalid library reference length");
+            } else if(count==3 && strcmp(words[0],"REPORT")==0) {
+                uint64_t bytes=0;
+                if(parse_u64(words[2],&bytes))okay=handle_report(server,ident,bytes);
+                else protocol_error(ident,"PROTO",EINVAL,@"invalid report length");
             } else if (count == 3 && strcmp(words[0], "PIPE") == 0 &&
                        strcmp(words[2], "read_write_surf_compute") == 0) {
                 okay = handle_pipeline(server, ident);

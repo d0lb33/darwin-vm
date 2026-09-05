@@ -2,7 +2,10 @@
 
 Follow-up runtime evidence: [signed guest bundle and forwarding experiments](gpu-guest-forwarding-ios27.md).
 The assessment below records the initial experiments; the follow-up updates
-the previously untested bundle-loading contract.
+the previously untested bundle-loading contract. The later
+[command round-trip experiment](gpu-roundtrip-ios27.md) proves guest-issued
+host GPU work, returned guest IOSurface bytes and original input-helper startup;
+it does not establish global GPU publication or useful UI acceleration.
 
 2026-09-05. Exact scope: **iOS 27.0, 24A5430a, iPhone17,3/T8140**,
 with its existing SPTM/TXM, migrated Data lineage, software renderer,
