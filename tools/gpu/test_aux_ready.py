@@ -15,6 +15,40 @@ class Wire:
 
 
 class ReadyTests(unittest.TestCase):
+    def test_extended_budget_still_has_hard_deadline(self):
+        with tempfile.TemporaryDirectory(dir="/tmp/dvm") as temp:
+            peer=AuxProbe(temp,latency=True,post_boot=True,readiness_seconds=450)
+            try:
+                r=AuxReady(Path(temp),peer,{"readiness_deadline_seconds":450})
+                r.tick(Wire(),300);r.tick(Wire(),449.9)
+                with self.assertRaisesRegex(TimeoutError,"450 seconds"):r.tick(Wire(),450)
+                self.assertFalse(peer.released)
+            finally:peer.close()
+
+    def test_reviewed_home_action_finishes_before_new_settling(self):
+        with tempfile.TemporaryDirectory(dir='/tmp/dvm') as temp:
+            out=Path(temp);peer=AuxProbe(out,latency=True,post_boot=True)
+            try:
+                r=AuxReady(out,peer,{});wire=Wire()
+                r.feed('GPU_LOAD_AUX_WAIT version=1',wire,1)
+                r.feed('DVM_INPUT_READY protocol=1',wire,2)
+                r.feed('DVM_INPUT_ACK 910001 1',wire,3)
+                with patch('aux_ready.HMP') as hmp:
+                    hmp.return_value.command.side_effect=lambda command:(out/'ready-1.png').write_bytes(b'mocked lockscreen')
+                    r.tick(wire,18)
+                (out/'review-1.json').write_text(json.dumps(dict(r.candidate,home_visible=False,request_home=True,screen="LOCKSCREEN")))
+                r.tick(wire,19)
+                self.assertIn(b'910002 H 1 0 0',wire.sent[-1])
+                r.feed('DVM_INPUT_ACK 910002 1',wire,20)
+                self.assertIn(b'910003 H 0 0 0',wire.sent[-1])
+                r.feed('DVM_INPUT_ACK 910003 1',wire,21)
+                self.assertIn(b'910004 S 0 0 0',wire.sent[-1])
+                self.assertIsNone(r.ack)
+                r.feed('DVM_INPUT_ACK 910004 1',wire,22)
+                r.tick(wire,36)
+                self.assertIsNone(r.candidate);self.assertFalse(peer.released)
+            finally:peer.close()
+
     def test_release_requires_exact_ack_image_and_fresh_ack(self):
         with tempfile.TemporaryDirectory(dir='/tmp/dvm') as temp:
             out=Path(temp);peer=AuxProbe(out,latency=True,post_boot=True)

@@ -17,9 +17,12 @@ BULK = 1024 * 1024
 
 
 class AuxProbe:
-    def __init__(self, out, latency=False, post_boot=False):
+    def __init__(self, out, latency=False, post_boot=False, readiness_seconds=300):
         if post_boot and not latency:
             raise ValueError('post-boot gate requires latency workload')
+        if readiness_seconds not in (300,450):
+            raise ValueError('unsupported readiness budget')
+        self.guest_wait_seconds = readiness_seconds+30
         self.out = Path(out)
         self.path = self.out/'aux.raw'
         self.header = (MAGIC + os.urandom(32)).ljust(64, b"\0")
@@ -35,6 +38,8 @@ class AuxProbe:
         self.released = not post_boot
         self.wait_config = b'DVMWAIT1' if post_boot else bytes(8)
         os.pwrite(self.fd, self.wait_config, 144)
+        self.budget_config=struct.pack('<I',self.guest_wait_seconds) if post_boot else bytes(4)
+        os.pwrite(self.fd,self.budget_config,152)
         os.pwrite(self.fd, self.seed, 0x100000)
         self.seen = set()
         self.started = time.monotonic()
@@ -114,6 +119,8 @@ class AuxProbe:
             raise ValueError('auxiliary experiment configuration changed')
         if os.pread(self.fd,8,144)!=self.wait_config or not self.released:
             raise ValueError('auxiliary readiness contract failed')
+        if os.pread(self.fd,4,152)!=self.budget_config:
+            raise ValueError('auxiliary readiness budget changed')
         actual = os.pread(self.fd, BULK, 0x400000)
         if actual != bytes(b ^ 0x5a for b in self.seed):
             raise ValueError('host did not receive the exact guest bulk output')

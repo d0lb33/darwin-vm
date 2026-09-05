@@ -34,7 +34,9 @@ def collect(run):
         review=release['review']
         assert review['home_visible'] is True
         assert digest(run/review['image'])==review['image_sha256']
-        assert release['seconds']<300 and report['global_deadline_seconds']==360
+        readiness_seconds=report.get('readiness_deadline_seconds',300)
+        assert readiness_seconds in (300,450)
+        assert release['seconds']<readiness_seconds and report['global_deadline_seconds']==readiness_seconds+60
         assert report['source_manifest_sha256']==digest(run/'source-manifest.json')
         assert report['expected_manifest_sha256']==report['source_manifest_sha256']
         assert review['source_manifest_sha256']==report['source_manifest_sha256']
@@ -89,6 +91,8 @@ def collect(run):
         assert header[128:144] == b'DVMLAT01'+struct.pack('<II',64,1000000)
         if post_boot:
             assert header[144:152]==b'DVMWAIT1'
+            budget=struct.unpack_from('<I',header,152)[0]
+            assert (budget or 330)==readiness_seconds+30
             assert header[:64].hex()==review['session']
             raw.seek(0x30000);gate=raw.read(4096)
             assert gate[:72]==header[:64]+b'DVMGO001'
@@ -102,6 +106,7 @@ def collect(run):
             assert zlib.crc32(packet[72:]) == struct.unpack_from('<I',packet,68)[0]
             assert packet[72:] == bytes(((i*13+64*17)&255)^xor for i in range(72,4096))
     summary=dict(tag=run.name, host_poll_ms=report['aux_poll_ms'], samples=len(guest),post_boot=post_boot,
+        readiness_deadline_seconds=report.get('readiness_deadline_seconds',300) if post_boot else None,
         guest_ms={key:distribution([row[key] for row in guest]) for key in guest[0] if key.endswith('_ms') and key!='host_poll_ms'},
         guest_polls=distribution([row['polls'] for row in guest]),
         host_ms={key:distribution([row[key]/1e6 for row in host])
@@ -123,6 +128,7 @@ def main():
     for run in args.runs:
         summary,g,h=collect(run)
         summaries.append(summary);guest.extend(g);host.extend(h)
+    assert len({r['readiness_deadline_seconds'] for r in summaries})==1,'do not mix readiness budgets'
     assert len({r['post_boot'] for r in summaries})==1,'do not mix workload release phases'
     result=dict(scope='post-home-screen-verified-byte-transport' if summaries[0]['post_boot'] else 'early-cold-boot-verified-byte-transport',runs=summaries,
         cpu_gpu_speedup_tested=False, cross_clock_subtraction=False)

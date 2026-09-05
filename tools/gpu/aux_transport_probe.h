@@ -120,8 +120,11 @@ static int aux_transfer(int fd, const unsigned char *header) {
     int result=1;double start=aux_now();
     if(latency&&!memcmp(header+144,"DVMWAIT1",8)) {
         unsigned polls=0;int released=0;
-        fprintf(stderr,"GPU_LOAD_AUX_WAIT version=1 budget_seconds=330 poll_ms=100\n");
-        while(aux_now()-start<330.0) {
+        uint32_t wait_seconds=0;memcpy(&wait_seconds,header+152,4);
+        if(!wait_seconds)wait_seconds=330; /* Original fixed-budget header. */
+        if(wait_seconds!=330&&wait_seconds!=480){errno=EINVAL;goto done;}
+        fprintf(stderr,"GPU_LOAD_AUX_WAIT version=1 budget_seconds=%u poll_ms=100\n",wait_seconds);
+        while(aux_now()-start<wait_seconds) {
             if(aux_read(fd,reply,AUX_PAGE,0x30000)!=AUX_PAGE)goto done;
             polls++;
             uint32_t gate_crc=0;memcpy(&gate_crc,reply+72,4);

@@ -25,7 +25,13 @@ class AuxTests(unittest.TestCase):
     def test_c_peer_waits_for_session_gate(self):
         self.run_c_peer(True, post_boot=True)
 
-    def run_c_peer(self, latency, torn=False, post_boot=False):
+    def test_c_peer_legacy_wait_budget(self):
+        self.run_c_peer(True,post_boot=True,budget_override=0)
+
+    def test_c_peer_rejects_invalid_wait_budget(self):
+        self.run_c_peer(True,post_boot=True,budget_override=481,expect_failure=True)
+
+    def run_c_peer(self, latency, torn=False, post_boot=False, budget_override=None, expect_failure=False):
         with tempfile.TemporaryDirectory(prefix='gpu-aux-test-', dir='/tmp/dvm') as temp:
             out = Path(temp)
             source = out/'peer.c'
@@ -45,7 +51,10 @@ int main(int argc,char **argv){
 ''')
             subprocess.run(['xcrun','clang','-O2','-Wall','-Wextra','-Werror',
                 '-Wno-unused-function','-Wno-unused-variable',str(source),'-o',str(out/'peer')], check=True)
-            peer = AuxProbe(out, latency=latency,post_boot=post_boot)
+            peer = AuxProbe(out, latency=latency,post_boot=post_boot,readiness_seconds=450 if post_boot else 300)
+            if budget_override is not None:
+                peer.budget_config=struct.pack("<I",budget_override)
+                os.pwrite(peer.fd,peer.budget_config,152)
             proc = None
             try:
                 with (out/'guest.log').open('w') as log:
@@ -73,6 +82,13 @@ int main(int argc,char **argv){
                                 time.sleep(.001);continue
                         peer.pump();time.sleep(.001)
                 self.assertIsNotNone(proc.poll(),'C peer exceeded its bounded test')
+                if expect_failure:
+                    self.assertNotEqual(proc.returncode,0)
+                    self.assertFalse(peer.seen)
+                    self.assertEqual(os.pread(peer.fd,4096,0x400000),bytes(4096))
+                    return
+                if post_boot:
+                    self.assertIn(f"budget_seconds={budget_override or 330 if budget_override is not None else 480}",(out/"guest.log").read_text())
                 self.assertEqual(proc.returncode,0,(out/'guest.log').read_text())
                 self.assertEqual(peer.verify()['live_requests_verified'],64 if latency else 10)
                 if latency:

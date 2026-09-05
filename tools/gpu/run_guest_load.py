@@ -39,6 +39,8 @@ def main():
         help='64 normal verified requests, buffered guest stage timings; implies --aux-probe')
     p.add_argument('--aux-post-boot', action='store_true',
         help='gate latency on reviewed home-screen image, input ACKs and 15-second settling')
+    p.add_argument('--aux-readiness-seconds',type=int,choices=(300,450),default=300,
+        help='preregistered post-boot readiness deadline; workload gets another 60 seconds')
     p.add_argument('--expected-manifest-sha256',help='required post-boot experiment baseline pin')
     p.add_argument('--aux-poll-ms', type=int, choices=(1, 5), default=5,
         help='host mailbox polling interval; 5 is the historical default')
@@ -49,10 +51,12 @@ def main():
     p.add_argument('--library-cache',type=Path)
     p.add_argument('--faults',action='store_true',help='reliable mode: inject one corrupt response and drop two ACKs')
     a = p.parse_args()
+    if a.aux_readiness_seconds!=300 and not a.aux_post_boot:
+        p.error('--aux-readiness-seconds requires --aux-post-boot')
     if a.aux_post_boot:a.aux_latency=True
     if a.aux_latency:
         a.aux_probe = True
-        expected_seconds=360 if a.aux_post_boot else 180
+        expected_seconds=a.aux_readiness_seconds+60 if a.aux_post_boot else 180
         if a.seconds != expected_seconds or a.aux_wait_input or a.keep_paused:
             p.error(f'latency mode requires --seconds {expected_seconds}, no input wait, and automatic teardown')
     if a.aux_poll_ms != 5 and not a.aux_probe:
@@ -89,7 +93,7 @@ def main():
     out.mkdir(exist_ok=False)
     for name in ('run_guest_load.py','aux_probe.py','aux_namespace_dt.py','aux_ready.py'):
         shutil.copyfile(Path(__file__).with_name(name),out/name)
-    aux_peer = AuxProbe(out, latency=a.aux_latency,post_boot=a.aux_post_boot) if a.aux_probe else None
+    aux_peer = AuxProbe(out, latency=a.aux_latency,post_boot=a.aux_post_boot,readiness_seconds=a.aux_readiness_seconds) if a.aux_probe else None
     shutil.copyfile(a.manifest,out/'source-manifest.json')
     if a.aux_namespace and not aux_peer:
         with (out/'aux.raw').open('xb') as f:
@@ -129,6 +133,7 @@ def main():
     report = dict(manifest=str(a.manifest.resolve()), ram_restored=False, debugger=False, events=[])
     report['source_manifest_sha256']=sha256(a.manifest)
     report['expected_manifest_sha256']=a.expected_manifest_sha256
+    report['readiness_deadline_seconds']=a.aux_readiness_seconds
     ready=AuxReady(out,aux_peer,report) if a.aux_post_boot else None
     input_ping_sent = False
     proc, wire, bridge = None, None, None

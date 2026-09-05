@@ -12,6 +12,7 @@ from checkpoint_common import HMP, atomic_json, sha256
 class AuxReady:
     def __init__(self,out,peer,report):
         self.out,self.peer,self.report=out,peer,report
+        self.deadline=report.get('readiness_deadline_seconds',300)
         self.ack=None
         self.pending=None
         self.counter=910000
@@ -20,12 +21,14 @@ class AuxReady:
         self.released_at=None
         self.waiting=False
         self.capture_number=0
+        self.home_attempted=False
         self.events=report.setdefault('readiness_events',[])
 
     def sync(self,wire,now,kind):
         self.counter+=1
         self.pending=(self.counter,kind)
-        packet=f'\nDVMINPUT1 {self.counter} S 0 0 0\n'.encode()
+        operation='H 1 0 0' if kind=='home_down' else 'H 0 0 0' if kind=='home_up' else 'S 0 0 0'
+        packet=f'\nDVMINPUT1 {self.counter} {operation}\n'.encode()
         if wire.send(packet)!=len(packet):raise RuntimeError('short readiness sync write')
         self.events.append(dict(seconds=now,event='sync_sent',sequence=self.counter,kind=kind))
 
@@ -47,9 +50,11 @@ class AuxReady:
             self.pending=None
             self.events.append(dict(seconds=now,event='sync_ack',sequence=sequence,kind=kind))
             if kind=='settle':self.ack=now
+            elif kind=='home_down':self.sync(wire,now,'home_up')
+            elif kind=='home_up':self.sync(wire,now,'settle')
             else:
                 if not self.approved:raise RuntimeError('release ACK without image review')
-                if now>=300:raise TimeoutError('release ACK missed readiness deadline')
+                if now>=self.deadline:raise TimeoutError('release ACK missed readiness deadline')
                 self.peer.release();self.released_at=now
                 self.report['readiness_release']=dict(seconds=now,review=self.approved,
                     review_file=self.candidate['review_file'],
@@ -58,7 +63,7 @@ class AuxReady:
 
     def tick(self,wire,now):
         if self.released_at is not None:return
-        if now>=300:raise TimeoutError('home-screen readiness not verified within 300 seconds')
+        if now>=self.deadline:raise TimeoutError(f'home-screen readiness not verified within {self.deadline} seconds')
         if not self.waiting or self.ack is None or now-self.ack<15:return
         if self.candidate is None:
             self.capture_number+=1
@@ -81,7 +86,13 @@ class AuxReady:
         if review.get('home_visible') is not True:
             self.events.append(dict(seconds=now,event='image_rejected',review=review))
             self.candidate=None;self.ack=None
-            self.sync(wire,now,'settle')
+            if review.get('request_home') is True:
+                if review.get('screen') != 'LOCKSCREEN':
+                    raise ValueError('native Home attempt requires reviewed LOCKSCREEN')
+                if self.home_attempted:raise RuntimeError('only one reviewed native Home attempt is permitted')
+                self.home_attempted=True
+                self.sync(wire,now,'home_down')
+            else:self.sync(wire,now,'settle')
             return
         if now-self.candidate['capture_seconds']>60:
             raise TimeoutError('home-screen image review exceeded 60 seconds')

@@ -1,5 +1,89 @@
 # Post-home-screen latency gate — exact 24A5430a
 
+## Merged-main rerun specification
+
+The user superseded the old-QEMU trial before it ran: pull both `main`
+branches, rebuild QEMU, then rerun latency. Both pulls were already current:
+project `fbc53c9`, QEMU `00c4a4c`. Fresh worktrees are
+`darwin-vm-gpu-postboot` / `codex/gpu-postboot-main` and its QEMU
+`codex/gpu-postboot-qemu`. The QEMU auxiliary patch reapplied as `0b8137b`;
+its only delta from QEMU main is `hw/arm/darwin_ans.c`.
+
+An isolated full build completed using
+`../configure --target-list=aarch64-softmmu --disable-pvg --disable-docs`
+and `make -j18`. The copied immutable executable is
+`/tmp/dvm/GPU_MERGED_QEMU1/qemu-system-aarch64`, SHA-256
+`6608ee6df8fe1d23d059f7dea7ec95b1fb1b59933d5cb574b4bd90cc9a759c88`.
+No shared executable was rebuilt or replaced. Fifty merged project tests,
+six auxiliary protocol tests, and three readiness tests passed.
+
+Source disk baseline: `/tmp/dvm/CLOCK_SOFTWARE_PATCH1/warm-manifest.json`,
+sealed `/tmp/dvm/CLOCK_SOFTWARE_INSTALL1/disk.qcow2`, SHA-256
+`36bfda15136369b87d761aaf0c1b1659997575a359250a0f35dac1a23b52668b`.
+It carries the merged guest patches; source CLOCK observations establish a
+visible clock after fresh disk boot, not reliable Home/input readiness.
+Keep its RTC-patched BootKC, SPTM/TXM, and runtime environment. Extend its
+development DT with the same single auxiliary namespace tuple, verifying
+all other properties byte-identical. Prepared manifest:
+`/tmp/dvm/GPU_MERGED_BASELINE1.manifest.json`.
+
+The helper stage uses `/tmp/dvm/native-services6/launchd.plist` (SHA-256
+`f25de1647f2957b20c2e4f2898b999351b87d323879899d019bb1db206d1d7d2`)
+and CLOCK's 3945-entry TC. The resulting TC has 3947 entries. Parent verified
+the entire original cache unchanged except the added isolated helper; all
+five native input/graphics/RTC/activation/power-publisher entries remain.
+Installation and runtime parent: `GPU_MERGED_INSTALL1`; helper build/stage:
+`GPU_MERGED_BUILD1` / `GPU_MERGED_STAGE1`.
+
+Matrix tags supersede the older tags below: GPU_MERGED_A1/B1/B2/A2,
+5/1/1/5 ms. Readiness, per-request, global deadlines and stop conditions
+remain unchanged. If a reviewed image shows the lock screen, parent may
+request one native Home press/release through the existing input protocol
+using `home_visible: false`, `screen: "LOCKSCREEN"`, `request_home: true`.
+Each step requires its ACK, followed by a new sync ACK and 15-second settle
+before a new screenshot. That action is entirely before benchmark release;
+it does not substitute for observing Home. No repeated gesture attempts,
+guest debugger, or snapshot restore. Stop the matrix on its first failure.
+
+The interrupted old `GPU_HOME_INSTALL1` installation completed and was
+stopped/read-only. No old GPU_HOME measured VM was started.
+
+## Merged A1 result and revised readiness budget
+
+`GPU_MERGED_A1` stopped at 300.321 seconds with
+`TimeoutError: home-screen readiness not verified within 300 seconds`.
+Input v6 started at 17.721 s, restarted at 69.797 s, and became ready at
+253.818 s; its sync ACK arrived at 253.896 s. Parent reviewed the 268.897 s
+image as the native lock screen. That review was consumed at 284.498 s.
+The one native Home down/up plus fresh sync completed by 284.553 s. The
+second settled image arrived at 299.558 s, leaving only 0.442 s before the
+hard gate deadline. Parent's **post-run** visual inspection confirms Home
+icons/dock/status clock; it was not a timely release approval. The failure
+therefore includes reviewer and settling time, not an inability to reach Home.
+
+No release, bulk read/write, or latency row occurred. Request/reply/gate
+pages remained zero, and the owned QEMU exited. The original matrix stopped;
+B1/B2/A2 were not run. Evidence: `GPU_MERGED_A1/result.json`, both `ready-*.json`
+and PNGs, `review-1.json`, `post-run-image-review.json`, and `aux.raw`.
+
+A separate preregistered matrix, `GPU_SETTLED_A1/B1/B2/A2` (5/1/1/5 ms),
+allows 450 host seconds for readiness, 480 guest monotonic seconds for WAIT,
+and a 510-second total runner cap plus bounded teardown. This changes only
+the readiness budget, not the 64-request workload or performance thresholds.
+All input, image, settling, session and byte checks remain. Stop this matrix
+on its first failure; no retries. The guest per-request 5-second soft deadline
+and host 10-second progress gap remain bounded by the overall cap: a slow,
+incomplete batch fails rather than becoming a partial success.
+
+`--aux-readiness-seconds 450` explicitly selects this experiment; default 300
+retains the original host policy. Header LE u32 at +152 records guest WAIT
+seconds; guest accepts 330 or 480, treats legacy zero as 330, and rejects
+other values. Collector checks the header against the reported host budget
+and disallows combining different budgets. This needs a freshly signed helper,
+not a QEMU change. The immutable rebuilt QEMU remains SHA-256 `6608ee6d…759c88`.
+New helper/stage/installed parent: `GPU_SETTLED_BUILD1`, `GPU_SETTLED_STAGE1`,
+`GPU_SETTLED_INSTALL1`, each derived again from the sealed CLOCK baseline.
+
 ## Preregistered experiment
 
 The user authorized resuming a bounded delayed-start experiment before the
