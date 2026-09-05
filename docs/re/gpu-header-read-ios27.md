@@ -74,3 +74,27 @@ auxiliary/readiness tests, one new compiled mock-client test, shell syntax and
 both repo diff checks pass. The mock-client test proves one read/no writes and
 foreign-magic rejection; real guest/kernel completion remains a runtime question.
 Terra independently reviewed the instrumentation and deadline composition.
+
+## First diagnostic and trace refinement
+
+`GPU_HEADER_READ1` completed the guest path: stages1..4 at33.880,33.881,
+33.881,33.888seconds, CRC `d979ea38`, successful guard, user-client close,
+completion and atexit. Runner exit0, zero checked output regions. This is
+positive guest-header evidence, not yet a correlated device trace.
+
+The first-eight QEMU trace captured earlier NS6 reads of **1MiB** each, at
+LBA0,256,...1792, all completed. They must not be attributed to the helper's
+one-block operation. Collection stopped before READ2 to fix this evidence gap.
+The next immutable QEMU restricts both submission and backend trace filters to
+NS6, opcode READ, LBA0, and nlb1, still capped at eight matching operations.
+All other behavior and the installed helper remain unchanged. Rebuilt/copied
+`GPU_HEADER_QEMU2` SHA-256:
+`39a9dfcba120c8aa50060b30d9e6e9b2fb4f7978495a60babf763620c956f8d4`.
+
+The separate targeted series is `GPU_HEADER_TARGET1/2/3`, at most three
+sequential fresh children. The same120s total/30s guest-progress bound applies;
+stop at the first failure or missing correlation. No repeated failed trial.
+Use `/tmp/dvm/GPU_HEADER_TARGET1.manifest.json`, preserving the same installed
+child, helper, DT, TC, BootKC, SPTM/TXM and model environment except trace filter.
+Concurrent unrelated host VMs are recorded and left untouched; timings from
+these instrumented boots are not a performance benchmark.
