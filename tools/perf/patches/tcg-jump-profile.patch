@@ -1,0 +1,54 @@
+diff --git a/accel/tcg/cpu-exec.c b/accel/tcg/cpu-exec.c
+index 2572112..9f5b47f 100644
+--- a/accel/tcg/cpu-exec.c
++++ b/accel/tcg/cpu-exec.c
+@@ -158,6 +158,23 @@ struct tb_desc {
+     tb_page_addr_t page_addr0;
+ };
+ 
++static bool tb_jmp_profile;
++
++static void tb_jmp_profile_lookup(CPUState *cpu, int result)
++{
++    static __thread uint64_t counts[4];
++    static __thread uint64_t total;
++
++    counts[result]++;
++    if ((++total & ((1 << 22) - 1)) == 0) {
++        fprintf(stderr, "JMP_PROFILE cpu=%d total=%" PRIu64
++                " hit=%" PRIu64 " empty=%" PRIu64
++                " pc_conflict=%" PRIu64 " context_conflict=%" PRIu64 "\n",
++                cpu->cpu_index, total, counts[0], counts[1],
++                counts[2], counts[3]);
++    }
++}
++
+ static bool tb_lookup_cmp(const void *p, const void *d)
+ {
+     const TranslationBlock *tb = p;
+@@ -245,9 +262,16 @@ static inline TranslationBlock *tb_lookup(CPUState *cpu, TCGTBCPUState s)
+                tb->cs_base == s.cs_base &&
+                tb->flags == s.flags &&
+                tb_cflags(tb) == s.cflags)) {
++        if (unlikely(tb_jmp_profile)) {
++            tb_jmp_profile_lookup(cpu, 0);
++        }
+         goto hit;
+     }
+ 
++    if (unlikely(tb_jmp_profile)) {
++        tb_jmp_profile_lookup(cpu, !tb ? 1 :
++                              jc->array[hash].pc != s.pc ? 2 : 3);
++    }
+     tb = tb_htable_lookup(cpu, s);
+     if (tb == NULL) {
+         return NULL;
+@@ -1053,6 +1077,8 @@ bool tcg_exec_realizefn(CPUState *cpu, Error **errp)
+     static bool tcg_target_initialized;
+ 
+     if (!tcg_target_initialized) {
++        tb_jmp_profile =
++            g_strcmp0(getenv("QEMU_TCG_JMP_PROFILE"), "1") == 0;
+         /* Check mandatory TCGCPUOps handlers */
+         const TCGCPUOps *tcg_ops = cpu->cc->tcg_ops;
+ #ifndef CONFIG_USER_ONLY

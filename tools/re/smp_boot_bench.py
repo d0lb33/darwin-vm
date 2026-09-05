@@ -21,6 +21,8 @@ import signal
 import statistics
 import socket
 import subprocess
+import sys
+import threading
 import time
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -44,8 +46,12 @@ def main():
                         help="run one selected configuration")
     parser.add_argument("--capture-at", type=int, nargs="+", help="diagnostic CPU captures at elapsed seconds; stops after last capture")
     parser.add_argument("--storage-profile", action="store_true", help="enable aggregate ANS request timings")
+    parser.add_argument("--checkpoint-start", action="store_true",
+                        help="save RAM/devices/disk at the first metadata event; requires --migration-sample and --variant")
     parser.add_argument("--host-sample-at", type=int, nargs="+", help="sample owned QEMU host stacks for five seconds at these elapsed times")
     args = parser.parse_args()
+    if args.checkpoint_start and not (args.migration_sample and args.variant):
+        parser.error("--checkpoint-start requires --migration-sample and --variant")
     if args.capture_at and (not args.migration_sample or any(t < 1 or t >= 180 for t in args.capture_at)):
         parser.error("--capture-at requires migration mode and times in 1..179")
     if args.host_sample_at and any(t < 1 or t >= 175 for t in args.host_sample_at):
@@ -53,7 +59,7 @@ def main():
     if not re.fullmatch(r"[A-Za-z0-9_.-]{1,40}", args.tag):
         parser.error("invalid tag")
     out = Path("/tmp/dvm") / args.tag
-    out.mkdir(exist_ok=False)
+    out.mkdir(exist_ok=False, mode=0o700)
     qemu = (args.qemu or ROOT / "qemu-sptm/build/qemu-system-aarch64").resolve()
     fw = ROOT / "firmware"
     parent = (args.parent or Path("/tmp/dvm/data-seed/rebuild/marker.qcow2" if args.migration_sample
@@ -103,6 +109,13 @@ def main():
             run_env["DARWIN_ANS_PROFILE"] = "1"
         if args.pauth_cache:
             run_env["DARWIN_PAUTH_CACHE"] = args.pauth_cache
+        if args.checkpoint_start:
+            monitor = out / "monitor.sock"
+            cmd += ["-monitor", f"unix:{monitor},server=on,wait=off"]
+            launch = out / "launch.json"
+            launch.write_text(json.dumps({"format": "darwin-vm-qemu-launch-v1",
+                "argv": cmd, "env": {k: v for k, v in run_env.items()
+                    if k.startswith(("DARWIN_", "GXFSTAT_"))}}, indent=2))
         row = {"variant": name, "command": cmd, "host_load": os.getloadavg(), "seconds": None}
         row["storage_profile"] = args.storage_profile
         row["pauth_cache"] = args.pauth_cache or "default"
@@ -117,6 +130,8 @@ def main():
         with (out / f"{tag}.stderr.log").open("w") as err:
             start = time.monotonic()
             proc = subprocess.Popen(cmd, env=run_env, stdout=subprocess.DEVNULL, stderr=err)
+            if args.checkpoint_start:
+                (out / "qemu.pid").write_text(f"{proc.pid}\n")
             try:
                 while time.monotonic() - start < (180 if args.migration_sample else 60):
                     text = serial.read_bytes() if serial.exists() else b""
@@ -151,6 +166,19 @@ def main():
                             row["seconds"] = elapsed
                             break
                     if args.migration_sample:
+                        if args.checkpoint_start and progress_pattern.search(text):
+                            # Reap the owned source when the checkpoint creator quits it.
+                            # Otherwise its zombie PID fails the creator's exit witness.
+                            threading.Thread(target=proc.wait, daemon=True).start()
+                            subprocess.run([sys.executable, str(ROOT / "tools/create_checkpoint.py"),
+                                "--tag", args.tag, "--monitor", str(monitor),
+                                "--pid-file", str(out / "qemu.pid"),
+                                "--launch-manifest", str(launch), "--disk", str(disk),
+                                "--serial-log", str(serial), "--marker-regex",
+                                r"set_dir_stats:\d+: disk1s[25] setting dir-stats"], check=True)
+                            row["seconds"] = elapsed
+                            row["stop_reason"] = "migration-start checkpoint created"
+                            break
                         for m in progress_pattern.finditer(text):
                             key = (m[1].decode(), int(m[2]))
                             if key not in seen:

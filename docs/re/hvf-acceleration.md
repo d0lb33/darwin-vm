@@ -1,6 +1,16 @@
-# Can Hypervisor.framework run iOS's CPU natively? Measured: no.
+# Direct HVF boot: earlier measurements and limitations
 
-**Verdict: do not build it.** Two numbers, both measured on this machine:
+**2026-09-04 follow-up:** The measurements below reject the particular direct
+boot design, not every hardware-assisted architecture. New
+[native ARM experiments](arm-native-experiments.md) compare identical EL0 code
+under TCG/HVF, verify a real EL2 UNDEF handler and preserving register thunks,
+and outline a hybrid userspace design. The EL2 handler measured about 1.6 us per
+access; the older 22 ns EL1 number must not be treated as an EL2 handler cost.
+Windows ARM now has a supported QEMU WHPX backend, so the old requirement for
+full TCG on every Windows ARM design was too broad. Neither investigation has
+booted this iOS firmware through a hardware accelerator.
+
+**Historical verdict for the direct-exit design:** Two numbers, both measured on this machine:
 
 1. **A boot to a root shell executes 1,721,436 events that would each be a VM
    exit.** At the exit cost measured on this Mac (**720 ns**, not the assumed
@@ -305,6 +315,11 @@ in-guest exception instead of 720 ns, the whole 1.72 M-event budget costs
 becomes worth 6–13x (0.43–0.83 s projected boot against TCG's 5.41 s) rather
 than 2–3x.
 
+That extrapolation used an EL1 exception microbenchmark, not this nested EL2
+handler. The [follow-up measurements](arm-native-experiments.md) do not support
+assigning 22 ns to the handler required here; the 6–13x figure is not a measured
+or validated boot-speed estimate.
+
 The shape would be: HVF nested VM; a shim we write at guest EL2 that emulates
 the Apple IMP-DEF registers and the GXF transitions; SPTM and XNU at guest EL1.
 
@@ -331,9 +346,12 @@ Recorded so the option is costed rather than forgotten, in the same spirit as
   meaning rather than Apple's. That is fine for an emulator and **wrong for
   anything security-meaningful** — no result obtained on such a VM says
   anything about whether SPTM's protections hold on real hardware.
-- **It does not serve the endgame.** On Windows ARM there are no Apple IMP-DEF
-  registers in any form, so that target needs full TCG regardless. This was
-  only ever a development-speed optimisation for Apple-Silicon hosts.
+- **Windows ARM still needs Apple-state emulation.** That does not require
+  emulating every ordinary ARM instruction. Current
+  [QEMU WHPX](https://www.qemu.org/docs/master/system/whpx.html) supports ARM64
+  hardware execution. A hybrid or rewriting design would need an independent
+  Windows backend and capability tests; direct Apple-register passthrough is
+  not a portable solution. Windows x86 retains ARM-to-x86 translation.
 
 ## 8. What is worth keeping
 
