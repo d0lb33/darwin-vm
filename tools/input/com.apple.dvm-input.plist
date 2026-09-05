@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.apple.dvm-input</string>
+  <key>ProgramArguments</key><array><string>/usr/local/libexec/dvm-input</string></array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>UserName</key><string>root</string>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>StandardInputPath</key><string>/dev/console</string>
+  <key>StandardOutputPath</key><string>/dev/console</string>
+  <key>StandardErrorPath</key><string>/dev/console</string>
+</dict></plist>

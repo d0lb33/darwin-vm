@@ -15,6 +15,11 @@ import home_startup_probe
 
 
 def install(debugger, slide=0x14f94000):
+    # LLDB resolves callback names in its script namespace, not sys.modules.
+    # Register each module before SetScriptCallbackFunction is invoked.
+    for module in (welcome_abort_callbacks, frontboard_watchdog_callbacks,
+                   surface_cache_probe, home_startup_probe):
+        debugger.HandleCommand('command script import "' + module.__file__ + '"')
     debugger.HandleCommand('settings set target.process.disable-memory-cache true')
     welcome_abort_callbacks.install(debugger, slide)
     frontboard_watchdog_callbacks.EXTEND = True

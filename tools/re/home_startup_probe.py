@@ -28,9 +28,13 @@ def on_authenticated(frame, location, _dict):
 def install_ui_auth_diagnostic(debugger, slide):
     # SBFUserAuthenticationController isAuthenticated, 24A5430a, native entry.
     # The native finish-UI method asserts this at SpringBoard 0x224c4c6dc.
-    b = debugger.GetSelectedTarget().BreakpointCreateByAddress(0x1bb27afd8 + slide)
-    b.SetScriptCallbackFunction('home_startup_probe.on_authenticated')
-    print('HOME_UI_AUTH_DIAGNOSTIC_READY', b.GetID(), flush=True)
+    for address in (0x1bb27afd8, 0x1bb27cf98):
+        # _isUserAuthenticated is also queried directly by lock-status clients.
+        # R17 main-thread stack: _isUserAuthenticated -> uncache passcode ->
+        # aks_assert_hold, blocked in IOConnectCallMethod (touch notes).
+        b = debugger.GetSelectedTarget().BreakpointCreateByAddress(address + slide)
+        b.SetScriptCallbackFunction('home_startup_probe.on_authenticated')
+        print('HOME_UI_AUTH_DIAGNOSTIC_READY', b.GetID(), flush=True)
 
 def on_false(frame, location, _dict):
     process = frame.GetThread().GetProcess()
