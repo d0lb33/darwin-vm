@@ -3,6 +3,15 @@
 Scripts that assemble the disk images we boot. **They live here, in the repo,
 on purpose.**
 
+For explicit **native** and **patched** baselines, use
+`rebuild_persistent_parent.sh --profile native|patched`; see
+[PROFILES.md](PROFILES.md) for required inputs, exact differences and boot
+validation. The positional rebuild command below remains storage-only.
+The profile pipeline starts from an already merged base or an unpatched seeded
+parent; it does not yet reconstruct the complete System/cryptex merge from an
+IPSW. Historical full-System host-mount recipes below are not the current
+host-safe procedure; follow `CLAUDE.md`.
+
 ## Why this directory exists
 
 On 2026-09-02 the machine restarted and `/tmp/dvm` was wiped. That destroyed, in

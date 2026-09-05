@@ -12,5 +12,5 @@ sed -n 's/^CDHash=//p' "$out/codesign.txt" > "$out/hashes.txt"
 test "$(wc -c < "$out/hashes.txt" | tr -d ' ')" = 41
 python3 "$repo/build_tc.py" "$out/hashes.txt" "$out/helper.tc"
 python3 "$repo/tools/rootfs/merge_tc.py" "$out/system.tc" \
-    "$HOME/dvm-artifacts/tc/merged_sysvol_cryptex_tc.bin" "$out/helper.tc"
+    "${BASE_TC:-$HOME/dvm-artifacts/tc/merged_sysvol_cryptex_tc.bin}" "$out/helper.tc"
 file "$out/dvm-input"

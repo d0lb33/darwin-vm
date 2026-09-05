@@ -32,9 +32,11 @@
 #      `mount-phase-2` would seed a real empty Data volume. It does not: the
 #      independent normal and -skip-keybag controls both mount Data and emit
 #      zero `Copying ` lines (BOOTSTRAP_SEED*.serial.log), and the latter then
-#      dies because tzinit cannot find its Data files. Phase 3 is therefore a
-#      fail-closed test for the still-missing guest seeder, not a claim that the
-#      pipeline can already populate Data.
+#      dies because tzinit cannot find its Data files. The restore-only seeder
+#      now supplies those protected files through copy-data, manifest, layout
+#      and marker stages. rebuild_persistent_parent.sh orchestrates these and
+#      validates two normal boots; its --profile interface additionally selects
+#      native or patched runtime configuration (see PROFILES.md).
 #
 # Usage:
 #   tools/rootfs/bootstrap_data_volume.sh [all|image|exclave|format|ramdisk-helper|seed|copy-data|manifest|layout|marker|debug-shell|normal|verify]
@@ -58,7 +60,10 @@ OVL=${OVL:-$HOME/dvm-artifacts/build/rootfs_cx_dual-overlay.qcow2}
 TC=${TC:-$HOME/dvm-artifacts/tc/merged_sysvol_cryptex_tc.bin}
 WORK=${WORK:-/tmp/dvm/bootstrap}
 EXCLAVE=${EXCLAVE:-$HOME/dvm-artifacts/aea/out/094-14052-182.dmg}
-QEMU_IMG="$REPO/qemu-sptm/build/qemu-img"
+QEMU_IMG="${QEMU_IMG:-$REPO/qemu-sptm/build/qemu-img}"
+DTREE_RAW="${DTREE_RAW:-/tmp/dvm/dtree_raw}"
+FORMAT_TAG="${FORMAT_TAG:-BOOTSTRAP_FMT}"
+[[ "$FORMAT_TAG" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo 'invalid FORMAT_TAG' >&2; exit 2; }
 BOOTARGS_COMMON='ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort'
 SERIAL_CHAR_DELAY=${SERIAL_CHAR_DELAY:-0.002}
 # The seeder is built and trusted only for disposable restore boots.  The
@@ -132,7 +137,7 @@ restore_start() {
     local tag=$1 overlay=$2 stage_tc=$3
     local sock="$WORK/$tag.sock" dt="$WORK/dt_restore.bin"
     local ramdisk_args=()
-    python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$dt" -nvram "$NVRAM" \
+    python3 "$REPO/dt_fixup.py" "$DTREE_RAW" "$dt" -nvram "$NVRAM" \
         -enable ans -enable smc -enable sep -dram 12G || die "restore dt_fixup failed"
     rm -f "$sock"
     [ -z "$RESTORE_RAMDISK" ] || ramdisk_args=(--ramdisk "$RESTORE_RAMDISK")
@@ -258,18 +263,16 @@ phase_exclave() {
 phase_format() {
     [ -f "$OVL" ] || die "no overlay; run the image phase first"
     local dt="$WORK/dt_ramdisk.bin" sock="$WORK/fmt.sock"
-    local slog=/tmp/dvm/probe/BOOTSTRAP_FMT.serial.log
+    local slog=/tmp/dvm/probe/$FORMAT_TAG.serial.log
     local clog="$WORK/fmt.console.log"
     say "[format] device tree: ans + smc + sep on the restore ramdisk"
-    python3 "$REPO/dt_fixup.py" "$REPO/../dtree_raw" "$dt" -nvram "$NVRAM" \
-        -enable ans -enable smc -enable sep -dram 12G 2>/dev/null \
-      || python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$dt" -nvram "$NVRAM" \
+    python3 "$REPO/dt_fixup.py" "$DTREE_RAW" "$dt" -nvram "$NVRAM" \
         -enable ans -enable smc -enable sep -dram 12G \
       || die "dt_fixup failed (need the raw device tree; see CLAUDE.md)"
 
     rm -f "$sock"
     say "[format] booting the restore ramdisk with a driveable console"
-    "$REPO/tools/probe.sh" --dtree "$dt" --mem 12G --secs 240 --tag BOOTSTRAP_FMT \
+    "$REPO/tools/probe.sh" --dtree "$dt" --mem 12G --secs 240 --tag "$FORMAT_TAG" \
         --uart-socket "$sock" \
         --bootargs "rd=md0 $BOOTARGS_COMMON" \
         -- -drive "if=none,id=ans,file=$OVL,format=qcow2" >/dev/null 2>&1 &
@@ -280,7 +283,7 @@ phase_format() {
     # handshake, and reap only our unique tag.
     cleanup_format() {
         kill "$probe_pid" 2>/dev/null || true
-        pkill -f "BOOTSTRAP_FMT" 2>/dev/null || true
+        pkill -f "unix:/tmp/dvm/$FORMAT_TAG.sock" 2>/dev/null || true
         pkill -f "unix:$sock" 2>/dev/null || true
     }
     trap cleanup_format EXIT INT TERM
@@ -400,7 +403,7 @@ phase_seed() {
     # trustcache or helper while a VM is live would invalidate its evidence.
     build_seed_helper
     say "[seed] device tree: no -ephemeral-data, encrypted Data keybag active"
-    python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$dt" -nvram "$NVRAM" \
+    python3 "$REPO/dt_fixup.py" "$DTREE_RAW" "$dt" -nvram "$NVRAM" \
         -enable ans -enable smc -enable sep -dram 12G \
         || die "dt_fixup failed"
     say "[seed] booting the system volume off the NVMe disk (testing first-boot seeding)"
@@ -498,7 +501,7 @@ phase_normal_boot() {
     local parent=${PARENT:?set PARENT to marker child} child=${OUT_OVL:?set OUT_OVL} tag=${TAG:-BOOTSTRAP_NORMAL}
     say "[normal] parent=$parent child=$child tag=$tag"
     seed_child "$parent" "$child"
-    python3 "$REPO/dt_fixup.py" /tmp/dvm/dtree_raw "$WORK/dt_sysvol.bin" -nvram "$NVRAM" \
+    python3 "$REPO/dt_fixup.py" "$DTREE_RAW" "$WORK/dt_sysvol.bin" -nvram "$NVRAM" \
         -enable ans -enable smc -enable sep -dram 12G || die "normal boot dt_fixup failed"
     "$REPO/tools/probe.sh" --dtree "$WORK/dt_sysvol.bin" --tc "$TC" --mem 12G \
         --secs "${NORMAL_BOOT_SECS:-600}" \
