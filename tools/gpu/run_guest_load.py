@@ -27,6 +27,7 @@ from aux_probe import AuxProbe
 from aux_namespace_dt import properties, EXPECTED
 from aux_ready import AuxReady
 from surface_peer import SurfacePeer
+from driver_peer import DriverPeer
 
 
 def main():
@@ -55,8 +56,13 @@ def main():
     p.add_argument('--library-cache',type=Path)
     p.add_argument('--faults',action='store_true',help='reliable mode: inject one corrupt response and drop two ACKs')
     p.add_argument('--surface-worker',type=Path,help='real Metal peer for the guest IOSurface demo')
+    p.add_argument('--driver-worker',type=Path,help='process-local Metal driver peer; requires display/HID readiness')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.driver_worker:
+        if not a.library_cache or a.worker or a.surface_worker or a.aux_probe or a.aux_latency or a.aux_header_only or a.aux_post_boot or a.keep_paused or a.surface_observe_display:
+            p.error('driver requires library cache and automatic teardown, no other workload')
+        a.aux_namespace=True
     if a.surface_observe_display and not a.surface_worker:
         p.error('surface display observation requires --surface-worker')
     if a.surface_worker:
@@ -75,7 +81,7 @@ def main():
         expected_seconds=a.aux_readiness_seconds+60 if a.aux_post_boot else 180
         if a.seconds != expected_seconds or a.aux_wait_input or a.keep_paused:
             p.error(f'latency mode requires --seconds {expected_seconds}, no input wait, and automatic teardown')
-    if a.aux_poll_ms != 5 and not (a.aux_probe or a.surface_worker):
+    if a.aux_poll_ms != 5 and not (a.aux_probe or a.surface_worker or a.driver_worker):
         p.error('--aux-poll-ms requires --aux-probe')
     if a.aux_probe:
         a.aux_namespace = True
@@ -114,6 +120,12 @@ def main():
         aux_peer=SurfacePeer(out,a.surface_worker,a.library_cache)
         for name in ('surface_peer.py','guest_surface_demo.m'):
             shutil.copyfile(Path(__file__).with_name(name),out/name)
+    if a.driver_worker:
+        aux_peer=DriverPeer(out,a.driver_worker,a.library_cache)
+        shutil.copyfile(Path(__file__).with_name('driver_peer.py'),out/'driver_peer.py')
+        # Use the sources archived by the build, never later working-tree edits.
+        for name in ('driver_probe.m','driver_guest.m','driver_host.m','driver_workload.m'):
+            shutil.copyfile(a.driver_worker.parent/name,out/name)
     shutil.copyfile(a.manifest,out/'source-manifest.json')
     if a.aux_namespace and not aux_peer:
         with (out/'aux.raw').open('xb') as f:
@@ -148,7 +160,7 @@ def main():
         model['DARWIN_ANS_AUX_DRIVE'] = 'gpu_aux'
     if a.aux_header_only:model['DARWIN_ANS_AUX_TRACE']='1'
     model['DARWIN_TOUCH_EVENTS'] = str(out/'events.jsonl')
-    if a.surface_worker:
+    if a.surface_worker or a.driver_worker:
         model['DARWIN_INPUT_STATUS']=str(out/'input-status.json')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DARWIN_', 'DVM_', 'GXFSTAT_'))}
     env.update(model)
@@ -212,7 +224,7 @@ def main():
                     if a.aux_latency and aux_peer.seen and len(aux_peer.seen)<64 and \
                             time.monotonic_ns()-aux_peer.last_response_ns > 10_000_000_000:
                         raise TimeoutError('latency batch made no host-visible progress for 10 seconds')
-                    if not a.surface_worker and not a.aux_latency and 9 in aux_peer.seen and not input_ping_sent:
+                    if not a.surface_worker and not a.driver_worker and not a.aux_latency and 9 in aux_peer.seen and not input_ping_sent:
                         # S is the existing input protocol's no-event sync.
                         # Check it during the deliberate auxiliary timeout;
                         # no touch/button event is sent to the guest UI.
@@ -317,7 +329,10 @@ def main():
             aux_peer.finish()
             report['surface_demo']=demo
             report['passed']=True
-        if aux_peer and not a.aux_header_only and not a.surface_worker:
+        if a.driver_worker:
+            if reason!='guest load probe completed':raise RuntimeError('driver workload did not complete')
+            report['driver']=aux_peer.verify(report['events']);aux_peer.finish();report['passed']=True
+        if aux_peer and not a.aux_header_only and not a.surface_worker and not a.driver_worker:
             if reason != 'guest load probe completed' or not any(
                     'scope=auxiliary-byte-transport' in e['line'] for e in report['events']):
                 raise RuntimeError('auxiliary guest completion not verified')

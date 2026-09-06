@@ -86,8 +86,11 @@ def main():
     if not stop.exists() or proc.returncode:
         raise RuntimeError(f'install did not complete; inspect {out}')
     disk.chmod(0o444)
+    verify_backing_chain(m['disk']['backing_chain'])
     derived = {key:m[key] for key in ('qemu_argv','qemu_inputs','qemu_env')}
     derived.update(format='darwin-vm-warm-disk-v1', created_unix=time.time(), source_manifest=str(a.manifest.resolve()))
+    if (a.stage/'provenance.json').exists():
+        derived['guest_installation']=json.loads((a.stage/'provenance.json').read_text())
     derived['disk'] = dict(path=str(disk.resolve()),
         backing_chain=qcow2_backing_chain(Path(shutil.which('qemu-img')),disk))
     normal = derived['qemu_argv']
