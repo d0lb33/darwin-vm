@@ -28,6 +28,7 @@ from aux_namespace_dt import properties, EXPECTED
 from aux_ready import AuxReady
 from surface_peer import SurfacePeer
 from driver_peer import DriverPeer
+from driver_mmio_peer import MMIOPeer
 
 
 def main():
@@ -38,6 +39,8 @@ def main():
     p.add_argument('--keep-paused', action='store_true')
     p.add_argument('--probe-observe-display',action='store_true',
         help='after a standalone probe completes, require native presentation and stable input with a fresh ACK')
+    p.add_argument('--driver-mmio',action='store_true',help='use shared RAM and MMIO notifications with --driver-worker')
+    p.add_argument('--mmio-echo',action='store_true',help='owned 16 MiB shared RAM and dedicated MMIO echo device; no auxiliary namespace')
     p.add_argument('--aux-namespace', action='store_true',
         help='create an owned 64 MiB raw auxiliary namespace; needs opt-in QEMU and DT')
     p.add_argument('--aux-probe', action='store_true', help='run auxiliary bulk/response/timeout peer')
@@ -64,6 +67,10 @@ def main():
     p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.driver_mmio and (not a.driver_worker or a.aux_namespace or a.driver_failure_snapshot):
+        p.error("MMIO requires driver worker without namespace or snapshot")
+    if a.mmio_echo and (a.aux_namespace or a.aux_probe or a.aux_latency or a.aux_header_only or a.aux_post_boot or a.worker or a.surface_worker or a.driver_worker or a.keep_paused):
+        p.error('MMIO echo requires a standalone probe, no other transport or keep-paused')
     if a.probe_observe_display and (a.worker or a.driver_worker or a.surface_worker or a.aux_probe or a.aux_latency or a.aux_header_only or a.aux_post_boot or a.aux_wait_input or a.keep_paused):
         p.error('standalone probe display observation cannot combine with another workload or keep-paused')
     if a.driver_wait_display and not a.driver_worker:p.error('display gate requires driver worker')
@@ -75,7 +82,7 @@ def main():
     if a.driver_worker:
         if not a.library_cache or a.worker or a.surface_worker or a.aux_probe or a.aux_latency or a.aux_header_only or a.aux_post_boot or a.keep_paused or a.surface_observe_display:
             p.error('driver requires library cache and automatic teardown, no other workload')
-        a.aux_namespace=True
+        a.aux_namespace=not a.driver_mmio
     if a.surface_observe_display and not a.surface_worker:
         p.error('surface display observation requires --surface-worker')
     if a.surface_worker:
@@ -130,6 +137,8 @@ def main():
             raise RuntimeError(f'changed pinned input: {name}')
     out = Path('/tmp/dvm')/a.tag
     out.mkdir(exist_ok=False)
+    if a.mmio_echo:
+        with (out/'shared-ram.bin').open('xb') as shared:shared.truncate(16*1024*1024)
     for name in ('run_guest_load.py','aux_probe.py','aux_namespace_dt.py','aux_ready.py'):
         shutil.copyfile(Path(__file__).with_name(name),out/name)
     aux_peer = AuxProbe(out, latency=a.aux_latency,post_boot=a.aux_post_boot,readiness_seconds=a.aux_readiness_seconds) if (a.aux_probe or a.aux_header_only) else None
@@ -138,7 +147,11 @@ def main():
         for name in ('surface_peer.py','guest_surface_demo.m'):
             shutil.copyfile(Path(__file__).with_name(name),out/name)
     if a.driver_worker:
-        aux_peer=DriverPeer(out,a.driver_worker,a.library_cache,boot=driver_boot)
+        peer_class=MMIOPeer if a.driver_mmio else DriverPeer
+        aux_peer=peer_class(out,a.driver_worker,a.library_cache,boot=driver_boot)
+        if a.driver_mmio:
+            shutil.copyfile(Path(__file__).with_name("driver_mmio_peer.py"),out/"driver_mmio_peer.py")
+            shutil.copyfile(a.driver_worker.parent/"driver_mmio_transport.inc",out/"driver_mmio_transport.inc")
         shutil.copyfile(Path(__file__).with_name('driver_peer.py'),out/'driver_peer.py')
         # Use the sources archived by the build, never later working-tree edits.
         for name in ('driver_probe.m','driver_guest.m','driver_host.m','driver_workload.m'):
@@ -170,6 +183,10 @@ def main():
         '-chardev', f'socket,id=gpu_uart,path={out}/uart.sock,server=on,wait=off,logfile={out}/serial.log',
         '-serial', 'chardev:gpu_uart']
     model = m['qemu_env'].copy()
+    if 'DARWIN_GPU_SHM_PATH' in model:raise ValueError('manifest must not carry an uncontrolled shared-RAM backend')
+    if a.driver_mmio:
+        argv += ['-chardev',f'socket,id=dvm_gpu_notify,path={out}/gpu-notify.sock,server=on,wait=off']
+    if a.mmio_echo or a.driver_mmio:model['DARWIN_GPU_SHM_PATH']=str(out/'shared-ram.bin')
     if 'DARWIN_ANS_AUX_DRIVE' in model:
         raise ValueError('manifest must not carry an uncontrolled auxiliary backend')
     if a.aux_namespace:
@@ -198,7 +215,7 @@ def main():
     driver_ready_seen=False
     driver_last_progress=started
     report.update(host_runner_monotonic_origin=started, aux_latency=a.aux_latency,
-        driver_boot=driver_boot,
+        driver_boot=driver_boot, driver_mmio=a.driver_mmio, mmio_echo=a.mmio_echo,
         driver_late_launch=a.driver_late_launch,
         aux_post_boot=a.aux_post_boot,
         global_deadline_seconds=a.seconds,
@@ -218,6 +235,7 @@ def main():
         print(f'{a.tag}: own PID {proc.pid}; UART connected and continuously drained', flush=True)
         pending = b''
         aux_complete = False
+        audit_complete = False
         input_ack = False
         input_ready_ping_sent = False
         inventory_starts = 0
@@ -229,6 +247,19 @@ def main():
         probe_ready_acks=0
         with (out/'wire.log').open('wb') as log:
             while time.monotonic()-started < a.seconds and proc.poll() is None:
+                if a.driver_mmio:
+                    for line in aux_peer.audit():
+                        event=dict(seconds=round(time.monotonic()-started,3),line=line,source='shared-ram-audit')
+                        report['events'].append(event);print(json.dumps(event),flush=True)
+                        driver_last_progress=time.monotonic()
+                        if 'GPU_LOAD_DRIVER_READY' in line:driver_ready_seen=True
+                        if 'GPU_LOAD_ERROR' in line:raise RuntimeError('shared-RAM guest failure: '+line)
+                        if 'GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0' in line:
+                            audit_complete=True;aux_complete=True
+                            report['driver_complete_seconds']=time.monotonic()-started
+                            report['completion_source']='shared-ram-audit'
+                    if audit_complete and not driver_boot:
+                        reason='guest load probe completed';break
                 if a.probe_observe_display and aux_complete:
                     try:status=json.loads((out/'input-status.json').read_text())
                     except (OSError,ValueError):status={}
@@ -252,7 +283,7 @@ def main():
                         raise TimeoutError('driver did not acknowledge host readiness within activation deadline')
                     if driver_ready_seen and not aux_complete and time.monotonic()-driver_last_progress>60:
                         raise TimeoutError('driver made no guest-stage or RPC progress for 60 seconds')
-                if driver_boot and aux_complete and driver_child_exited:
+                if driver_boot and aux_complete and (driver_child_exited or audit_complete):
                     observation=aux_peer.observe_display()
                     if observation:
                         report['native_observation']=observation
@@ -296,7 +327,10 @@ def main():
                 if bridge:
                     bridge.pump(wire)
                 poll_wait=.005 if ready and ready.released_at is None else a.aux_poll_ms/1000
-                if not select.select([wire], [], [], poll_wait if aux_peer else .01 if bridge else .2)[0]:
+                watched=[wire]
+                if a.driver_mmio and aux_peer.sock:watched.append(aux_peer.sock)
+                readable=select.select(watched, [], [], .01 if a.driver_mmio else poll_wait if aux_peer else .01 if bridge else .2)[0]
+                if wire not in readable:
                     continue
                 chunk = wire.recv(65536)
                 if not chunk:
@@ -306,6 +340,8 @@ def main():
                 lines = (pending+chunk).split(b'\n'); pending = lines.pop()[-65536:]
                 for raw in lines:
                     line = raw.decode(errors='replace').strip()
+                    if a.driver_mmio and line.startswith('GPU_LOAD_') and 'GPU_LOAD_DRIVER_CHILD' not in line:
+                        continue  # MMIO result authority is the checked shared audit, not boot stderr.
                     if a.surface_observe_display and aux_complete and surface_ack_baseline:
                         ack=re.search(r'DVMI2A (\d+) (\d+) Q R ',line)
                         if ack and int(ack[1])==surface_ack_baseline['epoch'] and int(ack[2])>=surface_ack_baseline['next_seq']:

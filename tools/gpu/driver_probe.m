@@ -1,4 +1,5 @@
 #import "driver_api.h"
+#include "driver_report.h"
 #import <CommonCrypto/CommonDigest.h>
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
@@ -82,6 +83,9 @@ static void memoryBudget(void) {
         fail("memory-limit-readback");
     fprintf(stderr, "GPU_LOAD_DRIVER_MEMORY verified_active=64 verified_inactive=64\n");
 }
+#ifdef DVM_DRIVER_MMIO
+#include "driver_mmio_transport.inc"
+#else
 enum { Page = 4096, Max = 2 * 1024 * 1024, Raw = 64 * 1024 * 1024 };
 @interface Namespace : NSObject
 @property(nonatomic) io_connect_t client;
@@ -198,6 +202,7 @@ enum { Page = 4096, Max = 2 * 1024 * 1024, Raw = 64 * 1024 * 1024 };
     return reply;
 }
 @end
+#endif
 static uint32_t be32(const uint8_t *p) {
     return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
@@ -278,6 +283,17 @@ int main(int argc, char **argv) {
             dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL);
         if (!lib)
             fail("iokit");
+        // Validate the pinned cache identity while waiting, but defer reading
+        // the 11 MB fat library until display readiness. Keep boot footprint low.
+        const uint8_t digest[32] = {0x88, 0x60, 0xe4, 0xa1, 0x7d, 0x89, 0x78, 0x3d,
+                                    0xa0, 0x64, 0x29, 0xa3, 0x02, 0xdb, 0x0b, 0xc6,
+                                    0x1b, 0x29, 0x39, 0x96, 0x3f, 0x20, 0x2c, 0x0c,
+                                    0x6a, 0xd3, 0x11, 0x89, 0xa1, 0x02, 0x13, 0x64};
+        double until;
+#ifdef DVM_DRIVER_MMIO
+        Namespace *ns=openMMIO(lib);
+        if(memcmp(ns.shared+0x100,digest,32))fail("host-library-identity");
+#else
         LOAD(IORegistryEntryFromPath);
         LOAD(IOObjectGetClass);
         LOAD(IOObjectRelease);
@@ -297,7 +313,7 @@ int main(int argc, char **argv) {
             "IOService:/AppleARMPE/arm-io@10F00000/AppleH17PPlatformIO/ans@79600000/AppleASCWrapV6/"
             "iop-ans-nub/RTBuddy(ANS2)/RTBuddyService/AppleANS3CGv2Controller/NS_06";
         io_service_t service = 0;
-        double until = now() + 60;
+        until = now() + 60;
         do {
             service = p_IORegistryEntryFromPath(0, path);
             if (!service)
@@ -328,12 +344,6 @@ int main(int argc, char **argv) {
         [ns io:0 bytes:page length:Page offset:0];
         if (memcmp(page, "DVM-METAL-DRIVER-v1", 19))
             fail("session-header");
-        // Validate the pinned cache identity while waiting, but defer reading
-        // the 11 MB fat library until display readiness. Keep boot footprint low.
-        const uint8_t digest[32] = {0x88, 0x60, 0xe4, 0xa1, 0x7d, 0x89, 0x78, 0x3d,
-                                    0xa0, 0x64, 0x29, 0xa3, 0x02, 0xdb, 0x0b, 0xc6,
-                                    0x1b, 0x29, 0x39, 0x96, 0x3f, 0x20, 0x2c, 0x0c,
-                                    0x6a, 0xd3, 0x11, 0x89, 0xa1, 0x02, 0x13, 0x64};
         if (memcmp(page + 64, digest, 32))
             fail("host-library-identity");
         ns.identity = [NSData dataWithBytes:page length:64];
@@ -359,6 +369,7 @@ int main(int argc, char **argv) {
         } while (now() < until);
         if (ready != 1)
             fail("display-readiness-deadline");
+#endif
         fprintf(stderr, "GPU_LOAD_DRIVER_READY\n");
         memoryBudget();
         NSData *air = nil;

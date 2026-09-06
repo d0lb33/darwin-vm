@@ -1,6 +1,7 @@
 // Same public Metal API workload for a native host device or our guest driver.
 // AIR metadata: average offset 941671, sum offset 946967 in the exact slice.
 #import "driver_api.h"
+#include "driver_report.h"
 #include <string.h>
 #include <time.h>
 

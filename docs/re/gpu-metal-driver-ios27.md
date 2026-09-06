@@ -607,3 +607,13 @@ diff checks passed. No QEMU source or guest binary changed in this fix.
 Durable reproduction records, including exact source/binary hashes, raw logs,
 output oracles and images:
 `/Users/jdolbe1/dvm-artifacts/research/gpu-metal-driver-boot-start-20260906/`.
+
+## Shared-memory transport follow-up (2026-09-06)
+
+The bounded boot-integrated mapping/doorbell and exact-AIR Metal experiments now
+pass without the auxiliary NVMe transport. Two post-display runs measure median
+full-work times of 7.621/8.878 ms versus 0.489/0.538 ms for the CPU reference; this
+tiny workload still does not benefit from offload. See the [shared-memory ledger](gpu-shared-memory-transport-ios27.md)
+for guarded boot patches, failures, runtime proof, checkpoint rejection and
+remaining production-driver dependencies. System software rendering stays the
+fallback; this is not global UI or Liquid Glass acceleration.

@@ -1,0 +1,109 @@
+"""One-session MMIO notification peer. Payloads live in owned shared RAM.
+
+Socket readiness joins the runner's select set: no mailbox polling interval.
+The inherited verifier checks actual Metal completions and a nonce CPU oracle.
+"""
+import hashlib
+import json
+import mmap
+import os
+from pathlib import Path
+import socket
+import struct
+import subprocess
+import time
+import zlib
+from driver_peer import DriverPeer, MAX
+from surface_peer import AIR_SHA
+
+RAM_SIZE=0x1000000
+MAGIC=0x44564d31
+
+class MMIOPeer(DriverPeer):
+    def __init__(self,out,worker,library,boot=False):
+        self.out=Path(out);self.started=time.monotonic();self.records=[];self.seen=set()
+        self.ready_since=None;self.ready_identity=None;self.ready_acks=0
+        self.released=False;self.released_at=None;self.buffer=b'';self.rx=b'';self.sock=None
+        self.library=Path(library);self.worker=Path(worker);self.boot=boot;self.audit_seen=0
+        raw=self.library.read_bytes()
+        if len(raw)!=2705796 or hashlib.sha256(raw).hexdigest()!=AIR_SHA:raise ValueError('exact AIR cache mismatch')
+        self.fd=os.open(self.out/'shared-ram.bin',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
+        os.ftruncate(self.fd,RAM_SIZE);self.ram=mmap.mmap(self.fd,RAM_SIZE)
+        self.log=(self.out/'driver-worker.log').open('xb')
+        env={k:v for k,v in os.environ.items() if k!='DVM_DRIVER_BOOTSTRAP'}
+        env.update(DVM_DRIVER_LIBRARY=str(self.library),DVM_DRIVER_BOOTSTRAP='1')
+        self.proc=subprocess.Popen([str(self.worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,env=env)
+        (self.out/'driver-inputs.json').write_text(json.dumps(dict(worker=str(self.worker),worker_sha256=hashlib.sha256(self.worker.read_bytes()).hexdigest(),library=str(self.library),air_sha256=AIR_SHA,transport='shared-ram-mmio'),indent=2)+'\n')
+        try:
+            length,=struct.unpack('<I',self.read(4))
+            if not 0<length<=4096:raise ValueError('bootstrap length')
+            self.bootstrap=json.loads(self.read(length))
+            if self.bootstrap.get('bootstrap')!=1 or self.bootstrap.get('protocol')!='DVM-METAL-DRIVER-v1' or self.bootstrap.get('queue') is not True or not self.bootstrap.get('device'):
+                raise ValueError('Metal bootstrap contract')
+        except BaseException:
+            self.close();raise
+    def release(self,evidence):
+        self.ram[0x100:0x120]=bytes.fromhex(AIR_SHA)
+        self.sock.sendall(struct.pack('<QII',0,0,0))
+        self.released=True;self.released_at=time.monotonic()
+        evidence.update(elapsed=self.released_at-self.started,bootstrap=self.bootstrap)
+        (self.out/'driver-readiness.json').write_text(json.dumps(evidence,indent=2)+'\n')
+    def pump(self):
+        if self.sock is None:
+            path=self.out/'gpu-notify.sock'
+            if not path.exists() or struct.unpack_from('<II',self.ram,0)!=(MAGIC,1):return
+            self.sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
+            self.sock.settimeout(1);self.sock.connect(str(path));self.sock.setblocking(False)
+            self.header=self.ram[16:32]
+            if not any(self.header):raise ValueError('missing QEMU session')
+        if not self.released:
+            if self.boot:self.release(dict(scope='host-metal-device-and-queue-before-guest-workload'))
+            else:self.gate()
+        try:data=self.sock.recv(16-len(self.rx))
+        except BlockingIOError:return
+        if not data:raise RuntimeError('MMIO notification disconnected')
+        self.rx+=data
+        if len(self.rx)<16:return
+        seq,n,checksum=struct.unpack('<QII',self.rx);self.rx=b''
+        if not self.released or seq!=len(self.seen)+1 or not 0<n<=MAX:raise ValueError('MMIO notification contract')
+        expected=self.header+struct.pack('<QII',seq,n,checksum)
+        if self.ram[0x40:0x60]!=expected or self.ram[16:32]!=self.header:raise ValueError('MMIO request header/session')
+        raw=self.ram[0x10000:0x10000+n]
+        if zlib.crc32(raw)!=checksum:raise ValueError('MMIO request CRC')
+        request=json.loads(raw)
+        if not isinstance(request,dict) or request.get('seq')!=seq:raise ValueError('MMIO request inner sequence')
+        started=time.monotonic_ns();self.proc.stdin.write(struct.pack('<I',n)+raw);self.proc.stdin.flush()
+        length,=struct.unpack('<I',self.read(4))
+        if not 0<length<=MAX:raise ValueError('host reply length')
+        output=self.read(length);reply=json.loads(output)
+        if not isinstance(reply,dict) or reply.get('seq')!=seq:raise ValueError('host reply sequence')
+        self.ram[0x800000:0x800000+length]=output
+        self.ram[0x80:0xa0]=self.header+struct.pack('<QII',seq,length,zlib.crc32(output))
+        self.sock.sendall(struct.pack('<QII',seq,0,0))
+        self.seen.add(seq)
+        record=dict(seq=seq,op=request.get('op'),request_bytes=n,reply_bytes=length,
+            host_service_us=(time.monotonic_ns()-started)/1000,
+            request={k:v for k,v in request.items() if k!='data'},reply=reply)
+        self.records.append(record)
+        with (self.out/'driver-host.jsonl').open('a') as f:f.write(json.dumps(record)+'\n')
+    def audit(self):
+        if self.sock is None:return []
+        if self.ram[16:32]!=self.header:raise ValueError('audit session changed')
+        head,=struct.unpack_from('<Q',self.ram,0x180)
+        if not self.audit_seen<=head<=64:raise ValueError('audit head bounds')
+        lines=[]
+        while self.audit_seen<head:
+            expected=self.audit_seen+1;offset=0x1000+self.audit_seen*512
+            seq,n,c=struct.unpack_from('<QII',self.ram,offset)
+            if seq!=expected or not 0<n<480:raise ValueError('audit slot framing')
+            raw=self.ram[offset+16:offset+16+n]
+            if zlib.crc32(raw)!=c:raise ValueError('audit CRC')
+            line=raw.decode('utf-8').strip()
+            if not line.startswith('GPU_LOAD_') or '\n' in line:raise ValueError('audit record format')
+            self.audit_seen=seq;lines.append(line)
+            with (self.out/'driver-audit.jsonl').open('a') as f:f.write(json.dumps(dict(seq=seq,line=line))+'\n')
+        return lines
+    def close(self):
+        if self.sock:self.sock.close()
+        self.ram.close()
+        super().close()
