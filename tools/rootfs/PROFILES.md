@@ -199,6 +199,16 @@ of the shared HID checkout.
   acceptance result. The generated DT/kernel match the RTC branch's SYS4
   inputs byte-for-byte. No `DARWIN_PMU_STATE` was supplied, so this also tested
   ordinary host-time initialization without a carried PMU state file.
+- `RTC_MERGE_WARM2`: a second fresh disk boot chained from WARM1 reached early
+  boot at 12.131 s and its first frame at 169.623 s, with zero panics. A bounded
+  20-second continuation produced a legible lock screen showing Sat Sep 5 and
+  5:47, with no panic or critical-process reboot markers. It used no debugger
+  or restored RAM; only the owned VM was paused for capture and then stopped.
+  Evidence: `/tmp/dvm/RTC_MERGE_WARM2/result.json` and
+  `/tmp/dvm/RTC_MERGE_WARM2/settled/{result.json,final.png}`.
+- Host regressions: 66 tests under `tools/tests`, two input tests, Python
+  compilation and shell syntax checks passed. The native verdict checks require
+  both the IORTC publication and the concrete AppleDialogSPMIPMURTC driver.
 
 The full fresh-Data seeding pipeline was not rerun in this integration. Existing
 PV checkpoint configurations remain available unchanged. Native RTC does not
