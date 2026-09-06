@@ -15,7 +15,7 @@ service=/mnt1/System/Library/LaunchDaemons/com.apple.dvm-graphics-probe.plist
 cp /libexec/dvm-graphics-service.plist "$service"
 chmod 644 "$service"
 chown 0:0 "$service"
-for name in power-rtc-probe activation-probe power-pv-service; do
+for name in power-rtc-probe activation-probe; do
     test -f "/libexec/dvm-$name" || continue
     power="/mnt1/usr/local/libexec/dvm-$name"
     test ! -e "$power"

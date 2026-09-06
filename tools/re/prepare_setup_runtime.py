@@ -3,7 +3,7 @@
 
 The output is a small, self-contained installer.  It writes only to the
 disposable System child mounted by the restore guest: the signed display-policy
-page/hash, the five diagnostic helpers, their cached launchd entries, and their
+page/hash, the input and three diagnostic helpers, their cached launchd entries, and their
 loose LaunchDaemon plists.  It does not touch PurpleBuddy, Data preferences, or
 activation records.
 """
@@ -106,10 +106,6 @@ def main() -> None:
                         default=Path("/tmp/dvm/POWER_PROBE2/power-rtc-probe"))
     parser.add_argument("--power-rtc-tc", type=Path,
                         default=Path("/tmp/dvm/POWER_PROBE2/power-rtc-probe.tc"))
-    parser.add_argument("--power-pv", type=Path,
-                        default=Path("/tmp/dvm/POWER_SOURCE1/power-pv-service/power-pv-service"))
-    parser.add_argument("--power-pv-tc", type=Path,
-                        default=Path("/tmp/dvm/POWER_SOURCE1/power-pv-service/power-pv-service.tc"))
     parser.add_argument("--activation", type=Path,
                         default=Path("/tmp/dvm/activation-probe-environment3-build/activation-probe"))
     parser.add_argument("--activation-tc", type=Path,
@@ -124,7 +120,7 @@ def main() -> None:
         parser.error(f"output already exists: {args.output}")
     inputs = [args.ramdisk_base, args.base_tc, args.launchd_original, args.launchd_input,
               args.input, args.input_tc, args.graphics, args.graphics_tc,
-              args.power_rtc, args.power_rtc_tc, args.power_pv, args.power_pv_tc,
+              args.power_rtc, args.power_rtc_tc,
               args.activation, args.activation_tc, args.policy_ramdisk, args.policy_tc]
     try:
         for path in inputs:
@@ -151,7 +147,6 @@ def main() -> None:
         "graphics-probe": (args.graphics, service("com.apple.dvm-graphics-probe", "/usr/local/libexec/dvm-graphics-probe")),
         "power-rtc-probe": (args.power_rtc, service("com.apple.dvm-power-rtc-probe", "/usr/local/libexec/dvm-power-rtc-probe")),
         "activation-probe": (args.activation, service("com.apple.dvm-activation-probe", "/usr/local/libexec/dvm-activation-probe")),
-        "power-pv-service": (args.power_pv, service("com.apple.dvm-power-pv-service", "/usr/local/libexec/dvm-power-pv-service", keepalive=True)),
     }
     # A successfully copied executable is not bootable without its own hash
     # in the selected trust cache. Reject stale helper/TC pairs before staging.
@@ -159,7 +154,7 @@ def main() -> None:
     from merge_tc import load as load_tc
     for binary, trust_cache in [
         (args.input, args.input_tc), (args.graphics, args.graphics_tc),
-        (args.power_rtc, args.power_rtc_tc), (args.power_pv, args.power_pv_tc),
+        (args.power_rtc, args.power_rtc_tc),
         (args.activation, args.activation_tc),
     ]:
         if bytes.fromhex(cdhash(binary)) not in {entry[:20] for entry in load_tc(trust_cache)[2]}:
@@ -216,7 +211,7 @@ def main() -> None:
 
     subprocess.run(["python3", str(repo / "tools/rootfs/merge_tc.py"), str(args.output / "system.tc"),
                     str(args.base_tc), str(args.input_tc), str(args.graphics_tc), str(args.power_rtc_tc),
-                    str(args.power_pv_tc), str(args.activation_tc), str(args.policy_tc)], check=True)
+                    str(args.activation_tc), str(args.policy_tc)], check=True)
     print(f"prepared {args.output}")
 
 

@@ -43,7 +43,8 @@ def boot_command(argv, out):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('manifest', type=Path)
+    p.add_argument('manifest', type=Path, nargs='?',
+                   default=Path.home() / 'dvm-artifacts/native-smc/default.json')
     p.add_argument('--tag', required=True)
     p.add_argument('--seconds', type=int, default=180)
     p.add_argument('--keep-paused', action='store_true')

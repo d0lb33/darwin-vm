@@ -25,8 +25,10 @@ sys.path[:0] = [str(REPO / 'tools'), str(REPO / 'tools/input'), str(REPO / 'tool
 from checkpoint_common import atomic_json, qcow2_backing_chain, sha256
 from prepare_display_policy import PAGE_SIZE, parse_code_directory, OFFSET, EXPECTED, REPLACEMENT
 from prepare_guarded_cache_patch import reviewed_edits
-from patch_powerd_virtual_battery import SOURCE_SHA256
 from smp_pv_patch import SHA256 as KC_SHA256
+
+# Original 24A5430a powerd, verified before installation; never patched.
+SOURCE_SHA256 = '31254642770ac63ce22a55a5717246cf2289297f478f7ab753d15b6f88436268'
 
 CACHE_ROOT = '/System/Library/Caches/com.apple.dyld/'
 POWERD = '/System/Library/CoreServices/powerd.bundle/powerd'
@@ -59,19 +61,23 @@ def clean_env():
                           'NATIVE_RTC', 'HELPER_SRC')}
 
 
+PROFILES = ('native', 'patched', 'patched-native-battery')
+
+
 def profile_config(profile, development_activation=False):
-    if profile not in ('native', 'patched'):
+    if profile not in PROFILES:
         raise ValueError('unknown profile')
-    patched = profile == 'patched'
+    patched = profile != 'native'
     env = dict(DISPLAY_ENV, DARWIN_RTC_PV='0')
     if patched:
         env.update(DARWIN_SMP_PV='1')
     return dict(profile=profile, cpus=6 if patched else 1, env=env,
                 development_activation=development_activation,
                 userspace_patches=['display-allocation', 'settings-scale',
-                                   'clock-label-and-non-glass', 'powerd-null-guard'] if patched else [],
-                runtime_helpers=['input', 'power-pv-service'] if patched else [],
+                                   'clock-label-and-non-glass'] if patched else [],
+                runtime_helpers=['input'] if patched else [],
                 kernel_adapters=['smp-pv'] if patched else [],
+                battery_source='emulated-smc',
                 clock_source='native-spmi-pmu',
                 setup_completion='unchanged', saved_ram=False)
 
@@ -181,6 +187,7 @@ def installer_script(checks, writes, additions, patched):
 def prepare(a, out, config, env):
     payload = out / 'payload'
     payload.mkdir()
+    patched = a.profile != 'native'
     checks, writes, additions, hashes, records = [], [], [], [], []
     def add(target, before, after=None, offset=None):
         name = f'profile-{len(checks)}'
@@ -194,27 +201,20 @@ def prepare(a, out, config, env):
         regions, cdhash = cache_payload(cache, spec)
         for offset, before, after in regions:
             add(CACHE_ROOT + spec['cache_name'], before,
-                after if a.profile == 'patched' else None, offset)
-        if a.profile == 'patched':
+                after if patched else None, offset)
+        if patched:
             hashes.append(cdhash)
         records.append(dict(spec=spec, source_sha256=sha256(cache),
-                            applied=a.profile == 'patched', patched_cdhash=cdhash))
+                            applied=patched, patched_cdhash=cdhash))
     add(POWERD, a.powerd.read_bytes())
     add(LAUNCHD, a.launchd_cache.read_bytes())
-    if a.profile == 'patched':
+    if patched:
+        helper_tcs = []
         run('bash', REPO / 'tools/input/build.sh', out / 'input', env=env)
-        run('bash', REPO / 'tools/re/build_power_pv_service.sh', out / 'power', env=env)
-        run(sys.executable, REPO / 'tools/re/patch_powerd_virtual_battery.py',
-            a.powerd, out / 'powerd', env=env)
-        # Reuse the preimage above; replacement retains the existing file mode.
-        shutil.copyfile(out / 'powerd', payload / 'profile-powerd')
-        writes.append((POWERD, 'profile-powerd', None, 0))
-        info = subprocess.check_output(['codesign', '-d', '--verbose=4', str(out / 'powerd')],
-                                        stderr=subprocess.STDOUT, text=True)
-        hashes.append(re.search(r'^CDHash=([0-9a-f]{40})$', info, re.M).group(1))
+        helpers = [('input', out / 'input/dvm-input')]
+        helper_tcs.append(out / 'input/helper.tc')
         cached = original_launchd(a.launchd_cache)
-        for name, binary in [('input', out / 'input/dvm-input'),
-                             ('power-pv-service', out / 'power/power-pv-service')]:
+        for name, binary in helpers:
             job = service(name)
             path = '/System/Library/LaunchDaemons/com.apple.dvm-' + name + '.plist'
             cached['LaunchDaemons'][path] = job
@@ -227,12 +227,12 @@ def prepare(a, out, config, env):
         (out / 'hashes.txt').write_text('\n'.join(hashes) + '\n')
         run(sys.executable, REPO / 'build_tc.py', out / 'hashes.txt', out / 'patches.tc', env=env)
         run(sys.executable, REPO / 'tools/rootfs/merge_tc.py', out / 'system.tc', a.tc,
-            out / 'patches.tc', out / 'input/helper.tc', out / 'power/power-pv-service.tc', env=env)
+            out / 'patches.tc', *helper_tcs, env=env)
         run(sys.executable, REPO / 'tools/re/smp_pv_patch.py', a.firmware / 'bootkc', out / 'bootkc', env=env)
     else:
         shutil.copyfile(a.tc, out / 'system.tc')
         shutil.copyfile(a.firmware / 'bootkc', out / 'bootkc')
-    (payload / 'dvm-profile-install.sh').write_text(installer_script(checks, writes, additions, a.profile == 'patched'))
+    (payload / 'dvm-profile-install.sh').write_text(installer_script(checks, writes, additions, patched))
     run('bash', '-n', payload / 'dvm-profile-install.sh', env=env)
     atomic_json(out / 'patch-inventory.json', records)
     for name, extra in [('restore', []), ('system', ['-enable', 'dcp'] +
@@ -297,7 +297,8 @@ def verdict(serial, stderr, profile):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--profile', required=True, choices=('native', 'patched'))
+    p.add_argument('--profile', default='patched-native-battery', choices=PROFILES,
+                   help='default: patched-native-battery; patched is a compatibility alias')
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument('--base-image', type=Path, help='merged raw System disk with Data/Preboot/Hardware slots; seed fresh Data')
     source.add_argument('--parent', type=Path, help='explicit read-only seeded qcow2; inherits its Data/Setup history')
@@ -351,8 +352,8 @@ def main():
     if sha256(a.firmware / 'bootkc') != KC_SHA256 or sha256(a.powerd) != SOURCE_SHA256:
         p.error('requires the reviewed 24A5430a bootkc and original powerd')
     binary = a.qemu.read_bytes()
-    if any(name not in binary for name in (b'darwin-spmi', b'darwin-pmu')):
-        p.error('QEMU binary lacks native SPMI/PMU RTC support; build the current pinned submodule')
+    if any(name not in binary for name in (b'darwin-spmi', b'darwin-pmu', b'darwin-smc-battery')):
+        p.error('QEMU binary lacks native SMC battery or SPMI/PMU RTC support; build the current pinned submodule')
     original_launchd(a.launchd_cache)
     # Validate all cache preimages before building or mounting anything.
     for spec in specs():
