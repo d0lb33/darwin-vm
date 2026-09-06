@@ -12,7 +12,10 @@ trap '"$repo/tools/rootfs/safe_attach.sh" detach "$mnt"' EXIT
 test -d "$mnt/libexec"
 cp -X "$out/dvm-input" "$mnt/libexec/dvm-input"
 cp -X "$repo/tools/input/com.apple.dvm-input.plist" "$mnt/libexec/dvm-input.plist"
-cp -X "$repo/tools/input/install_in_guest.sh" "$mnt/libexec/dvm-input-install.sh"
+# INSTALLER selects the guest-side script (install_in_guest.sh for the v1
+# helper, install_hid_in_guest.sh for the DVMI2 helper); INSTALLER_NAME is
+# its /libexec name inside the ramdisk.
+cp -X "$repo/tools/input/${INSTALLER:-install_in_guest.sh}" "$mnt/libexec/${INSTALLER_NAME:-dvm-input-install.sh}"
 chmod 755 "$mnt/libexec/dvm-input"
 cmp "$out/dvm-input" "$mnt/libexec/dvm-input"
 sync

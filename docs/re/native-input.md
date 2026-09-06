@@ -1,5 +1,269 @@
 # Native input development (24A5430a)
 
+## Current transport: DVMI2 over the console UART (2026-09-05)
+
+The relay/Recap bridge is no longer the normal input path. The replacement
+has three parts, all in the repo:
+
+| Part | Where | Role |
+|---|---|---|
+| `darwin-input` device state | `qemu-sptm/hw/arm/darwin_input.c`, `include/xnu/darwin_input.h`, hooked from `darwin_fb.c` | bounded queue, framing, UART backpressure, ACK/readiness parsing, counters, migration state, status file |
+| UART TX observer | `qemu-sptm/hw/char/exynos4210_uart.c` (`exynos4210_uart_set_tx_observer`) | lets QEMU read the helper's replies out of the console stream; the FIFO full/empty fix is untouched |
+| `dvm-hid` guest helper | `tools/input/dvm_hid.c` (installed as `/usr/local/libexec/dvm-input`, same cached launchd job) | IOKit-only virtual HID service; reads records on the console thread independent of HID initialisation |
+
+Enable with `DARWIN_INPUT_UART=1` (and `DARWIN_INPUT_STATUS=<path>` for the
+JSON status file; `tools/warm_boot_probe.py` sets it per run). The legacy
+capture `DARWIN_TOUCH_EVENTS` plus `tools/input/relay.py` and helper v6
+remain the diagnostic control on the old checkpoints; do not run both
+against one guest, they share the console.
+
+### Why not a QEMU device consumed by a kernel touch driver
+
+Evidence from `/tmp/dvm/RTC_SOURCE1/DISPLAY_SMP6.rtc-ns.bootkc` (prelink
+info parsed with plistlib) and the warm DeviceTree
+`/tmp/dvm/SETUP_ACTIVATION1/dt_warm_development_hactivation.bin`:
+
+- The real touch controller is `/arm-io/dockchannel-mtp/mtp-transport/multi-touch`
+  (`mtp-transport` has `role = MTP`). The kernel chain is `AppleDockChannel`
+  (`IONameMatch dockchannel,t8002`) -> RTBuddy over DockChannel ->
+  `AppleHIDTransportDeviceMailbox` (`IONameMatch MTPEndpoint1` on
+  `RTBuddyEndpointService`, `AppleHIDTransportMailbox` 1000.41) ->
+  `AppleMultitouchHIDService` (`DeviceUsagePairs` 0x0D/0x04, `Manufacturer`
+  Apple, `parser-type 1`, `AppleMultitouchDriver` 1000.44). The kernelcache
+  strings show that parser speaking the proprietary Z2/HBPP multitouch
+  protocol (`AppleHIDTransportProtocolZ2.cpp`, `AppleHIDTransportBootloaderHBPP.cpp`,
+  `getMultitouchReport`, `Family ID`). Modelling it means emulating the MTP
+  coprocessor firmware's RTKit endpoints and the Z2 report/feature protocol
+  with no public reference; that is not invented here.
+- `IOHIDEventDriver` (2.0.0) on this kernelcache has no generic digitizer or
+  pointing personality: only keyboard (0x01/0x06,0x07), buttons, sensor, the
+  FIFO-transport "Peppy Touch Display" consumer-control entry and BLE. A
+  generic USB/virtio HID touchscreen would bind to nothing, and there are no
+  virtio kexts at all. `IOHIDResource`/`IOHIDUserDevice` exist (entitlement
+  string `com.apple.developer.hid.virtual.device` is in the kernelcache), but
+  a user device is only useful if a HID event driver matches its descriptor;
+  for touch that is again `AppleMultitouchHIDService` (or its `MTUserDevice`
+  personality, usage page 0xFF60 usage 7) with the same proprietary parser.
+- USB is present (`AppleUSBXHCIARM`, `IOUSBHostHIDDevice`) but the XHCI on
+  `/arm-io/usb-drd` needs the ATC PHY/`dart-usb` path, and iOS would still
+  have no digitizer event driver for a USB touchscreen.
+- A second Samsung UART would bind natively (`AppleSamsungSerial` matches
+  `uart-1,samsung`, `IOSerialBSDClient` publishes `/dev/cu.*`), but the
+  firmware DeviceTree only has `uart0`, `darwin.c` deliberately leaves the
+  console UART interrupt unconnected because `exynos4210_uart` cannot model
+  Apple's `UINTP` semantics, and `AppleSamsungSerial` is interrupt driven.
+  The console UART is polled by XNU and already proven, so it stays.
+
+The one native consumer that works without display services is backboardd's
+HID event system through `IOHIDVirtualServiceClientCreateWithCallbacks`
+(IOKit `0x18f00e8f8`) and `IOHIDVirtualServiceClientDispatchEvent`
+(`0x18f00afa0`), the exact calls HID.framework's `HIDVirtualEventService`
+makes (`-[HIDVirtualEventService activate]` `0x2678a8ee4`,
+`dispatchEvent:` `0x2678a71d0`, open source
+`IOHIDFamily/HID/HIDVirtualEventService.m`) and that Recap wrapped for the
+old helper. The callbacks struct is
+`IOHIDVirtualServiceClientCallbacksV2 {version=2, notify, setProperty,
+copyProperty, copyEvent, setOutputEvent, copyMatchingEvent}`; the thunks at
+`0x2678a747c`/`0x2678a6138`/`0x2678a7410` confirm `target` is argument 0 and
+the key/type/value follow `context` and the service client. The service
+properties mirror Recap's touchscreen sender: `displayUUID` `"<main>"`
+(`BKSDisplayUUIDMainKey` -> BackBoardServices cstring `0x18a1813ad`),
+`Built-In` false (`kCFBooleanFalse` `0x1e8ee0108` at `0x29b2082b4`),
+`Authenticated` true, `Transport` `"Recap"` (defaults block `0x29b1ffc30`).
+
+### Wire protocol
+
+Host -> guest, one ASCII line per record injected into the console RX FIFO:
+
+```
+DVMI2 <epoch> <seq> <K> <a> <b> <c> <host_ms>
+```
+
+`K` is `D` down, `M` move, `U` up, `C` cancel, `P` ping, `B` button
+(`a` = consumer usage, `b` = down), `W` wheel (`a,b` = pointer, `c` = signed
+notches). `a,b` are QEMU's normalised 0..32767 coordinates for `D/M/U/W`;
+`c` is 0 for every other kind. Guest -> host:
+
+```
+DVMI2A <epoch> <seq> <code> <state> <guest_us>   code S submitted, F dispatch failed,
+                                                 N not ready, Q accepted without HID, E rejected
+DVMI2R <state> <pid> <epoch>                     state I initialising, R ready, L lost
+```
+
+Policies (all in `darwin_input.c`, host-tested by
+`tools/tests/test_native_input.py`):
+
+- Queue of 64 records; motion behind unsent motion is coalesced, button
+  edges never are. Overflow of edges opens a new epoch and cancels instead of
+  replaying a late gesture. At most four records are unacknowledged.
+- Records are only queued while the helper has announced `I` or `R`; before
+  that they are dropped and counted, never buffered in the console tty.
+- An unacknowledged record after 10 s of **guest** time marks the guest
+  `L` and is never resent. Virtual time is used so a paused guest cannot
+  time out.
+- Device reset, migration restore, a helper restart (new pid announcing
+  `I`) and overflow all bump the epoch; the first record of a new epoch makes
+  the helper release any contact it holds. The helper also releases on
+  console EOF.
+- Coordinates: QEMU 0..32767 -> helper `x/32767.0` -> digitizer event
+  fraction -> backboardd scales to the 1179x2556 display; UIKit points are
+  half that (verified earlier in `single-touch.md`). Pixel (x, y) is
+  `round(x*32767/1179), round(y*32767/2556)`; `native_input.py --px`.
+- Host buttons: the left button is the finger; the **right button is Home**
+  (consumer 0x0c/0x40, both edges) and so are F5 (Home) and F6 (Power).
+  **Mouse wheel**: QEMU counts notches for 40 ms (max 8) and sends one `W`
+  record at the pointer; the guest performs a drag of 5 % of the display
+  height per notch (capped at 40 %), eight 12 ms steps, then a 60 ms hold
+  before the release so the pan velocity is zero and UIKit scrolls exactly
+  that distance without a fling. Wheel up moves the finger down (content
+  scrolls up), which is AppKit's normalised delta sign in `ui/cocoa.m`, so it
+  is independent of the "natural scrolling" setting. A wheel while the left
+  button or a contact is down is ignored, and the helper ignores a `W`
+  while it holds a real drag.
+- Migration: epoch, sequence, readiness and counters travel in the
+  `darwin-fb/input` subsection; queued, in-flight and wire bytes deliberately
+  do not, `post_load` opens a new epoch. Old checkpoints without the
+  subsection load unchanged (`NATIVE_HID_COMPAT1`: `POWERD_GUARD_BATTERY1`
+  restored on the new binary at the exact PC, epoch 3 after restore).
+
+### Results
+
+All runs below are independent disk boots of the `CLOCK_SOFTWARE_PATCH1`
+lineage with the DVMI2 helper installed (`tools/re/install_staged_helpers.py`,
+children `NATIVE_HID_INSTALL2..5`), no LLDB, no restored RAM, on a host that
+was also running five other 12 GiB TCG guests (load average 7-9 on 18 cores).
+Pinned binaries: QEMU `/tmp/dvm/native-input-qemu6/qemu-system-aarch64`
+(SHA-256 `9f0be86f...`; qemu4/5 are earlier builds of the same series;
+`native-input-qemu7` adds only the delivery-field range guard and is the
+build matching the committed source), helper v10
+`/tmp/dvm/native-hid-v10/dvm-input`, fresh-boot manifests
+`/tmp/dvm/native-hid-v10/warm-manifest.json` (qemu6) and
+`warm-manifest-qemu7.json`.
+
+| Run | Helper | Early boot | Helper `R` | First presentation | Notes |
+|---|---|---|---|---|---|
+| `NATIVE_HID_FRESH1` | v7 | 10.1 s | 31.0 s | none before quit | notify-type bug marked the service lost; quit |
+| `NATIVE_HID_FRESH2` | v8 | 10.0 s | 44.3 s | +136 s after resume | first helper instance died, launchd restart detected, re-epoched |
+| `NATIVE_HID_FRESH3` | v9 | 10.7 s | 30.2 s | +172 s after resume | pid 87 died after `R`; pid 204 init took 207 s under load |
+| `NATIVE_HID_FRESH4` | v10 | 12.0 s | 42.4 s | ~190 s guest time | same pid all run; ping RTT mean 107 ms |
+
+Stage timings (QEMU status file, `ui/input.jsonl` under each run):
+
+- Transport: ping RTT (inject -> helper ACK line back) mean 1.3 s / max 10 s
+  on v9 while SpringBoard was starting, 107 ms mean / 5.5 s max on v10 with
+  `setpriority(-20)` and user-interactive QoS (`NATIVE_HID_FRESH4`). Ten
+  pings on v9 exceeded the 10 s guest-time bound and were counted as
+  timeouts, never resent.
+- Guest handling: reader `handle()` 4-30 us; HID dispatch
+  (`IOHIDVirtualServiceClientDispatchEvent`) 2-60 ms when the guest is idle,
+  1.4-7.1 s when SpringBoard is busy (v8/v9). The 7.1 s sample was a Home
+  release; the following release-to-frame time was 16 ms.
+- Input-to-presented-frame (host send of the release -> first `iomfb:
+  presented`): 14-135 ms across 12 gestures, i.e. the DCP path is not the
+  latency.
+
+Visible results, all through QMP `input-send-event` (the Cocoa window path):
+
+- Fresh boot 3 and 4: F5 Home from the lock screen reached the icon grid
+  (`NATIVE_HID_FRESH4/ui/02-after-home.png`). A tap on the Settings icon at
+  pixel (138,256) started the Preferences launch each time (launch surface
+  in `03-settings-after.png`, `07-seq-20.png`), and the guest was back on the
+  icon grid 45 s later on every fresh-boot attempt (four attempts across the
+  two boots). No Preferences corpse appears in `NATIVE_HID_FRESH4/corpses.txt`
+  (only the InputUI/PosterBoard/AccessibilityUIServer `0x8badf00d` launch
+  watchdog kills and a chronod SIGABRT). This is an application/launch
+  failure under load, reported separately from input.
+- Snapshot restore: `checkpoints/NATIVE_HID_HOME1` was captured from fresh
+  boot 3 at Home (4.31 GB, 16.6 s). `NATIVE_HID_RESTORE1` restored it at the
+  exact PC in 1.31 s; QEMU opened epoch 4 and the helper acknowledged the
+  cancel. A native tap then launched and rendered Settings
+  (`NATIVE_HID_RESTORE1/ui/01-settings-after.png`), a native swipe scrolled
+  the list (`02-scroll-after.png`, 11 records, 10 dispatched, max 29 ms),
+  dispatch 9.8 ms per touch. Two later Home presses on that guest were
+  dispatched (`S`) with no visible effect and a third returned `F` from the
+  button service; the touch service kept working. Cause not established.
+- No stuck contact was observed: every gesture ended with `contact_sent`
+  false and the helper's `held` cleared; the freeze experiments released
+  through explicit `U` records after `cont`.
+
+Two stalls, measured separately with frozen RAM (`warm_boot_postmortem.py`,
+slides `0x1d28c000` / `0x544000` from `mach_msg2_trap`):
+
+1. Delivery: `NATIVE_HID_FRESH2` frozen 0.73 s after injecting a `D` found
+   the helper still in `fgets` -> `read` on the console; the record had not
+   been delivered. The kernel console input path is polled and starved
+   under load.
+2. Dispatch: `NATIVE_HID_FRESH3` frozen 1.46 s into a "dispatch" found the
+   helper's worker inside `malloc` under `IOHIDEventCreateDigitizerEvent`
+   (`stacks-symbolicated.txt`), while backboardd's main thread was in
+   `CA::Context::invalidate` from animation callbacks and another thread was
+   encoding a `BKSHIDEventDeliveryChain` for the previous touch. The stall
+   is CPU starvation of the helper, not a backboardd wait; v10's priority
+   change is the response and cut ping RTT tenfold.
+
+Right-click Home and mouse-wheel scrolling (helper v11, QEMU `native-input-qemu8`):
+
+- `NATIVE_HID_FRESH5`: a right-button press/release from the lock screen
+  reached the icon grid (`ui/02-after-rightclick.png`, button dispatch 9 ms /
+  51 ms). Two wheel-up notches on the icon grid produced one `W` record and a
+  ten-event drag (1.7 s of dispatch under load) with no visible Spotlight
+  pull; the icon grid needs a longer pull than 10 % of the screen.
+- `NATIVE_HID_RESTORE2` (checkpoint `NATIVE_HID_HOME2` of fresh boot 5): a
+  native tap launched and rendered Settings, then wheel notches -3, +1, -1,
+  -2 each scrolled the list by the dragged distance and stopped without
+  flinging (`ui/02-wheel-down3-after.png`, `03-wheel-*-after.png`;
+  dispatch 198-247 ms per ten-event gesture, contact released each time).
+- On that restored guest, about a minute after restore the right-click Home
+  was dispatched (`S`) with no effect and every later dispatch, touch
+  included, returned `F` (`serial.log` `DVMI2D 4 266..274 F`) while the UI
+  kept presenting. The same sequence happened on `NATIVE_HID_RESTORE1`.
+  Cause: `NATIVE_HID_RESTORE2/process-stacks.json` (frozen RAM after the
+  failures) lists backboardd PID 74 (stale) and PID 410 (live) and
+  SpringBoard PID 35 (stale) and PID 429 (live): both UI processes were
+  replaced after the restore, the helper's virtual services died with the
+  old backboardd, and the helper received no notification for a dead
+  server. This also explains why Settings survives its launch only on
+  restored guests: they run a fresh SpringBoard. Why the restore triggers
+  the restart (wall-clock jump from the RTC leaf is the obvious suspect) is
+  not established. Helper v12 re-creates both virtual services after two
+  consecutive dispatch failures or a reset notification and announces
+  `I` -> `R`; see the v12 entry below for whether that recovers.
+
+Known limitations:
+
+- The first helper instance died in fresh boots 2 and 3 (no corpse in the
+  RAM dumps; not a `DVM_HID_EOF`), and launchd's 10 s throttle plus a busy
+  backboardd made the replacement's initialisation take up to 207 s. v10 ran
+  a single instance; one run is not proof.
+- Button-service dispatch failed (`F`) after the restore experiment above.
+- Settings does not survive its launch on these fresh boots; it does on the
+  restored guest. Repeated Settings launches/navigation therefore pass only
+  on `NATIVE_HID_RESTORE1`.
+- The `delivery_ms` field is unusable: the guest wall clock is not aligned
+  with the host (`1788459...` values); QEMU ignores it. RTT is the transport
+  latency figure.
+- Cocoa clicks were not exercised by hand; QMP `input-send-event` feeds the
+  same absolute handler.
+
+Reproduce:
+
+```sh
+python3 tools/warm_boot_probe.py /tmp/dvm/native-hid-v10/warm-manifest.json \
+  --tag NATIVE_HID_NEXT --seconds 600 --stop-on 'DVMI2R R' --keep-paused
+python3 tools/hmp.py /tmp/dvm/NATIVE_HID_NEXT/monitor.sock cont
+python3 tools/input/native_input.py --run /tmp/dvm/NATIVE_HID_NEXT wait-ready
+python3 tools/input/native_input.py --run /tmp/dvm/NATIVE_HID_NEXT --frames /tmp/dvm/NATIVE_HID_NEXT/home home
+python3 tools/input/native_input.py --run /tmp/dvm/NATIVE_HID_NEXT --px --frames /tmp/dvm/NATIVE_HID_NEXT/tap tap 138 256
+python3 tools/input/native_input.py --run /tmp/dvm/NATIVE_HID_NEXT --px --hold-ms 250 swipe 589 2100 589 900
+```
+
+For a restore, symlink the restore's `.restore.qmp.sock`, `.restore.sock`
+and `DARWIN_INPUT_STATUS` file as `qmp.sock`, `monitor.sock`,
+`input-status.json` in a run directory (see `NATIVE_HID_RESTORE1`).
+
+
+## Historical helper v4-v6 notes
+
 Latest disk-boot result: helper v5 opens its own console input, and the
 development launchd cache now includes its service. `WARM_INPUT_AUTO2`
 automatically registered HID and acknowledged 10/10 pings without a debugger
