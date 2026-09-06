@@ -1,5 +1,9 @@
 # Guarded execution and native cache maintenance — September 5, 2026
 
+**Superseded stopping point:** [hvf-sptm-bootstrap.md](hvf-sptm-bootstrap.md)
+(September 6) records the native boot passing GXF_CONFIG=0x6f, the CTXR/CTRR
+activation, TXM at guarded EL0 and the GEXIT onto the kernel entry.
+
 Fresh [performance checkpoint](hvf-performance-checkpoint.md): ordinary ARM
 loops run natively, but the current register and guarded-transition bridge
 paths are expensive. Includes checked repeated HVF/TCG measurements and the

@@ -1,5 +1,11 @@
 # Native HVF progress — resumed goal, 2026-09-04
 
+**Latest (September 6):** [hvf-sptm-bootstrap.md](hvf-sptm-bootstrap.md).
+Real SPTM completes its bootstrap natively, including TXM at guarded EL0,
+and stops on the kernel's first instruction with a TCG-identical state.
+The HVF work is committed on `codex/hvf-research-checkpoint`; the
+"uncommitted" remarks below are historical.
+
 **Latest integrated result (September 5):** read `hvf-integrated-shadow.md`
 first. Real adapted SPTM now enables the native MMU, executes at high VA,
 and performs native stack stores using demand-filled checked aliases. It
