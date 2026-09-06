@@ -24,13 +24,15 @@ static struct record record(unsigned epoch, unsigned seq, char kind,
     return (struct record){{.epoch = epoch, .seq = seq, .kind = kind,
                            .a = a, .b = b}};
 }}
-static int dispatches, fail_dispatch;
+static int dispatches, fail_dispatch, digitizers;
+static double digitizer_y[32];
 static bool cancel_on_first_dispatch;
 static Ref fake_digitizer(CFRef a, uint64_t b, uint32_t c, uint32_t d,
                           uint32_t e, uint32_t f, uint32_t g, double h,
                           double i, double j, double k, double l, int m,
                           int n, uint32_t o) {{
-    (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;(void)i;
+    (void)a;(void)b;(void)c;(void)d;(void)e;(void)f;(void)g;(void)h;
+    digitizer_y[digitizers++] = i;
     (void)j;(void)k;(void)l;(void)m;(void)n;(void)o; return (Ref)1;
 }}
 static Ref fake_finger(CFRef a, uint64_t b, uint32_t c, uint32_t d,
@@ -98,13 +100,16 @@ int main(void) {{
     assert(!held && op_len <= 3);
     assert(op_len == 1 && ops[op_head].kind == 'B' && !ops[op_head].down);
 
-    /* A wheel's final up is its tenth HID post.  If it fails, preserve the
+    /* A wheel's final up is its sixteenth HID post: down, eight moves, six
+       stationary samples, then up.  If it fails, preserve the
        successful down state and schedule one internal up immediately. */
     op_head = op_len = 0; held = false; touch_down = touch_release_needed = false;
     digitizer = fake_digitizer; finger = fake_finger; vsc_dispatch = fake_dispatch;
     cf_release = fake_release; set_integer = fake_integer; append_event = fake_append;
-    touch_service.service = (Ref)3; dispatches = 0; fail_dispatch = 10;
+    touch_service.service = (Ref)3; dispatches = digitizers = 0; fail_dispatch = 16;
     assert(!scroll_gesture(.5, .5, 1, op_generation));
+    assert(digitizers == 16);
+    for (int i = 10; i < 15; i++) assert(digitizer_y[i] == digitizer_y[9]);
     assert(touch_down && !touch_release_needed);
     touch_release_needed = true;
     assert(schedule_releases(&(struct record){{.epoch=2}}) && op_len == 1 &&

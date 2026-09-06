@@ -52,7 +52,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION 14
+#define VERSION 15
 #define RECOVERY_ATTEMPTS 3
 #define RECOVERY_TIMEOUT_SECONDS 20
 
@@ -428,8 +428,9 @@ static bool post_button_at(uint64_t ts, unsigned usage, bool down) {
 }
 
 /* A mouse-wheel batch as one finger drag that ends at rest: down at the
- * pointer, eight 12 ms steps, a 60 ms hold so the pan velocity is zero, then
- * up.  UIKit therefore scrolls exactly the dragged distance and never flings.
+ * pointer, eight 12 ms steps, then six stationary 20 ms samples before up.
+ * The samples give UIKit measured zero-motion timestamps rather than relying
+ * on an unobserved sleep to suppress momentum.
  * Wheel up (positive notches) moves the finger down, i.e. content scrolls
  * up, matching AppKit's normalised delta sign in ui/cocoa.m. */
 #define WHEEL_STEP_FRACTION 0.05     /* of the display height per notch */
@@ -479,7 +480,22 @@ static bool scroll_gesture(double x, double y, int notches, unsigned generation)
         if (released) wheel_note_touch(x, touch_y, false);
         return released;
     }
-    usleep(60000);
+    for (int i = 0; i < 6; i++) {
+        if (wheel_cancelled(generation)) {
+            bool released = post_touch_at(0, x, touch_y, false, true);
+            if (released) wheel_note_touch(x, touch_y, false);
+            return released;
+        }
+        usleep(20000);
+        if (wheel_cancelled(generation)) {
+            bool released = post_touch_at(0, x, touch_y, false, true);
+            if (released) wheel_note_touch(x, touch_y, false);
+            return released;
+        }
+        bool posted = post_touch_at(0, x, y_end, true, false);
+        if (posted) wheel_note_touch(x, y_end, true);
+        ok = posted && ok;
+    }
     bool released = post_touch_at(0, x, y_end, false, true);
     if (released) wheel_note_touch(x, y_end, false);
     return released && ok;
