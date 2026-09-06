@@ -107,9 +107,24 @@ superseded.
 ## What is still open
 
 - Reaching the restore shell natively and then `Early boot complete` on
-  the system volume. The immediate blocker is AIC IRQ delivery: the
-  console driver and everything else that waits on a device interrupt
-  never wakes.
+  the system volume. The blocker is a stall in IOKit driver start-up, not
+  interrupt delivery: `HVF_KC_BOOT33` with `DARWIN_AIC_DEBUG=1` shows the
+  kernel programming the AIC but no device ever raising a line, because
+  the drivers that raise them never start. TCG's 60 s baseline delivers
+  40 IRQs, all from SPMI (`nub-spmi0`, irq `0x1e7`) and the SMC mailbox
+  (`0x245..0x248`); natively `AppleDialogSPMIPMU`, `AppleARMRTC`,
+  `PMU-LPM` and `RTBuddy(SMC)` never print, `asc(SMC)` traffic is zero,
+  and `AppleSEPManager` wait messages repeat about three times per second
+  (911 in 300 s against 48 in TCG's 60 s). The user process the kernel
+  started spins at one library offset (`...db2c`) for the rest of the
+  run (`HVF_KC_BOOT35`, 36 monitor samples). The first divergence on
+  serial is AMFI asking the credential manager for developer-mode status
+  before `AppleSEPKeyStore` has started, where TCG takes the
+  "protected data is not available" branch; disabling AMFI with
+  `amfi_get_out_of_my_way=1` (`HVF_KC_BOOT36`, `--bootargs`) does not
+  change the outcome, so the ordering is a symptom. Next step: freeze a
+  native run with `probe.sh --keep` and use the RAM post-mortem thread
+  scan to see what every kernel thread is blocked on.
 - Timer delivery works: `HVF_KC_BOOT29` delivered 105,698 FIQs, 248 SVCs
   and 235 data aborts into the kernel's vectors in 150 s (gxfstat exception
   counters). IRQ from the AIC has not been exercised yet.
