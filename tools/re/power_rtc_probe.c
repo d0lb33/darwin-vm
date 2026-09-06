@@ -50,7 +50,7 @@ enum {
     kIOMainPortDefault = 0,
     kIONameSize = 128,
     kIOPathSize = 512,
-    kCFDescriptionSize = 4096,
+    kCFDescriptionSize = 65536,
 };
 
 struct APIs {
@@ -139,7 +139,7 @@ static void print_cf_description(const struct APIs *apis, const char *kind,
     }
 
     CFStringRef description = apis->cf_copy_description(value);
-    char buffer[kCFDescriptionSize];
+    static char buffer[kCFDescriptionSize];
     if (!description ||
         !apis->cf_string_get_cstring(description, buffer, sizeof(buffer),
                                      kCFStringEncodingUTF8)) {
