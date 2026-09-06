@@ -29,13 +29,14 @@ def main():
                     help='Negative control: remove initial native execute permission')
     ap.add_argument('--check-tables', type=Path,
                     help='Compare stopped guest table pages with a prior capture JSON')
+    ap.add_argument('--bootkc', type=Path, help='Adapted kernelcache (default firmware/bootkc)')
     ap.add_argument('--bridge-env', action='append', default=[],
                     help='KEY=VALUE bridge knob passed to QEMU (e.g. QEMU_HVF_VIRTUAL_QUIET=1)')
     ap.add_argument('--memory', action='append', default=[], metavar='PA:SIZE',
                     help='Capture up to 64 KiB of physical guest RAM per range')
     a = ap.parse_args()
-    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,60}', a.tag) or not 1 <= a.seconds <= 300:
-        ap.error('Use a simple tag of at most 60 characters and 1..300 seconds')
+    if not re.fullmatch(r'[A-Za-z0-9_.-]{1,60}', a.tag) or not 1 <= a.seconds <= 900:
+        ap.error('Use a simple tag of at most 60 characters and 1..900 seconds')
     out = Path('/tmp/dvm') / f'{a.tag}.virtual.json'
     out.parent.mkdir(parents=True, exist_ok=True)
     # Private monitor/PID names ensure cleanup cannot target a display guest
@@ -61,6 +62,7 @@ def main():
         env['QEMU_HVF_VIRTUAL_SHADOW_DENY_EXEC'] = '1'
     cmd = [str(ROOT / 'tools/probe.sh'), '--secs', str(a.seconds), '--tag', run_tag,
            '--pid-file', str(pid_file),
+           *(['--bootkc', str(a.bootkc.resolve())] if a.bootkc else []),
            '--dtree', str(a.dtree.resolve()), '--launch-manifest',
            f'/tmp/dvm/{a.tag}.launch.json', '--keep', '--', '-accel',
            'hvf,ipa-bits=40,kernel-irqchip=off', '-cpu', 'host',

@@ -97,7 +97,10 @@ def main():
         env = {k: v for k, v in os.environ.items()
                if not k.startswith(('QEMU_HVF_', 'DARWIN_', 'GXFSTAT_'))}
         env.update(QEMU_HVF_VIRTUAL_EL2='1', QEMU_HVF_VIRTUAL_SHADOW='1',
-                   QEMU_HVF_VIRTUAL_LEDGER=str(ledger.resolve()))
+                   QEMU_HVF_VIRTUAL_LEDGER=str(ledger.resolve()),
+                   # Denied accesses stop here rather than being delivered as
+                   # guest aborts; the matrix checks the walk's decision.
+                   QEMU_HVF_VIRTUAL_STOP_ON_FAULT='1')
         item = {'name': name, 'command': cmd, 'passed': False}
         remote = None
         with (a.out / f'{name}.stderr').open('w') as log:
@@ -249,7 +252,9 @@ def main():
                 elif name.startswith('pan-'):
                     guarded = [pan_set if name == 'pan-set' else pan_clear,
                                0xf9400062 if name == 'pan-clear-denied' else terminal]
-                    expected_pc = entry if name == 'pan-set' else entry + 4
+                    # PAN set is an ordinary PSTATE immediate now (mirrored to
+                    # the physical PSTATE); both forms complete.
+                    expected_pc = entry + 4
                 elif name in ('pmu-gl2', 'pmu-gl12', 'pmu-vhe'):
                     write_word = {'pmu-gl2': pmu2, 'pmu-gl12': pmu12, 'pmu-vhe': pmuvhe}[name]
                     read_other = pmu2_read4 if name == 'pmu-gl12' else pmu12_read4
@@ -261,6 +266,11 @@ def main():
                     expected_pc, expected_g = pc + 24, 0
                 elif name in ('pmu-invalid', 'pmu-enable'):
                     guarded = [pmu2 if name == 'pmu-invalid' else pmu_enable, terminal]
+                    if name == 'pmu-enable':
+                        # PMCR0 activation is stored (the kernel enables its
+                        # cycle counters); active PMC reads then follow the
+                        # virtual clock.
+                        expected_pc = entry + 4
                 elif name == 'pmu-frozen':
                     guarded = [pmu2, pmc0, pmc1, pmc0, pmc1, terminal]
                     expected_pc, x2 = entry + 20, 0
@@ -342,7 +352,9 @@ def main():
                 if name.startswith('pan-'):
                     assert bool(after['pstate'] & (1 << 22)) == (name == 'pan-set')
                 if name.startswith('pmu-'):
-                    assert after['PMCR0_EL1'] == 0
+                    # pmu-enable stores the activation (0x1); every other
+                    # case leaves the counters disabled.
+                    assert after['PMCR0_EL1'] == (1 if name == 'pmu-enable' else 0)
                     assert after['PMCR1_GL2'] == (0x3030000ffff00 if name in ('pmu-gl2', 'pmu-vhe', 'pmu-frozen') else 0)
                     # GDB redirects its GL1 name to GL2 in this VHE context.
                     # The actual lower-bank MRS above checks bank separation.
