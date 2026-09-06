@@ -119,6 +119,79 @@ python3 tools/perf/native_bridge_bench.py --out /tmp/dvm/UNIQUE_V3 \
 python3 tools/perf/native_ceiling_projection.py V3=/tmp/dvm/UNIQUE_V3
 ```
 
+## Steady-state profile: the migration window is not representative
+
+The projection above used the only trap-rate profile that existed, a
+first-boot APFS metadata window. `tools/perf/home_exception_profile.py`
+measures a rendered home screen instead. The gxfstat counters are compiled
+out under SMP and every home-screen checkpoint is six cores, so it enables
+QEMU's `CPU_LOG_INT` log at runtime through the monitor of a paused
+restore and counts exception entries, `gexit` and exception returns per
+window. `CEIL_HOME1` restored `NATIVE_HOME_UART_FIXED1` (pinned app
+binary `9d39357b…`) with `--leave-paused`; `CEIL_HOME_PROFILE1` ran a
+60 s idle window and a 60 s window with 41 QMP swipes
+(`/tmp/dvm/CEIL_HOME_PROFILE1/results.json`, 224 MB log). Only four of the
+six vCPUs took more than a handful of exceptions; rates below are per
+active vCPU.
+
+| Rate per active vCPU per host second | Migration (1 CPU) | Home idle | Home + swipes |
+| --- | ---: | ---: | ---: |
+| GENTER/GEXIT pairs | 12,402 | 495 | 731 |
+| Apple register ops (measured / estimated at 35.8 per pair) | 444,000 | ~17,700 | ~26,200 |
+| SVC from EL0 | n/a | 534 | 986 |
+| FIQ + IRQ (all levels) | n/a | 367 | 436 |
+| Data/prefetch aborts | n/a | 90 | 134 |
+| ERET (EL2→EL0 and EL2→EL2) | n/a | 995 | 1,561 |
+
+The guarded-pair rate is 17 to 25 times lower than in the migration
+window. Re-running the projection with these rates, charging every
+non-guarded exception entry and ERET at half a pair:
+
+| Variant | Window | Overhead | Integer | Pointer chase | Load/store |
+| --- | --- | ---: | ---: | ---: | ---: |
+| V2 QUIET+FASTREAD (real) | idle | 0.095x | 0.93 | 1.32 | 2.55 |
+| V2 QUIET+FASTREAD (real) | swipes | 0.145x | 0.89 | 1.27 | 2.44 |
+| V3 + alias reuse (design needed) | idle | 0.024x | 1.00 | 1.42 | 2.72 |
+| V3 + alias reuse (design needed) | swipes | 0.036x | 0.98 | 1.40 | 2.69 |
+
+Rewriting the hot reads in the kernel no longer matters (0.083x vs
+0.095x). The register-operation term is an estimate from the migration
+ratio, not a measurement, but at these pair rates even a 3x error in it
+moves the overhead by less than 0.2x.
+
+### Revised conclusion
+
+Two regimes, not one:
+
+- **Kernel-dominated phases** (boot, first-boot migration, app install):
+  the bridge is slower than TCG and cannot be made faster on this host.
+  The earlier conclusion stands for them.
+- **Steady state** (home screen, interactive use): the bridge's trap
+  overhead is 10 to 15% with the two optimisations that already exist, so
+  performance is set by the native-versus-TCG compute ratio of the
+  workload: parity on integer code, 1.3x on pointer chasing, 2.5x on
+  load/store, and up to the measured 3.5x on SIMD. Without a GPU the
+  guest composites through CoreAnimation's software rasteriser
+  ([ca-software-path.md](ca-software-path.md)), which is exactly the
+  load/store and SIMD mix where native execution wins.
+
+So the kernel phase is worth costing again, with a different success
+criterion: the boot may take longer than TCG, and the payoff is measured
+after SpringBoard. What the steady-state profile does not cover: multicore
+scaling of the bridge (single vCPU today), interrupt delivery cost, and
+a real game's mix, which needs the app-launch path that is still open on
+TCG.
+
+Reproduce:
+
+```sh
+python3 tools/restore_checkpoint.py --tag UNIQUE --leave-paused --display none \
+  --out /tmp/dvm/UNIQUE.restore /tmp/dvm/checkpoints/NATIVE_HOME_UART_FIXED1/manifest.json
+python3 tools/perf/home_exception_profile.py --monitor /tmp/dvm/UNIQUE.restore.sock \
+  --qmp /tmp/dvm/UNIQUE.restore.qmp.sock --out /tmp/dvm/UNIQUE_PROFILE --seconds 60 --activity
+python3 tools/hmp.py /tmp/dvm/UNIQUE.restore.sock quit
+```
+
 ## Regressions on this binary
 
 Executable SHA-256 `67f6091364b21cf4…` (same as the sweep):
