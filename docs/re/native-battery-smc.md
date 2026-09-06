@@ -173,7 +173,8 @@ Unknown keys are logged once per access and refused with 0x84; a
 | BATT_SYS1 | disk boot 480 s | original powerd publishes `InternalBattery-0`, Is Present 1, AC Power, charging; Current Capacity 1 / Max 0 (B0UC/B0CM absent); lock screen drawn; checkpoint BATT_NATIVE_LOCKSCREEN1 |
 | BATT_SYS2/3 | disk boot, probe | AppleSmartBatteryPack BatteryData 80 % / 2720 / 3400 / 4120 mV; power source CurrentCapacity 0, MaxCapacity 0 |
 | BATT_SYS4 | disk boot, probe | with B0UC/B0CM: IOPS Current Capacity 80, Max Capacity 100; registry CurrentCapacity 80, MaxCapacity 100, IsCharging 1 |
-| BATT_SYS5 | disk boot 600 s | runtime change through `qom-set /machine/smc-battery`; see "Runtime changes" |
+| BATT_SYS5 | disk boot 600 s | lock screen with the native green charging icon at 80 % (frame-0240); after `qom-set external=false, soc=35` the status bar showed a white 35 % battery (frame-0420); 0 panics, no critical-process reboot; checkpoint BATT_NATIVE_LOCKSCREEN2 |
+| BATT_RESTORE1 | checkpoint restore, 240 s + | restored at 35 % unplugged (before.png), clock continued; after `qom-set external=true, soc=60` the driver read the pack keys within 4 s (`smc: READ BRSC -> 3c`) and SpringBoard raised its native "Charging 60%" banner (after.png) |
 
 ## What the power source publishes (BATT_SYS4, `power-rtc-probe` registry dump)
 
@@ -208,7 +209,27 @@ subtypes 1, 3, 6 and 0xb (0xfffffff0096b84f4-0xfffffff0096b8550).
 The model exposes `/machine/smc-battery` (QOM object, properties `soc`,
 `external`, `charging`).  `tools/qmp.py <run>/qmp.sock qom-set
 path=/machine/smc-battery property=external value=false` rewrites the keys
-and raises a Power State notification with subtype 1.
+and raises a Power State notification with subtype 1, the same
+`0x7101xxxx` "charger status change" event Linux's macsmc-power.c reacts
+to.  AppleSmartBattery also polls the command-table keys about every 3 s
+on its own (110 `B0CM` reads in 300 s, BATT_RESTORE1 with
+`DARWIN_SMC_DEBUG=1`), so a state change reaches powerd within seconds
+either way; the "Charging" banner on charger attach is the notification's
+own visible effect.
+
+## Still unsupported
+
+- Keys the pack enumerates and we do not model (`b??0`, `BL??`, `BR??`,
+  `bl?0`, `btq0`, `BFS0`, `UPOR`, `UB0T`, `BFUE`, `BDBI`, ...) answer 0x84;
+  the pack treats them as absent.  `BMDT` is read as an integer; the value
+  encoding is not yet derived.
+- Wireless charging (`WA??`/`WB??`, AppleSMCWirelessCharger), adapter
+  details (`D2??`, AppleChargerData), battery authentication, gas-gauge
+  firmware update and the `RW_KEY` command are not modelled.
+- Temperature: `B0AT` is served but the top-level `Temperature` property was
+  not published by the driver in BATT_SYS4; the pack's temperature keys
+  (`TG0B`/`TG0V`/`TG0A`) are absent.
+- No SMC notification is raised for anything but the modelled battery state.
 
 ## Candidate
 
