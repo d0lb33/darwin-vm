@@ -111,7 +111,9 @@ published as a property (entries carrying an OSSymbol at +0x18,
 | --- | --- | --- | --- |
 | 0x09 | B0AV | int | voltage (per-object symbol); Linux macsmc-power: mV u16 |
 | 0x0a | B0AC | int | `InstantAmperage` property, cached at +0x16c (0xfffffff0096b5c44-0xfffffff0096b5c94); s16 mA |
-| 0x0b / 0x0f / 0x10 | B0IV / B0UC / B0CM | int | logged only (0xfffffff0096b5cdc) |
+| 0x0b | B0IV | int | logged only (0xfffffff0096b5cdc) |
+| 0x0f | B0UC | int | **IOPMPowerSource setCurrentCapacity** (0xfffffff0096b60b4, unless the user-client override flag at +0x152 is set) |
+| 0x10 | B0CM | int | **IOPMPowerSource setMaxCapacity** (0xfffffff0096b60c4) |
 | 0x23 / 0x76 | BMDA / BMSN | OSData | `ManufacturerData` / serial data |
 | 0x100 | CHCE | bool | external-connected setter (0xfffffff0096b5bf0-0xfffffff0096b5c1c) |
 | 0x200 / 0x400 | CHCC / BCF0 | bool | charge-capable / critical flags (0xfffffff0096b5d44-) |
@@ -166,7 +168,47 @@ Unknown keys are logged once per access and refused with 0x84; a
 | BATT_SMC3 | restore probe | key cache ok, NTAP written, AppleSMCPMU/Charger/PowerOut start; 47 keys unknown |
 | BATT_SMC4 | restore probe | BPCC present: AppleSmartBatteryPack ID 0 created, reads refused on size |
 | BATT_SMC5/6 | restore probe | every pack read served; command-table keys polled repeatedly |
-| BATT_BP1 | disk boots | see "Candidate" below |
+| BATT_BP1 | profile disk boots | storage pass, no frame in 240 s (identical to the plain patched profile run BP_PATCHED3 on the same seeded parent; not battery-related) |
+| BATT_NB1 | guarded install | original powerd restored, publisher removed, on top of the working CLOCK_SOFTWARE_INSTALL1 disk |
+| BATT_SYS1 | disk boot 480 s | original powerd publishes `InternalBattery-0`, Is Present 1, AC Power, charging; Current Capacity 1 / Max 0 (B0UC/B0CM absent); lock screen drawn; checkpoint BATT_NATIVE_LOCKSCREEN1 |
+| BATT_SYS2/3 | disk boot, probe | AppleSmartBatteryPack BatteryData 80 % / 2720 / 3400 / 4120 mV; power source CurrentCapacity 0, MaxCapacity 0 |
+| BATT_SYS4 | disk boot, probe | with B0UC/B0CM: IOPS Current Capacity 80, Max Capacity 100; registry CurrentCapacity 80, MaxCapacity 100, IsCharging 1 |
+| BATT_SYS5 | disk boot 600 s | runtime change through `qom-set /machine/smc-battery`; see "Runtime changes" |
+
+## What the power source publishes (BATT_SYS4, `power-rtc-probe` registry dump)
+
+Top level of `AppleSmartBattery`: BatteryInstalled 1, CurrentCapacity 80,
+MaxCapacity 100, IsCharging 1, ExternalConnected 1, ExternalChargeCapable 1,
+FullyCharged 0, Voltage 4120, InstantAmperage 480, CycleCount 12,
+BootVoltage 4120, AppleRawBatteryVoltage 5000, AppleRawExternalConnected 1,
+AvgTimeToEmpty 65535, TimeRemaining 0, Serial DVMBATT000000001, plus the
+pack's BatteryData {CurrentCapacity 80, DesignCapacity 3561,
+FullChargeCapacity 3400, RemainingCapacity 2720, FullyCharged 0}.
+powerd's IOPS description of it: Is Present 1, Current Capacity 80, Max
+Capacity 100, Is Charging 1, Power Source State "AC Power", Raw External
+Connected 1, Time to Full Charge -1.
+
+The pack derives its BatteryData from BRSC (StateOfCharge), BUIC
+(CurrentCapacity), B0RM (AppleRawCurrentCapacity), B0FC
+(AppleRawMaxCapacity), B0DC (DesignCapacity), B0CT, B0AV, B0AC, BSFC, BMSN
+and BMDT (read as a little-endian integer: 859058229 for the bytes "3405",
+so BMDT is numeric on this build and still needs a real encoding).
+
+## Notifications and runtime changes
+
+AppleSMC turns a type-0x18 endpoint message into a category from byte 7
+(0x70 System State, 0x71 Power State, 0x72 HID Event, 0x73 Battery Auth,
+0x74 GG Firmware Update, 0x76 Thermal Event; labels
+0xfffffff007728510-0xfffffff007728558, switch 0xfffffff0095c9eec-
+0xfffffff0095c9fdc) and three argument bytes 6, 5, 4 published to the
+callbacks registered for that category (0xfffffff0095ca244-
+0xfffffff0095ca2f4).  AppleSmartBattery's callback re-polls the battery for
+subtypes 1, 3, 6 and 0xb (0xfffffff0096b84f4-0xfffffff0096b8550).
+
+The model exposes `/machine/smc-battery` (QOM object, properties `soc`,
+`external`, `charging`).  `tools/qmp.py <run>/qmp.sock qom-set
+path=/machine/smc-battery property=external value=false` rewrites the keys
+and raises a Power State notification with subtype 1.
 
 ## Candidate
 
@@ -175,3 +217,25 @@ the patched profile's display allocation, Settings scale, clock fallback,
 input helper and six-CPU adapter, but installs the **original powerd** and
 **no `power-pv-service`**; the SMC model is the only internal power source.
 Host test: `tools/tests/test_bootstrap_profile.py`.
+
+Because the profile pipeline's fresh-seeded parent does not draw a frame
+within its boot bound for the plain patched profile either (BP_PATCHED3),
+the validated candidate was built on the working
+`CLOCK_SOFTWARE_INSTALL1` chain instead with
+`tools/rootfs/prepare_native_battery_candidate.py`: a guarded
+restore-ramdisk installer that checks the guarded powerd and the launchd
+cache preimages, restores `powerd.original`, rewrites the cache without the
+`com.apple.dvm-power-pv-service` job and removes the job's plist and
+binary (`/tmp/dvm/BATT_NB1`, marker `DVM_NATIVE_BATTERY_INSTALLED`).
+
+Launch configuration (manifest `/tmp/dvm/BATT1/warm-manifest-nb5.json`,
+run with `tools/warm_boot_probe.py`):
+
+- QEMU from this worktree (`darwin_smc.c` present), `-smp 6`,
+  `DARWIN_SMP_PV=1` with the SMP kernelcache `DISPLAY_SMP6.bootkc`;
+- device tree `dt_fixup.py /tmp/dvm/dtree_raw ... -enable ans -enable smc
+  -enable sep -enable dcp -enable spmi -dram 12G -development-activation`;
+- trust cache `CLOCK_SOFTWARE_PATCH1/system.tc` (the original powerd is a
+  stock binary already in it) plus the probe's CDHash;
+- `DARWIN_RTC_PV=0`, the display environment of the patched profile, no
+  `DARWIN_SMC_*` variable (defaults: 80 %, charger attached, charging).
