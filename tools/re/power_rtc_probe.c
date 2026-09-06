@@ -13,7 +13,9 @@
  *   - the exact DeviceTree provider path for charger,passthrough;
  *   - name-matched provider entries; and
  *   - class-matched AppleARMPassthroughPowerSource and AppleARMPMUPowerSource
- *     entries, including their public IORegistry property dictionaries.
+ *     entries, including their public IORegistry property dictionaries;
+ *   - class-matched AppleSmartBattery / AppleSmartBatteryPack /
+ *     AppleSmartBatteryManager entries (the SMC-backed battery chain).
  *
  * No ExternalConnected property is supplied or inferred. The accompanying DT
  * experiment therefore tests native matching before an ADT-to-OSBoolean
@@ -48,7 +50,7 @@ enum {
     kIOMainPortDefault = 0,
     kIONameSize = 128,
     kIOPathSize = 512,
-    kCFDescriptionSize = 4096,
+    kCFDescriptionSize = 65536,
 };
 
 struct APIs {
@@ -137,7 +139,7 @@ static void print_cf_description(const struct APIs *apis, const char *kind,
     }
 
     CFStringRef description = apis->cf_copy_description(value);
-    char buffer[kCFDescriptionSize];
+    static char buffer[kCFDescriptionSize];
     if (!description ||
         !apis->cf_string_get_cstring(description, buffer, sizeof(buffer),
                                      kCFStringEncodingUTF8)) {
@@ -301,6 +303,14 @@ int main(void) {
                     apis.service_matching("AppleARMPassthroughPowerSource"));
     report_matching(&apis, "class:AppleARMPMUPowerSource",
                     apis.service_matching("AppleARMPMUPowerSource"));
+    /* The SMC-backed battery chain (docs/re/native-battery-smc.md): the
+     * IOPMPowerSource subclass powerd reads, its pack, and the manager. */
+    report_matching(&apis, "class:AppleSmartBattery",
+                    apis.service_matching("AppleSmartBattery"));
+    report_matching(&apis, "class:AppleSmartBatteryPack",
+                    apis.service_matching("AppleSmartBatteryPack"));
+    report_matching(&apis, "class:AppleSmartBatteryManager",
+                    apis.service_matching("AppleSmartBatteryManager"));
     sleep(1);
     report_time();
     fprintf(stderr, "POWER_RTC_PROBE_END\n");

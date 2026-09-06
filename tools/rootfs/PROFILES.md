@@ -4,6 +4,12 @@ Use `rebuild_persistent_parent.sh --profile native|patched` for the explicit
 profile pipeline. The legacy positional `rebuild_persistent_parent.sh RUN_DIR`
 remains the storage-only recovery command; it does not install runtime fixes.
 
+`--profile patched-native-battery` is the patched profile without the
+powerd null guard and without the virtual battery publisher: the emulated
+SMC battery (`qemu-sptm/hw/arm/darwin_smc.c`, `-enable smc`) is the only
+internal power source and the original powerd consumes it. See
+`docs/re/native-battery-smc.md`.
+
 | Configuration | Native | Patched |
 |---|---|---|
 | Existing project boot firmware adaptations, Data seeding, ANS/SEP/SMC | Yes | Yes |
