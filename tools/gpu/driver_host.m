@@ -550,6 +550,12 @@ int main(void) {
         fprintf(stderr, "DVM_DRIVER_HOST device=%s os=%s\n", host.device.name.UTF8String,
                 NSProcessInfo.processInfo.operatingSystemVersionString.UTF8String);
         fflush(stderr);
+        // Bootstrap is outside the guest command sequence. Publish readiness
+        // only after an actual Metal device and command queue exist.
+        if (getenv("DVM_DRIVER_BOOTSTRAP") &&
+            !Reply(@{@"bootstrap":@1, @"protocol":@"DVM-METAL-DRIVER-v1",
+                     @"device":host.device.name, @"queue":@YES}))
+            return 4;
         for (;;) {
             @autoreleasepool {
                 uint32_t little;

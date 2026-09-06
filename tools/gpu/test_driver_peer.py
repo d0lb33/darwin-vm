@@ -30,7 +30,7 @@ class ReadinessTests(unittest.TestCase):
             try:
                 (p.out/'stderr.log').write_text('iomfb: presented 1179x2556\n')
                 def gate(t,pid,acks):
-                    (p.out/'input-status.json').write_text(json.dumps(dict(guest_state='R',guest_pid=pid,guest_epoch=pid,acked=acks)))
+                    (p.out/'input-status.json').write_text(json.dumps(dict(guest_state='R',guest_pid=pid,guest_epoch=pid,acked=acks,presents=1)))
                     with patch('driver_peer.time.monotonic',return_value=t):p.gate()
                 gate(0,69,10);gate(20,69,10)
                 self.assertFalse(p.released) # R with no new ACK is insufficient.

@@ -7,6 +7,8 @@ from pathlib import Path
 import struct
 import subprocess
 import unittest
+import tempfile
+from driver_peer import DriverPeer
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = Path(os.environ.get('DVM_DRIVER_BUILD', '/tmp/dvm/METAL_DRIVER_BUILD1'))
@@ -92,6 +94,26 @@ class HostTests(unittest.TestCase):
         self.assertEqual(live['resourceBytes'],16)
 
 class DriverTests(unittest.TestCase):
+    def test_host_bootstrap_precedes_guest_and_preserves_first_sequence(self):
+        with tempfile.TemporaryDirectory() as root:
+            peer=DriverPeer(Path(root),BUILD/'driver_host',AIR,boot=True)
+            try:
+                self.assertEqual(os.pread(peer.fd,4,96),struct.pack('<I',1))
+                self.assertFalse((Path(root)/'input-status.json').exists())
+                self.assertFalse((Path(root)/'stderr.log').exists())
+                bootstrap=json.loads((Path(root)/'driver-readiness.json').read_text())
+                self.assertTrue(bootstrap['bootstrap']['queue'])
+                raw=json.dumps(dict(seq=1,op='stats')).encode()
+                peer.proc.stdin.write(struct.pack('<I',len(raw))+raw);peer.proc.stdin.flush()
+                length,=struct.unpack('<I',peer.read(4));reply=json.loads(peer.read(length))
+                self.assertTrue(reply['ok']);self.assertEqual(reply['seq'],1)
+                self.assertEqual(reply['submissions'],0)
+            finally:peer.close()
+    def test_failed_host_cannot_publish_boot_ready(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(RuntimeError):DriverPeer(Path(root),Path('/usr/bin/false'),AIR,boot=True)
+            self.assertEqual((Path(root)/'aux.raw').read_bytes()[96:100],bytes(4))
+            self.assertFalse((Path(root)/'driver-readiness.json').exists())
     def test_failure_and_ownership_contract(self):
         result=subprocess.run([str(BUILD/'driver_contract_test')],capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)

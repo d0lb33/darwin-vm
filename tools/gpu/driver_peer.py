@@ -26,7 +26,7 @@ def packet_fields(packet, identity):
     return seq,length,crc
 
 class DriverPeer:
-    def __init__(self,out,worker,library):
+    def __init__(self,out,worker,library,boot=False):
         self.out=Path(out);self.started=time.monotonic();self.records=[];self.seen=set()
         self.header=(b'DVM-METAL-DRIVER-v1\0'+os.urandom(32)).ljust(64,b'\0')
         self.last_packet=None;self.ready_since=None;self.ready_identity=None;self.ready_acks=0;self.released=False;self.released_at=None;self.buffer=b''
@@ -36,9 +36,22 @@ class DriverPeer:
         self.fd=os.open(self.out/'aux.raw',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
         os.ftruncate(self.fd,64*1024*1024);os.pwrite(self.fd,self.header+bytes.fromhex(AIR_SHA),0)
         self.log=(self.out/'driver-worker.log').open('xb')
-        self.proc=subprocess.Popen([str(self.worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,
-            env={**os.environ,'DVM_DRIVER_LIBRARY':str(self.library)})
+        env={k:v for k,v in os.environ.items() if k!='DVM_DRIVER_BOOTSTRAP'}
+        env['DVM_DRIVER_LIBRARY']=str(self.library)
+        if boot:env['DVM_DRIVER_BOOTSTRAP']='1'
+        self.proc=subprocess.Popen([str(self.worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,env=env)
         (self.out/'driver-inputs.json').write_text(json.dumps(dict(worker=str(self.worker),worker_sha256=hashlib.sha256(self.worker.read_bytes()).hexdigest(),library=str(self.library),air_sha256=AIR_SHA),indent=2)+'\n')
+        if boot:
+            try:
+                length,=struct.unpack('<I',self.read(4))
+                if not 0<length<=4096:raise ValueError('invalid host bootstrap length')
+                bootstrap=json.loads(self.read(length))
+                if bootstrap.get('bootstrap')!=1 or bootstrap.get('protocol')!='DVM-METAL-DRIVER-v1' or bootstrap.get('queue') is not True or not bootstrap.get('device'):
+                    raise ValueError('host Metal bootstrap did not verify')
+                self.release(dict(scope='host-metal-device-and-queue-before-guest-boot',bootstrap=bootstrap))
+            except BaseException:
+                self.close()
+                raise
     def read(self,n):
         until=time.monotonic()+15
         while len(self.buffer)<n:
@@ -48,19 +61,29 @@ class DriverPeer:
             if not data:raise RuntimeError('driver host worker EOF')
             self.buffer+=data
         out,self.buffer=self.buffer[:n],self.buffer[n:];return out
-    def gate(self):
-        if self.released:return
+    def release(self,evidence):
+        if os.pwrite(self.fd,struct.pack('<I',1),96)!=4:raise OSError('short readiness publication')
+        self.released=True;self.released_at=time.monotonic()
+        evidence['elapsed']=self.released_at-self.started
+        (self.out/'driver-readiness.json').write_text(json.dumps(evidence,indent=2)+'\n')
+    def observe_display(self):
         try:status=json.loads((self.out/'input-status.json').read_text())
         except (OSError,ValueError):status={}
-        presents=(self.out/'stderr.log').read_text(errors='replace').count('iomfb: presented ')
+        # This counter is published by the existing QEMU scanout path. Avoid
+        # rescanning the entire growing device log on every mailbox poll.
+        presents=status.get('presents',0)
         if presents and status.get('guest_state')=='R':
             identity=(status.get('guest_pid'),status.get('guest_epoch'))
             if self.ready_since is None or identity!=self.ready_identity:
                 self.ready_since=time.monotonic();self.ready_identity=identity;self.ready_acks=status.get('acked',0)
             if time.monotonic()-self.ready_since>=10 and status.get('acked',0)>self.ready_acks:
-                os.pwrite(self.fd,struct.pack('<I',1),96);self.released=True;self.released_at=time.monotonic()
-                (self.out/'driver-readiness.json').write_text(json.dumps(dict(elapsed=time.monotonic()-self.started,presents=presents,input_status=status,stable_seconds=10,fresh_ack=True,scope='native-presentation-and-helper-ready-not-home-or-gesture'),indent=2)+'\n')
+                return dict(elapsed=time.monotonic()-self.started,presents=presents,input_status=status,stable_seconds=10,fresh_ack=True,scope='native-presentation-and-helper-ready-not-home-or-gesture')
         else:self.ready_since=None
+        return None
+    def gate(self):
+        if self.released:return
+        observed=self.observe_display()
+        if observed:self.release(observed)
     def pump(self):
         self.gate()
         packet=os.pread(self.fd,PAGE,0x10000);fields=packet_fields(packet,self.header)

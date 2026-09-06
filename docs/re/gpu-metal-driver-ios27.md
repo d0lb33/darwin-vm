@@ -6,11 +6,13 @@ public Metal selectors and structures. It is **not yet a system-discovered
 Metal driver**, and SpringBoard, QuartzCore and Liquid Glass do not use it.
 The retained software UI renderer is still the normal display path.
 
-Latest result: native SMC and original powerd are integrated on the retained
-lineage. BUILD18's batched compute path passed two consecutive fresh-disk boots
-with launchd activation after boot (SMC_LATE1/LATE2), eight verified submissions
-each. End-to-end medians were 11.452 and 11.535 ms. Early-boot polling remains
-unreliable; global driver discovery and Liquid Glass acceleration are unfinished.
+Latest result: native SMC and original powerd remain integrated on the retained
+lineage. Boot-time initialization now depends on a host Metal bootstrap handshake,
+not guest display readiness. The runner checks native display/input separately
+after the GPU workload. See “Boot-time startup dependency” below for cold-boot
+validation. Global Metal discovery and Liquid Glass acceleration remain unfinished.
+Historical commands that used the former display gate now need
+`--driver-wait-display`; `--driver-late-launch` already implies that legacy mode.
 
 ## Baseline and isolation
 
@@ -527,3 +529,81 @@ libraries and executables remain outside the archive; the large DIAG2 ANS log
 is represented by its full SHA-256, exact stage counts and final trace records
 in failure-analysis.json. Both owned late-test VMs were shut down. The original
 migrated baseline and unrelated VMs were not modified.
+
+
+## Boot-time startup dependency
+
+The default driver runner previously held the ready word at zero until native
+presentation and HID readiness. The guest helper then performed repeated
+synchronous namespace reads before it loaded the bundle or created its device.
+That dependency belonged to the benchmark harness, not Metal. A future system
+device must be available to its UI consumers before those consumers render.
+The earlier long-wait failures do not establish that a custom device cannot
+initialize during boot.
+
+The host worker now has an optional versioned bootstrap frame, emitted only
+**after** MTLCreateSystemDefaultDevice and newCommandQueue succeed. The boot
+peer requires that frame before publishing the ready word and starting QEMU.
+Bootstrap does not consume a guest command sequence; the first guest RPC is
+still sequence one. Missing/failed bootstrap fails before guest launch and
+cannot publish ready. The exact guest shader identity and output verification
+remain mandatory.
+
+`run_guest_load.py --driver-worker ...` now uses that host-ready startup by
+default. The guest remains the existing RunAtLoad helper on INSTALL10, without
+StartInterval, RAM restore, debugger, new kernel patch, or register/memory writes.
+BUILD19's guest executable and bundle are **byte-identical** to BUILD18; only
+the host worker changed. Original SMC/powerd, SPTM/TXM, retained migrated disk
+chain and input/display jobs are unchanged. No guest reinstall was needed.
+
+The runner independently requires native presentation and ten seconds of stable
+input identity with fresh acknowledgements after the GPU run and clean child
+exit. It observes the existing input-status presentation counter instead of
+reading the entire growing QEMU stderr file on every mailbox poll. The counter
+comes from `darwin_fb_scanout` → `darwin_input_presented` in hw/arm/darwin_fb.c
+and hw/arm/darwin_input.c. This removes unnecessary host work; there is no
+controlled measurement attributing the historical stalls to log scanning.
+
+Success conditions: two independent fresh-disk boots, eight exact two-pass
+submissions each, zero live host objects, child exit zero, observed zero native
+presentations at GPU completion, then native display/input readiness. Failure
+bounds are host bootstrap reads of 15 seconds, guest startup acknowledgement
+within 60 seconds, 60 seconds without GPU progress, and 180 seconds total.
+These boot-loaded trials measure availability and correctness under boot load;
+they must not replace the post-boot latency comparison.
+
+Reproduction (new output tags/directories required):
+
+```sh
+bash tools/gpu/build_driver.sh /tmp/dvm/METAL_DRIVER_BUILD19
+DVM_DRIVER_BUILD=/tmp/dvm/METAL_DRIVER_BUILD19 python3 -m unittest discover -s tools/gpu -p 'test_driver_*.py' -v
+python3 tools/gpu/run_guest_load.py /tmp/dvm/METAL_DRIVER_INSTALL10/warm-manifest.json --tag METAL_DRIVER_BOOT1 --seconds 180 --driver-worker /tmp/dvm/METAL_DRIVER_BUILD19/driver_host --library-cache /tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib --aux-poll-ms 1
+```
+
+BOOT1 passed: helper READY at 14.497 s, bundle loaded at 15.491 s, device created
+at 15.493 s, all eight GPU runs complete at 16.825 s, clean child exit at 16.919 s.
+The captured display status at GPU completion had presents=0 and input state I.
+Native display and stable fresh input acknowledgements passed at 108.454 s. The
+final image was inspected and shows the working software lockscreen with native
+charging. It is not a GPU-rendered lockscreen.
+
+This fixes boot availability for the current explicitly loaded frontend by
+removing its inappropriate display prerequisite. It does not diagnose a general
+kernel timer/scheduler fault, prove indefinite idle-session liveness, or implement
+system device discovery. Completion polling and the narrow compute subset remain;
+the future command transport still needs event-driven completion and reset rules.
+
+
+BOOT2 repeated the same configuration successfully: helper READY at
+14.166 s, eight exact GPU submissions complete at
+16.031 s with presents=0, then native display/input
+verification at 108.396 s. Both trials used
+ordinary RunAtLoad on INSTALL10 and shut down their owned VM afterward.
+The original backing chain was re-hashed and verified. All 79 project tests
+and 13 driver tests passed; the runner also rejected an explicitly delayed
+parent before creating any VM artifacts. Python compilation, shell syntax and
+diff checks passed. No QEMU source or guest binary changed in this fix.
+
+Durable reproduction records, including exact source/binary hashes, raw logs,
+output oracles and images:
+`/Users/jdolbe1/dvm-artifacts/research/gpu-metal-driver-boot-start-20260906/`.
