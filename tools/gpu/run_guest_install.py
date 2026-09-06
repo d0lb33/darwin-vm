@@ -39,7 +39,9 @@ def main():
         '-b', m['disk']['path'], str(disk)], check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DARWIN_', 'GXFSTAT_', 'DVM_'))}
     env.update(m['qemu_env'])
-    env.update(DVM_QEMU=m['qemu_argv'][0], DARWIN_TOUCH_EVENTS=str(out/'events.jsonl'))
+    # The restore shell owns its console; native HID pings belong to system boots.
+    env.update(DVM_QEMU=m['qemu_argv'][0], DARWIN_INPUT_UART='0',
+        DARWIN_TOUCH_EVENTS=str(out/'events.jsonl'))
     serial, uart, stop = out/f'{a.tag}.serial.log', out/'uart.sock', out/'stop'
     argv = ['bash', str(repo/'tools/probe.sh'), '--tag', a.tag, '--out', str(out),
         '--dtree', m['qemu_argv'][m['qemu_argv'].index('-dtree')+1],

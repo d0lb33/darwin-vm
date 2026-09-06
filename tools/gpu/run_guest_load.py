@@ -26,6 +26,7 @@ from verify_roundtrip import verify as verify_roundtrip
 from aux_probe import AuxProbe
 from aux_namespace_dt import properties, EXPECTED
 from aux_ready import AuxReady
+from surface_peer import SurfacePeer
 
 
 def main():
@@ -53,7 +54,15 @@ def main():
     p.add_argument('--reliable', action='store_true')
     p.add_argument('--library-cache',type=Path)
     p.add_argument('--faults',action='store_true',help='reliable mode: inject one corrupt response and drop two ACKs')
+    p.add_argument('--surface-worker',type=Path,help='real Metal peer for the guest IOSurface demo')
+    p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.surface_observe_display and not a.surface_worker:
+        p.error('surface display observation requires --surface-worker')
+    if a.surface_worker:
+        if not a.library_cache or a.worker or a.aux_probe or a.aux_latency or a.aux_header_only or a.aux_post_boot or a.keep_paused:
+            p.error('surface worker requires library cache, automatic teardown, and no other workload')
+        a.aux_namespace=True
     if a.aux_header_only:
         if a.seconds!=120 or a.aux_latency or a.aux_post_boot or a.aux_probe or a.worker or a.keep_paused or a.aux_wait_input:
             p.error('header-only requires --seconds120 and no other probe modes or keep-paused')
@@ -66,7 +75,7 @@ def main():
         expected_seconds=a.aux_readiness_seconds+60 if a.aux_post_boot else 180
         if a.seconds != expected_seconds or a.aux_wait_input or a.keep_paused:
             p.error(f'latency mode requires --seconds {expected_seconds}, no input wait, and automatic teardown')
-    if a.aux_poll_ms != 5 and not a.aux_probe:
+    if a.aux_poll_ms != 5 and not (a.aux_probe or a.surface_worker):
         p.error('--aux-poll-ms requires --aux-probe')
     if a.aux_probe:
         a.aux_namespace = True
@@ -101,6 +110,10 @@ def main():
     for name in ('run_guest_load.py','aux_probe.py','aux_namespace_dt.py','aux_ready.py'):
         shutil.copyfile(Path(__file__).with_name(name),out/name)
     aux_peer = AuxProbe(out, latency=a.aux_latency,post_boot=a.aux_post_boot,readiness_seconds=a.aux_readiness_seconds) if (a.aux_probe or a.aux_header_only) else None
+    if a.surface_worker:
+        aux_peer=SurfacePeer(out,a.surface_worker,a.library_cache)
+        for name in ('surface_peer.py','guest_surface_demo.m'):
+            shutil.copyfile(Path(__file__).with_name(name),out/name)
     shutil.copyfile(a.manifest,out/'source-manifest.json')
     if a.aux_namespace and not aux_peer:
         with (out/'aux.raw').open('xb') as f:
@@ -135,6 +148,8 @@ def main():
         model['DARWIN_ANS_AUX_DRIVE'] = 'gpu_aux'
     if a.aux_header_only:model['DARWIN_ANS_AUX_TRACE']='1'
     model['DARWIN_TOUCH_EVENTS'] = str(out/'events.jsonl')
+    if a.surface_worker:
+        model['DARWIN_INPUT_STATUS']=str(out/'input-status.json')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DARWIN_', 'DVM_', 'GXFSTAT_'))}
     env.update(model)
     atomic_json(out/'launch.json', dict(format='darwin-vm-qemu-launch-v1', argv=argv, env=model))
@@ -170,6 +185,9 @@ def main():
         input_ack = False
         input_ready_ping_sent = False
         inventory_starts = 0
+        surface_ack_baseline=None
+        surface_ack_evidence=None
+        surface_present_baseline=0
         with (out/'wire.log').open('wb') as log:
             while time.monotonic()-started < a.seconds and proc.poll() is None:
                 if a.aux_header_only and time.monotonic()-header_progress>=30:
@@ -179,12 +197,22 @@ def main():
                     ready.tick(wire,now)
                     if ready.released_at is not None and not aux_peer.seen and now-ready.released_at>15:
                         raise TimeoutError('no latency request within 15 seconds of readiness release')
+                if a.surface_observe_display and aux_complete:
+                    try:
+                        status=json.loads((out/'input-status.json').read_text())
+                    except (OSError,ValueError):
+                        status={}
+                    presents=(out/'stderr.log').read_text(errors='replace').count('iomfb: presented ')
+                    if surface_ack_evidence and status.get('guest_state')=='R' and presents>surface_present_baseline:
+                        report['native_observation']=dict(input_status=status,presentation_observed=True,presents_before=surface_present_baseline,presents_after=presents,ping_ack=surface_ack_evidence,seconds=time.monotonic()-started,scope='native-display-and-helper-ping-not-demo-presentation')
+                        reason='guest load probe completed'
+                        break
                 if aux_peer:
                     aux_peer.pump()
                     if a.aux_latency and aux_peer.seen and len(aux_peer.seen)<64 and \
                             time.monotonic_ns()-aux_peer.last_response_ns > 10_000_000_000:
                         raise TimeoutError('latency batch made no host-visible progress for 10 seconds')
-                    if not a.aux_latency and 9 in aux_peer.seen and not input_ping_sent:
+                    if not a.surface_worker and not a.aux_latency and 9 in aux_peer.seen and not input_ping_sent:
                         # S is the existing input protocol's no-event sync.
                         # Check it during the deliberate auxiliary timeout;
                         # no touch/button event is sent to the guest UI.
@@ -206,6 +234,10 @@ def main():
                 lines = (pending+chunk).split(b'\n'); pending = lines.pop()[-65536:]
                 for raw in lines:
                     line = raw.decode(errors='replace').strip()
+                    if a.surface_observe_display and aux_complete and surface_ack_baseline:
+                        ack=re.search(r'DVMI2A (\d+) (\d+) Q R ',line)
+                        if ack and int(ack[1])==surface_ack_baseline['epoch'] and int(ack[2])>=surface_ack_baseline['next_seq']:
+                            surface_ack_evidence=dict(epoch=int(ack[1]),sequence=int(ack[2]),seconds=time.monotonic()-started)
                     if a.aux_header_only and 'GPU_LOAD_' in line and 'GPU_LOAD_AUX_ALIVE' not in line:
                         header_progress=time.monotonic()
                     if ready:ready.feed(line,wire,time.monotonic()-started)
@@ -217,7 +249,7 @@ def main():
                             raise RuntimeError('latency helper restarted')
                     if bridge:
                         bridge.line(line)
-                    if any(x in line for x in ('GPU_LOAD_', 'GPU_BUNDLE_', 'DVMGPU_READY', 'DVMGPU_READER_STOPPED', 'DVMGPU_DONE', 'HARNESS_', 'DVM_INPUT_', 'panic(cpu')):
+                    if any(x in line for x in ('GPU_LOAD_', 'GPU_BUNDLE_', 'DVMGPU_READY', 'DVMGPU_READER_STOPPED', 'DVMGPU_DONE', 'HARNESS_', 'DVM_INPUT_', 'DVMI2R ', 'DVMI2A ', 'panic(cpu')):
                         event = dict(seconds=round(time.monotonic()-started, 3), line=line)
                         report['events'].append(event); print(json.dumps(event), flush=True)
                     if a.aux_wait_input and 'DVM_INPUT_READY ' in line and not input_ready_ping_sent:
@@ -233,7 +265,14 @@ def main():
                         input_ack = True
                     if 'GPU_LOAD_COMPLETE' in line:
                         aux_complete = True
-                        if not a.aux_wait_input or input_ack:
+                        if a.surface_observe_display:
+                            try:
+                                surface_ack_baseline=json.loads((out/'input-status.json').read_text())
+                                surface_present_baseline=(out/'stderr.log').read_text(errors='replace').count('iomfb: presented ')
+                                report['native_observation_baseline']=dict(status=surface_ack_baseline,presents=surface_present_baseline)
+                            except (OSError,ValueError):
+                                surface_ack_baseline=None
+                        elif not a.aux_wait_input or input_ack:
                             reason = 'guest load probe completed'
                     elif 'GPU_LOAD_ERROR' in line or 'GPU_BUNDLE_ERROR' in line or 'panic(cpu' in line:
                         reason = 'guest reported failure'
@@ -260,7 +299,25 @@ def main():
             for offset,length in ((0x10000,4096),(0x20000,4096),(0x30000,4096),(0x400000,1048576)):
                 if os.pread(aux_peer.fd,length,offset)!=bytes(length):raise RuntimeError('header-only probe wrote workload data')
             report.update(passed=True,header_bytes_verified=4096,scope='instrumented-initial-header-read')
-        if aux_peer and not a.aux_header_only:
+        if a.surface_worker:
+            rows=[e['line'] for e in report['events'] if 'GPU_LOAD_SURFACE_RUN ' in e['line']]
+            if reason!='guest load probe completed' or len(rows)!=3 or any('backend=host-metal' not in row or 'verified=1' not in row for row in rows):
+                raise RuntimeError('guest IOSurface oracle did not verify three GPU completions')
+            demo=aux_peer.verify()
+            witnesses='\n'.join(e['line'] for e in report['events'])
+            air='GPU_LOAD_SURFACE_AIR sha256='+demo['air_sha256']+' bytes=2705796'
+            if witnesses.count(air)!=1:
+                raise RuntimeError('missing unique exact guest AIR witness')
+            for record,row in zip(demo['records'],rows):
+                seq=record['sequence']
+                if not re.search(rf'GPU_LOAD_SURFACE_RUN seq={seq} backend=host-metal id=\d+ bytes=12288 verified=1 crc={record["crc32"]} ',row):
+                    raise RuntimeError('guest surface sequence/CRC does not match host Metal output')
+                if witnesses.count(f'GPU_LOAD_SURFACE_SUBMIT seq={seq} nonce={record["nonce"]}')!=1:
+                    raise RuntimeError('guest submission nonce does not match host input')
+            aux_peer.finish()
+            report['surface_demo']=demo
+            report['passed']=True
+        if aux_peer and not a.aux_header_only and not a.surface_worker:
             if reason != 'guest load probe completed' or not any(
                     'scope=auxiliary-byte-transport' in e['line'] for e in report['events']):
                 raise RuntimeError('auxiliary guest completion not verified')

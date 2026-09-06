@@ -179,3 +179,8 @@ Durable records: `~/dvm-artifacts/research/gpu-header-ios27-20260905` contains
 commands/exits, serial/model logs, screenshots, raw auxiliary files, signed
 helper/TC, both rebuilt QEMU executables, source snapshots and SHA indexes.
 System/Data disks and RAM are excluded; the manifests retain their lineage.
+
+The subsequent [guest IOSurface demo](gpu-surface-demo-ios27.md) removes the
+broad inventory and sends actual exact-guest shader work over NS6. Its final
+run verifies three host-Metal results copied into a persistent guest surface;
+the report keeps that proof separate from display adoption and speedup.
