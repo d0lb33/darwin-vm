@@ -1,5 +1,15 @@
 # T8140 calendar-clock source path
 
+**Status (2026-09-05).** The native route described here is now implemented
+and verified: `-enable spmi` plus `qemu-sptm/hw/arm/darwin_spmi.c` and
+`darwin_pmu.c`; see [native-rtc-spmi.md](native-rtc-spmi.md) for the
+controller evidence and the runs.  One correction to the text below: the
+fractional argument of `getGMTTimeOfDay`/`setGMTTimeOfDay` is
+**nanoseconds**, not microseconds.  `AppleDialogSPMIPMURTC::getGMTTimeOfDay`
+multiplies the residual ticks by 1,000,000,000 and shifts right by 15
+(`0xfffffff009622184-0xfffffff009622194`), and the set path converts with
+the same constant (`0xfffffff009621d54-0xfffffff009621d74`).
+
 **Scope.** This note is static analysis of the iPhone17,3 / T8140
 `24A5430a` artifacts in this checkout.  It records the platform ABI and the
 native PMU path that the guest kernel already contains.  It does not claim
@@ -42,16 +52,16 @@ All addresses below are unslid static virtual addresses in the target
 
 | Operation | Caller and evidence | Required responder ABI |
 | --- | --- | --- |
-| get | `AppleARMPE::getGMTTimeOfDay` at `0xfffffff0085cdfd0`: at `0xfffffff0085ce078` it passes the string `getGMTTimeOfDay`, `wait = false`, `x3 = x1` and `x4 = x2` to the `callPlatformFunction` virtual slot.  On a non-zero `IOReturn`, `0xfffffff0085ce0c0` writes zero to `*x2` and `0xfffffff0085ce0c4` writes zero to `*x1`. | `callPlatformFunction("getGMTTimeOfDay", false, uint64_t *seconds, uint32_t *microseconds, NULL, NULL) -> IOReturn`.  Return `kIOReturnSuccess` and initialize both pointed-to values. |
-| set | `AppleARMPE::setGMTTimeOfDay` at `0xfffffff0085ce0d8`: it saves incoming `x1` (64 bits) and `w2` (32 bits), then at `0xfffffff0085ce17c` passes `setGMTTimeOfDay`, `wait = false`, and pointers to those saved values as parameters one and two. | `callPlatformFunction("setGMTTimeOfDay", false, uint64_t *seconds, uint32_t *microseconds, NULL, NULL) -> IOReturn`. |
+| get | `AppleARMPE::getGMTTimeOfDay` at `0xfffffff0085cdfd0`: at `0xfffffff0085ce078` it passes the string `getGMTTimeOfDay`, `wait = false`, `x3 = x1` and `x4 = x2` to the `callPlatformFunction` virtual slot.  On a non-zero `IOReturn`, `0xfffffff0085ce0c0` writes zero to `*x2` and `0xfffffff0085ce0c4` writes zero to `*x1`. | `callPlatformFunction("getGMTTimeOfDay", false, uint64_t *seconds, uint32_t *nanoseconds, NULL, NULL) -> IOReturn`.  Return `kIOReturnSuccess` and initialize both pointed-to values. |
+| set | `AppleARMPE::setGMTTimeOfDay` at `0xfffffff0085ce0d8`: it saves incoming `x1` (64 bits) and `w2` (32 bits), then at `0xfffffff0085ce17c` passes `setGMTTimeOfDay`, `wait = false`, and pointers to those saved values as parameters one and two. | `callPlatformFunction("setGMTTimeOfDay", false, uint64_t *seconds, uint32_t *nanoseconds, NULL, NULL) -> IOReturn`. |
 
 The resource lookup immediately before each dispatch uses the `IORTC` string
 at static `0xfffffff007179510`.  The generic `AppleARMRTC` dispatcher at
 `0xfffffff0085db6ec` compares the function names at `0xfffffff0085db724`
 and `0xfffffff0085db784`, and calls its virtual slots `+0x578` and `+0x580`.
 Its normal get wrapper at `0xfffffff0085dba3c` stores a 64-bit seconds value
-and writes a zero 32-bit microseconds value.  A calendar provider that
-implements the ABI directly should still return real microseconds: the native
+and writes a zero 32-bit fractional value.  A calendar provider that
+implements the ABI directly should still return real nanoseconds: the native
 Dialog implementation does.
 
 `AppleARMRTC::start` at `0xfffffff0085daeac` registers its service and, at
@@ -97,10 +107,10 @@ The following is from the actual `AppleDialogSPMIPMURTC` code in the target
 
 * The concrete get method is `0xfffffff0096220f4`.  It obtains an upcount,
   adds its calendar offset, stores `total >> 15` as seconds, and converts
-  `total & 0x7fff` to microseconds at `0xfffffff009622178-0xfffffff009622194`.
+  `total & 0x7fff` to nanoseconds at `0xfffffff009622178-0xfffffff009622194`.
   This establishes a **32,768-Hz tick unit** and the seconds/fraction split.
 * The concrete set method is `0xfffffff0096221a8`.  It converts the supplied
-  seconds and microseconds to a desired 32,768-Hz tick count, reads the
+  seconds and nanoseconds to a desired 32,768-Hz tick count, reads the
   current upcount, and calls its offset-setting path at
   `0xfffffff009621bd8`.  It therefore sets calendar time by changing an
   offset, rather than writing an absolute value into the running upcounter.
@@ -121,8 +131,10 @@ The following is from the actual `AppleDialogSPMIPMURTC` code in the target
 * The offset-setting path begins at `0xfffffff009621994`.  Its strings and
   DT-property reads identify the two persistence choices: NVRAM
   (`com.apple.System.rtc-offset`) and the `info-leg_scrpad` path.  The exact
-  PMU write transaction for the scratchpad path has not yet been traced, so
-  this note does not invent it.
+  PMU write transaction for the scratchpad path is now traced: seconds at
+  `info-leg_scrpad + 4` (4 bytes) and ticks at `+ 0x15` (2 bytes),
+  `0xfffffff0096211dc`/`0xfffffff0096211e4` and the writer at
+  `0xfffffff009621878`; see native-rtc-spmi.md.
 
 The kext's strings make the DT coupling independently visible: `info-rtc`,
 `info-rtc_alarm_ctrl`, `info-rtc_alarm_event`, `info-rtc_alarm_offset`,
@@ -141,7 +153,7 @@ implements the two ABI calls in the table above.  Its source of time should be
 a host UNIX-epoch base supplied once at launch plus guest monotonic elapsed
 time; `setGMTTimeOfDay` changes an in-memory offset.  The provider must start
 before `IOKitInitializeTime`, return success for both calls, and report a
-normalized `uint64_t` seconds / `uint32_t` microseconds pair.
+normalized `uint64_t` seconds / `uint32_t` nanoseconds pair.
 
 This is the smallest justified virtual interface because it targets the
 already-proven resource-and-function boundary.  A DT scalar by itself is

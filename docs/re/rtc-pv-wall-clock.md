@@ -1,5 +1,11 @@
 # Opt-in PV wall-clock read for 24A5430a
 
+**Superseded (2026-09-05).** The native SPMI PMU RTC in
+[native-rtc-spmi.md](native-rtc-spmi.md) replaces this adapter: boot with
+`DARWIN_RTC_PV=0`, an unpatched (or SMP-only) kernelcache and a tree built
+with `-enable spmi`.  Do not combine the two; each publishes a calendar
+source.  The register and patch tool remain for reference only.
+
 This is an intentionally small virtual-platform calendar source for the
 iPhone17,3 / T8140 `24A5430a` kernelcache.  It supplies a fresh host wall-clock
 read at the platform-expert boundary.  It is not an emulation of T8140's PMU
