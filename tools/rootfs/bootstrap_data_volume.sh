@@ -65,6 +65,13 @@ DTREE_RAW="${DTREE_RAW:-/tmp/dvm/dtree_raw}"
 FORMAT_TAG="${FORMAT_TAG:-BOOTSTRAP_FMT}"
 [[ "$FORMAT_TAG" =~ ^[A-Za-z0-9_-]{1,64}$ ]] || { echo 'invalid FORMAT_TAG' >&2; exit 2; }
 BOOTARGS_COMMON='ignition_level=1 launchd_unsecure_cache=1 serial=3 -v wdt=-1 wlan-olyhal-abort'
+# Profile builds opt into the native RTC for formatting/seeding as well.
+RTC_DT_ARGS=()
+case ${NATIVE_RTC:-0} in
+    0) ;;
+    1) RTC_DT_ARGS=(-enable spmi); export DARWIN_RTC_PV=0 ;;
+    *) echo 'NATIVE_RTC must be 0 or 1' >&2; exit 2 ;;
+esac
 SERIAL_CHAR_DELAY=${SERIAL_CHAR_DELAY:-0.002}
 # The seeder is built and trusted only for disposable restore boots.  The
 # default transport is the checksummed UART uploader.  A caller may instead
@@ -138,7 +145,7 @@ restore_start() {
     local sock="$WORK/$tag.sock" dt="$WORK/dt_restore.bin"
     local ramdisk_args=()
     python3 "$REPO/dt_fixup.py" "$DTREE_RAW" "$dt" -nvram "$NVRAM" \
-        -enable ans -enable smc -enable sep -dram 12G || die "restore dt_fixup failed"
+        -enable ans -enable smc -enable sep "${RTC_DT_ARGS[@]}" -dram 12G || die "restore dt_fixup failed"
     rm -f "$sock"
     [ -z "$RESTORE_RAMDISK" ] || ramdisk_args=(--ramdisk "$RESTORE_RAMDISK")
     "$REPO/tools/probe.sh" "${ramdisk_args[@]}" --dtree "$dt" --tc "$stage_tc" --mem 12G --secs 2400 \
@@ -267,7 +274,7 @@ phase_format() {
     local clog="$WORK/fmt.console.log"
     say "[format] device tree: ans + smc + sep on the restore ramdisk"
     python3 "$REPO/dt_fixup.py" "$DTREE_RAW" "$dt" -nvram "$NVRAM" \
-        -enable ans -enable smc -enable sep -dram 12G \
+        -enable ans -enable smc -enable sep "${RTC_DT_ARGS[@]}" -dram 12G \
       || die "dt_fixup failed (need the raw device tree; see CLAUDE.md)"
 
     rm -f "$sock"
@@ -404,7 +411,7 @@ phase_seed() {
     build_seed_helper
     say "[seed] device tree: no -ephemeral-data, encrypted Data keybag active"
     python3 "$REPO/dt_fixup.py" "$DTREE_RAW" "$dt" -nvram "$NVRAM" \
-        -enable ans -enable smc -enable sep -dram 12G \
+        -enable ans -enable smc -enable sep "${RTC_DT_ARGS[@]}" -dram 12G \
         || die "dt_fixup failed"
     say "[seed] booting the system volume off the NVMe disk (testing first-boot seeding)"
     "$REPO/tools/probe.sh" --dtree "$dt" --tc "$TC" --mem 12G --secs 1200 \
@@ -502,7 +509,7 @@ phase_normal_boot() {
     say "[normal] parent=$parent child=$child tag=$tag"
     seed_child "$parent" "$child"
     python3 "$REPO/dt_fixup.py" "$DTREE_RAW" "$WORK/dt_sysvol.bin" -nvram "$NVRAM" \
-        -enable ans -enable smc -enable sep -dram 12G || die "normal boot dt_fixup failed"
+        -enable ans -enable smc -enable sep "${RTC_DT_ARGS[@]}" -dram 12G || die "normal boot dt_fixup failed"
     "$REPO/tools/probe.sh" --dtree "$WORK/dt_sysvol.bin" --tc "$TC" --mem 12G \
         --secs "${NORMAL_BOOT_SECS:-600}" \
         --tag "$tag" --bootargs "rootdev=disk1s1 $BOOTARGS_COMMON" \

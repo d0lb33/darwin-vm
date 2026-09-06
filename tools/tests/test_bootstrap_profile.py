@@ -46,7 +46,8 @@ class BootstrapProfileTests(unittest.TestCase):
         self.assertEqual(native['cpus'], 1)
         for key in ('userspace_patches', 'runtime_helpers', 'kernel_adapters'):
             self.assertEqual(native[key], [])
-        self.assertNotIn('DARWIN_RTC_PV', native['env'])
+        self.assertEqual(native['env']['DARWIN_RTC_PV'], '0')
+        self.assertEqual(native['clock_source'], 'native-spmi-pmu')
         self.assertNotIn('DARWIN_SMP_PV', native['env'])
         self.assertFalse(native['development_activation'])
         self.assertEqual(native['setup_completion'], 'unchanged')
@@ -57,7 +58,8 @@ class BootstrapProfileTests(unittest.TestCase):
         self.assertTrue(native['development_activation'])
         self.assertFalse(patched['development_activation'])
         self.assertEqual(patched['runtime_helpers'], ['input', 'power-pv-service'])
-        self.assertEqual(patched['env']['DARWIN_RTC_PV'], '1')
+        self.assertEqual(patched['env']['DARWIN_RTC_PV'], '0')
+        self.assertEqual(patched['kernel_adapters'], ['smp-pv'])
         self.assertEqual(patched['cpus'], 6)
         self.assertNotIn('DARWIN_RTC_PV', bp.DISPLAY_ENV)
 
@@ -129,7 +131,8 @@ class BootstrapProfileTests(unittest.TestCase):
         serial = '\n'.join(['BSD root: disk1s1', 'Early boot complete',
             'mount-complete volume Preboot', 'mount-complete volume Hardware',
             'disk1s5 mount-complete volume User', '/dev/disk1s2 on /private/var (protect)',
-            'handle_mount:893: disk1s2 is encrypted'])
+            'handle_mount:893: disk1s2 is encrypted', 'AppleARMRTC publishing service!',
+            'AppleDialogSPMIPMURTC started!'])
         self.assertFalse(bp.verdict(serial, '', 'patched')['validation_pass'])
         self.assertTrue(bp.verdict(serial, 'iomfb: presented 1179x2556 BGRA', 'patched')['validation_pass'])
 
@@ -143,7 +146,8 @@ class BootstrapProfileTests(unittest.TestCase):
         serial = '\n'.join(['BSD root: disk1s1', 'Early boot complete',
             'mount-complete volume Preboot', 'mount-complete volume Hardware',
             'disk1s5 mount-complete volume User', '/dev/disk1s2 on /private/var (protect)',
-            'handle_mount:893: disk1s2 is encrypted'])
+            'handle_mount:893: disk1s2 is encrypted', 'AppleARMRTC publishing service!',
+            'AppleDialogSPMIPMURTC started!'])
         self.assertTrue(bp.verdict(serial, '', 'native')['storage_pass'])
         self.assertFalse(bp.verdict(serial, 'panic(cpu', 'native')['storage_pass'])
 

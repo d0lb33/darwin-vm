@@ -55,22 +55,24 @@ def clean_env():
             and k not in ('START_AT', 'SEED_ONLY', 'RESTORE_RAMDISK',
                           'RESTORE_RAMDISK_BASE', 'RESTORE_RAMDISK_OUT',
                           'RESTORE_HELPER_SOURCE', 'SEED_HELPER', 'SEED_HELPER_TC',
-                          'NO_WATCHDOG', 'STALL_SECS', 'STALL_AFTER_PANIC')}
+                          'NO_WATCHDOG', 'STALL_SECS', 'STALL_AFTER_PANIC',
+                          'NATIVE_RTC', 'HELPER_SRC')}
 
 
 def profile_config(profile, development_activation=False):
     if profile not in ('native', 'patched'):
         raise ValueError('unknown profile')
     patched = profile == 'patched'
-    env = dict(DISPLAY_ENV)
+    env = dict(DISPLAY_ENV, DARWIN_RTC_PV='0')
     if patched:
-        env.update(DARWIN_SMP_PV='1', DARWIN_RTC_PV='1')
+        env.update(DARWIN_SMP_PV='1')
     return dict(profile=profile, cpus=6 if patched else 1, env=env,
                 development_activation=development_activation,
                 userspace_patches=['display-allocation', 'settings-scale',
                                    'clock-label-and-non-glass', 'powerd-null-guard'] if patched else [],
                 runtime_helpers=['input', 'power-pv-service'] if patched else [],
-                kernel_adapters=['smp-pv', 'rtc-pv'] if patched else [],
+                kernel_adapters=['smp-pv'] if patched else [],
+                clock_source='native-spmi-pmu',
                 setup_completion='unchanged', saved_ram=False)
 
 
@@ -226,8 +228,7 @@ def prepare(a, out, config, env):
         run(sys.executable, REPO / 'build_tc.py', out / 'hashes.txt', out / 'patches.tc', env=env)
         run(sys.executable, REPO / 'tools/rootfs/merge_tc.py', out / 'system.tc', a.tc,
             out / 'patches.tc', out / 'input/helper.tc', out / 'power/power-pv-service.tc', env=env)
-        run(sys.executable, REPO / 'tools/re/smp_pv_patch.py', a.firmware / 'bootkc', out / 'smp.bootkc', env=env)
-        run(sys.executable, REPO / 'tools/re/rtc_pv_patch.py', out / 'smp.bootkc', out / 'bootkc', env=env)
+        run(sys.executable, REPO / 'tools/re/smp_pv_patch.py', a.firmware / 'bootkc', out / 'bootkc', env=env)
     else:
         shutil.copyfile(a.tc, out / 'system.tc')
         shutil.copyfile(a.firmware / 'bootkc', out / 'bootkc')
@@ -238,7 +239,7 @@ def prepare(a, out, config, env):
                         (['-development-activation'] if config['development_activation'] else []))]:
         run(sys.executable, REPO / 'dt_fixup.py', a.dtree_raw, out / (name + '.dtree'),
             '-nvram', a.nvram, '-enable', 'ans', '-enable', 'smc', '-enable', 'sep',
-            '-dram', '12G', *extra, env=env)
+            '-dram', '12G', '-enable', 'spmi', *extra, env=env)
     image = out / 'installer.dmg'
     shutil.copyfile(a.firmware / 'ramdisk.dmg', image)
     wrapper = REPO / 'tools/rootfs/safe_attach.sh'
@@ -277,7 +278,8 @@ def manifest(a, out, disk, config, destination):
 def verdict(serial, stderr, profile):
     required = ['BSD root: disk1s1', 'Early boot complete',
                 'mount-complete volume Preboot', 'mount-complete volume Hardware',
-                'disk1s5 mount-complete volume User']
+                'disk1s5 mount-complete volume User', 'AppleARMRTC publishing service!',
+                'AppleDialogSPMIPMURTC started!']
     missing = [s for s in required if s not in serial]
     if not re.search(r'/dev/disk1s2 on /private/var .*protect', serial):
         missing.append('protected Data mount')
@@ -348,8 +350,9 @@ def main():
         p.error('--parent must already be read-only; do not use a live writable disk')
     if sha256(a.firmware / 'bootkc') != KC_SHA256 or sha256(a.powerd) != SOURCE_SHA256:
         p.error('requires the reviewed 24A5430a bootkc and original powerd')
-    if a.profile == 'patched' and b'DARWIN_RTC_PV' not in a.qemu.read_bytes():
-        p.error('QEMU binary lacks RTC PV support; build the current pinned submodule before using patched')
+    binary = a.qemu.read_bytes()
+    if any(name not in binary for name in (b'darwin-spmi', b'darwin-pmu')):
+        p.error('QEMU binary lacks native SPMI/PMU RTC support; build the current pinned submodule')
     original_launchd(a.launchd_cache)
     # Validate all cache preimages before building or mounting anything.
     for spec in specs():
@@ -380,7 +383,7 @@ def main():
             seed_env = dict(env, BASE_DMG=str(a.base_image), SRC=str(a.base_image), TC=str(a.tc),
                 EXCLAVE=str(a.exclave), NVRAM=str(a.nvram), DTREE_RAW=str(a.dtree_raw),
                 DVM_QEMU=str(a.qemu), QEMU_IMG=str(a.qemu_img), TAG_PREFIX=tag,
-                SEED_ONLY='1', UPDATE_PARENT_LINK='0', START_AT='format')
+                SEED_ONLY='1', UPDATE_PARENT_LINK='0', START_AT='format', NATIVE_RTC='1')
             run('bash', REPO / 'tools/rootfs/rebuild_persistent_parent.sh', a.out / 'seed', env=seed_env)
             parent = a.out / 'seed/marker.qcow2'
             # All seed guests have stopped. Seal every newly owned chain member.
@@ -391,7 +394,7 @@ def main():
             parent = a.parent
         template = a.out / 'restore-launch.json'
         atomic_json(template, dict(format='darwin-vm-qemu-launch-v1',
-                                  argv=machine(a, a.out, parent, config, restore=True), env={}))
+                                  argv=machine(a, a.out, parent, config, restore=True), env={'DARWIN_RTC_PV': '0'}))
         run(sys.executable, REPO / 'tools/re/install_staged_helpers.py', '--template', template,
             '--parent', parent, '--ramdisk', a.out / 'installer.dmg', '--out', a.out / 'install',
             '--tag', tag + '_INSTALL', '--installer', '/libexec/dvm-profile-install.sh',

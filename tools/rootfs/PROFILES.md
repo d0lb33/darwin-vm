@@ -8,7 +8,8 @@ remains the storage-only recovery command; it does not install runtime fixes.
 |---|---|---|
 | Existing project boot firmware adaptations, Data seeding, ANS/SEP/SMC | Yes | Yes |
 | DCP model and measured software scanout configuration | Yes | Yes |
-| Additional SMP / RTC kernelcache adapters | No; one CPU | Yes; six CPUs and host wall clock |
+| Native SPMI/PMU RTC and Apple IORTC driver | Yes; no RTC kernel patch | Yes; no RTC kernel patch |
+| Additional SMP kernelcache adapter | No; one CPU | Yes; six CPUs |
 | Apple-userspace binary edits | None added | QuartzCore allocation, Settings scale, clock UIKit/non-glass fallback, powerd null guard |
 | Runtime helper services | None added | Current input helper and virtual battery publisher, built from repo source |
 | Development activation | Only with `--development-activation` | Only with `--development-activation` |
@@ -18,7 +19,8 @@ remains the storage-only recovery command; it does not install runtime fixes.
 “Native” is a hardware bring-up baseline, not an unmodified physical-iPhone
 boot or a guarantee of usable UI. It still uses the project's prepared boot
 firmware and emulated device models. In particular, it does not inherit the
-patched profile's RTC or SMP adapters. Neither profile claims native Setup.app
+patched profile's SMP adapter. Both profiles use `-enable spmi` and explicitly
+set `DARWIN_RTC_PV=0`; the previous RTC kernel adapter is no longer applied. Neither profile claims native Setup.app
 completion, reliable HID startup, or freedom from service crashes.
 
 ## Inputs
@@ -51,8 +53,8 @@ verification** or proof that arbitrary supplied Data state is pristine.
 
 Build the pinned QEMU submodule before running either profile; see `CLAUDE.md`.
 Never rebuild a QEMU binary while another VM is using it. `--qemu` and
-`--qemu-img` allow an explicitly selected existing build. Patched rejects a
-binary without the RTC PV feature. The feature check does not prove that a
+`--qemu-img` allow an explicitly selected existing build. Both profiles reject a
+binary without the native SPMI/PMU device models. The feature check does not prove that a
 binary was built from the current commit; its exact SHA-256 is recorded.
 
 The default firmware directory is the checkout's `firmware`. A different
@@ -109,7 +111,8 @@ The full run performs the following, sequentially:
 4. Runs two chained, fresh disk boots through `tools/probe.sh`, default 180
    seconds each (`--boot-seconds 1..600`). No saved RAM or guest debugger.
 5. Checks root disk, protected/encrypted Data, User/Preboot/Hardware, early
-   boot, no template recopy and no kernel panic/critical-process reboot.
+   boot, native `AppleARMRTC` publication, no template recopy and no kernel
+   panic/critical-process reboot.
    Patched additionally requires a fresh `iomfb: presented` witness on **each**
    boot. That witness does not establish that the displayed UI is correct.
 
@@ -140,7 +143,68 @@ rebase paths, or flatten an offline disk and verify its guest-visible contents;
 then generate a manifest with the destination's paths. Inputs, outputs and
 firmware binaries stay out of git.
 
-## Verification on 2026-09-05
+
+## Native RTC configuration
+
+Both normal boot and restore/seed device trees enable the SPMI controller and
+Dialog PMU. AppleDialogSPMIPMURTC supplies calendar time through IORTC using its
+original kernel code. The native profile copies the original boot kernel; the
+patched profile applies only the SMP adapter to that kernel. Both keep
+`DARWIN_RTC_PV=0`, and inherited clock/debug environment overrides are removed.
+The legacy storage-only command can opt in with `NATIVE_RTC=1`; profile builds
+set this explicitly for their seeding stages.
+
+This replaces the **time-source kernel patch**, not the shared-cache patches
+that make the large clock render without GPU acceleration. Those remain in
+patched and are absent from native. See `docs/re/native-rtc-spmi.md` for the
+SPMI/PMU, ANS SET_TIME and SART power-gate evidence.
+
+Default power-on seeds the PMU from host/QEMU RTC time. Profile builds do not
+set `DARWIN_PMU_STATE`: persisting a guest-adjusted clock offset is a separate
+option, not necessary for correct time on a fresh boot. Do not share a writable
+PMU state file between concurrent VMs or snapshot clones. Existing checkpoint
+manifests remain pinned to their old device configuration; switching an old
+PV checkpoint to SPMI requires a fresh disk boot and a new checkpoint.
+
+## Native RTC integration verification (2026-09-05/06)
+
+RTC implementation `qemu-sptm` commit `2187536` was merged on top of the
+bootstrap profiles. The shared HID work was preserved as uncommitted changes;
+these RTC runs used the isolated, already built RTC executable, not a rebuild
+of the shared HID checkout.
+
+- `RTC_BP_NATIVE2`: guarded native install and two chained 90-second disk boots
+  passed. Both published `AppleDialogSPMIPMURTC` and IORTC, reached early boot,
+  mounted protected/encrypted Data and the required roles, and recorded zero
+  XNU panics and no template recopy. No frame was claimed for this storage
+  baseline. Evidence: `boot1/verdict.json`, `boot2/verdict.json`, and the final
+  stricter recheck `/tmp/dvm/RTC_MERGE1/native-final-verdicts.json`.
+- The native kernel SHA-256 stayed
+  `dc0f5b6a6fa848053c301949c8376c216c6223c047203b93e408a93d3440f906`.
+  `RTC_BP_PATCHED1` preparation produced the SMP-only kernel
+  `da1e254ab81e31adae87c049da295b582dabbd4ba46096fc58f3e5467fc6e02c`.
+  Both retain the original 40 bytes at `AppleARMPE::getGMTTimeOfDay`
+  (`0xfffffff0085cdfd0`); neither invokes `rtc_pv_patch.py`.
+- `RTC_MERGE_UTC1`: a fresh restore boot with the original kernel and native
+  SPMI tree read `date -u +%s` over UART. Guest values `1788655282` and
+  `1788655286` fell within their host sampling windows
+  `[1788655281.644, 1788655283.938]` and
+  `[1788655285.947, 1788655288.203]`. The guest clock advanced four seconds.
+  Probe verdict: `STOPPED ON CONDITION`, zero panics, reached shell yes.
+  Evidence: `/tmp/dvm/RTC_MERGE_UTC1/utc-samples.json`.
+- `RTC_MERGE_WARM1`: fresh boot of the migrated display disk with the new
+  generated SPMI tree and SMP-only kernel, no RTC PV or saved RAM/debugger.
+  Early boot: 10.726 s; first frame: 315.665 s; zero panics. The observer stopped
+  at the first presentation, so its dim initial frame is not a settled-UI
+  acceptance result. The generated DT/kernel match the RTC branch's SYS4
+  inputs byte-for-byte. No `DARWIN_PMU_STATE` was supplied, so this also tested
+  ordinary host-time initialization without a carried PMU state file.
+
+The full fresh-Data seeding pipeline was not rerun in this integration. Existing
+PV checkpoint configurations remain available unchanged. Native RTC does not
+resolve the separate variable display-start delay or certify input stability.
+
+## Historical verification before native RTC integration (2026-09-05)
 
 The profile installer and boot runner were exercised from an isolated,
 read-only copy of the earlier storage parent
