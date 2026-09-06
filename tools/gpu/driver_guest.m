@@ -22,6 +22,8 @@ static void reject(NSString *s) {
 @property(nonatomic) BOOL submissionInFlight;
 @property(nonatomic) BOOL binaryPayloads;
 @property(nonatomic,strong) NSDictionary *negotiatedContract;
+@property(nonatomic,strong) NSMutableDictionary *linearAlignments;
+@property(nonatomic,strong) NSError *lastSubmissionError;
 - (NSDictionary *)contractCapabilities;
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err;
 - (void)retire:(NSNumber *)handle;
@@ -43,12 +45,13 @@ static void reject(NSString *s) {
 @interface DVMLibrary : DVMObject <MTLLibrary>
 @property(nonatomic, strong) NSArray<NSString *> *functionNames;
 @end
-@interface DVMFunction : NSObject <MTLFunction>
+@interface DVMFunction : DVMObject <MTLFunction>
 @property(nonatomic, strong) DVMLibrary *library;
 @property(nonatomic, strong) NSString *name;
-@property(atomic, copy) NSString *label;
+@property(nonatomic) MTLFunctionType functionType;
 @end
-@interface DVMBuffer : DVMObject <MTLBuffer>
+#include "consumer_resource_guest.inc"
+@interface DVMBuffer : DVMResource <MTLBuffer>
 @property(nonatomic, strong) NSMutableData *shadow;
 @end
 @interface DVMPipeline : DVMObject <MTLComputePipelineState>
@@ -56,13 +59,15 @@ static void reject(NSString *s) {
 @property(nonatomic) NSUInteger threadExecutionWidth;
 @property(nonatomic) NSUInteger maxTotalThreadsPerThreadgroup;
 @end
-@interface DVMTexture : DVMObject <MTLTexture>
+@interface DVMTexture : DVMResource <MTLTexture>
 @property(nonatomic, strong) NSData *pendingUpload;
 @property(nonatomic, strong) NSData *completedShadow;
 @property(nonatomic) NSUInteger width;
 @property(nonatomic) NSUInteger height;
 @property(nonatomic) MTLPixelFormat pixelFormat;
 @property(nonatomic) MTLTextureUsage usage;
+@property(nonatomic,strong) DVMBuffer *backingBuffer;
+@property(nonatomic) NSUInteger backingOffset,backingRow;
 - (NSUInteger)row;
 - (NSData *)read;
 @end
@@ -86,16 +91,34 @@ static void reject(NSString *s) {
 @property(nonatomic, strong) NSMutableArray *commands;
 @property(nonatomic, strong) NSMutableArray *resources;
 @property(nonatomic, strong) NSMutableArray *handlers;
+@property(nonatomic,strong) NSMutableArray *scheduledHandlers;
+@property(nonatomic,strong) NSArray *responsibleTaskIDs;
+@property(nonatomic,strong) NSMutableDictionary *userDictionary;
 @property(nonatomic, strong) dispatch_group_t completion;
 @property(atomic) MTLCommandBufferStatus status;
 @property(atomic, strong) NSError *error;
+@property(atomic) CFTimeInterval GPUStartTime,GPUEndTime,kernelStartTime,kernelEndTime;
 @property(nonatomic) NSUInteger openEncoders;
 @property(atomic, copy) NSString *label;
 - (void)encoding;
 @end
 
 #include "consumer_state_guest.inc"
+#include "consumer_render_guest.inc"
+#include "consumer_function_guest.inc"
 @implementation DVMDevice
+- (NSDictionary *)consumerCompletion {
+    // EndFrame has submitted on the one queue. The serial barrier observes host
+    // completion before the final-only pixel read, and propagates async errors.
+    NSDictionary *stats=[self call:@{@"op":@"stats"} error:NULL];
+    if(self.lastSubmissionError)reject(self.lastSubmissionError.description);
+    return stats;
+}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d error:(NSError **)e {return DVMNewRenderPipeline(self,d,e);}
+- (id<MTLRenderPipelineState>)newRenderPipelineStateWithDescriptor:(MTLRenderPipelineDescriptor *)d options:(MTLPipelineOption)options reflection:(MTLAutoreleasedRenderPipelineReflection *)reflection error:(NSError **)e {
+    if(reflection)*reflection=nil;if(options){if(e)*e=error(@"render reflection unsupported");return nil;}return DVMNewRenderPipeline(self,d,e);
+}
+- (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)d {return DVMNewSampler(self,d);}
 - (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor *)d {return DVMNewDepth(self,d);}
 - (NSString *)name {
     return @"DVM host Metal (experimental compute subset)";
@@ -127,13 +150,21 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (BOOL)supportsFeatureSet:(MTLFeatureSet)set {(void)set;return NO;}
 - (BOOL)supportsTextureSampleCount:(NSUInteger)count {return count==1;}
 - (NSUInteger)requiredLinearTextureBytesPerRowForDescriptor:(MTLTextureDescriptor *)d {
-    // No linear-texture allocation/alias operation exists in this protocol.
-    // A guessed pitch would promise a resource contract we cannot honor.
-    reject([NSString stringWithFormat:@"linear textures unsupported by forwarding profile: type=%lu width=%lu height=%lu format=%lu usage=%lu storage=%lu",(unsigned long)d.textureType,(unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.pixelFormat,(unsigned long)d.usage,(unsigned long)d.storageMode]);
-    return 0;
+    if(!DVMTextureDescriptorValid(d))reject(@"linear descriptor outside forwarding contract");
+    NSUInteger a=[self minimumLinearTextureAlignmentForPixelFormat:d.pixelFormat];
+    return (d.width*DVMFormatBytes(d.pixelFormat)+a-1)&~(a-1);
 }
 - (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format {
-    (void)format;reject(@"linear textures unsupported by forwarding profile");return 0;
+    @synchronized(self) {
+        if(!_linearAlignments)_linearAlignments=[NSMutableDictionary dictionary];
+        if(!_linearAlignments[@(format)]) {
+            NSError *e=nil;NSDictionary *r=[self call:@{@"op":@"linearLayout",@"format":@(format)} error:&e];
+            NSUInteger a=[r[@"alignment"] unsignedIntegerValue];
+            if(!r||!DVMFormatBytes(format)||[r[@"format"] unsignedIntegerValue]!=format||a<16||a>4096||(a&(a-1)))reject(e.description?:@"invalid linear layout contract");
+            _linearAlignments[@(format)]=@(a);
+        }
+        return [_linearAlignments[@(format)] unsignedIntegerValue];
+    }
 }
 - (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(MTLPixelFormat)format {
     (void)format;reject(@"texture-buffer views unsupported by forwarding profile");return 0;
@@ -235,13 +266,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return o;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
-    if (!d || d.textureType != MTLTextureType2D || d.depth != 1 || d.arrayLength != 1 ||
-        d.mipmapLevelCount != 1 || d.sampleCount != 1 || d.storageMode != MTLStorageModeShared ||
-        d.width < 1 || d.height < 1 || d.width > DVM_TEXTURE_DIMENSION || d.height > DVM_TEXTURE_DIMENSION ||
-        (d.pixelFormat != MTLPixelFormatBGRA8Unorm && d.pixelFormat != MTLPixelFormatRGBA16Float) ||
-        (d.usage & ~DVM_TEXTURE_USAGE_MASK))
-        return nil;
-    if(d.width*d.height*(d.pixelFormat==MTLPixelFormatRGBA16Float?8:4)>DVM_TEXTURE_BYTES)return nil;
+    if(!DVMTextureDescriptorValid(d))return nil;
     NSError *e = nil;
     NSDictionary *r = [self call:@{
         @"op" : @"texture",
@@ -260,6 +285,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     o.height = d.height;
     o.pixelFormat = d.pixelFormat;
     o.usage = d.usage;
+    o.acceptedOptions=d.resourceOptions;
+    o.hostAllocatedSize=[r[@"allocatedSize"] unsignedIntegerValue];
     return o;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
@@ -278,7 +305,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return q;
 }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)options {
-    if (!n || n > DVM_BUFFER_BYTES || options != MTLResourceStorageModeShared)
+    if (!n || n > DVM_BUFFER_BYTES || !DVMResourceOptionsValid(options))
         return nil;
     NSError *e = nil;
     NSDictionary *r = [self call:@{@"op" : @"buffer", @"length" : @(n)} error:&e];
@@ -288,10 +315,24 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     b.owner = self;
     b.handle = r[@"handle"];
     b.shadow = [NSMutableData dataWithLength:n];
+    b.acceptedOptions=options;b.hostAllocatedSize=[r[@"allocatedSize"] unsignedIntegerValue];
     return b;
+}
+- (id<MTLBuffer>)newBufferWithBytes:(const void *)bytes length:(NSUInteger)length options:(MTLResourceOptions)options {
+    if(!bytes)return nil;id<MTLBuffer> b=[self newBufferWithLength:length options:options];
+    if(b)memcpy(b.contents,bytes,length);return b;
 }
 @end
 @implementation DVMLibrary
+- (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)d error:(NSError **)e {
+    if(!d||!d.name||d.options||d.binaryArchives.count){if(e)*e=error(@"function options/archive unsupported");return nil;}
+    NSArray *constants=DVMConstants(d.constantValues);
+    NSDictionary *r=[self.owner call:@{@"op":@"function",@"library":self.handle,@"name":d.name,@"specialized":d.specializedName?:@"",@"constants":constants} error:e];
+    if(!r)return nil;DVMFunction *f=[DVMFunction new];f.library=self;f.name=d.name;f.owner=self.owner;f.handle=r[@"handle"];f.functionType=[r[@"type"] unsignedIntegerValue];return f;
+}
+- (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values error:(NSError **)e {
+    MTLFunctionDescriptor *d=[MTLFunctionDescriptor functionDescriptor];d.name=name;d.constantValues=values;return [self newFunctionWithDescriptor:d error:e];
+}
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name {
     if (![_functionNames containsObject:name])
         return nil;
@@ -309,27 +350,48 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @implementation DVMPipeline
 @end
 @implementation DVMBuffer
+- (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)row {
+    if(!DVMTextureDescriptorValid(d)||d.storageMode!=self.storageMode||d.usage!=MTLTextureUsageShaderRead)return nil;
+    NSUInteger a=[self.owner minimumLinearTextureAlignmentForPixelFormat:d.pixelFormat];
+    if(offset%a||row%a||row<d.width*DVMFormatBytes(d.pixelFormat)||row>DVM_BUFFER_BYTES||offset>self.length||row*d.height>self.length-offset)return nil;
+    NSError *e=nil;NSDictionary *r=[self.owner call:@{@"op":@"linearTexture",@"buffer":self.handle,@"width":@(d.width),@"height":@(d.height),@"format":@(d.pixelFormat),@"usage":@(d.usage),@"offset":@(offset),@"row":@(row)} error:&e];
+    if(!r)reject(e.description?:@"linear texture allocation");
+    DVMTexture *t=[DVMTexture new];t.owner=self.owner;t.handle=r[@"handle"];
+    t.width=d.width;t.height=d.height;t.pixelFormat=d.pixelFormat;t.usage=d.usage;
+    t.acceptedOptions=self.acceptedOptions;t.hostAllocatedSize=[r[@"allocatedSize"] unsignedIntegerValue];
+    t.backingBuffer=self;t.backingOffset=offset;t.backingRow=row;return t;
+}
 - (NSUInteger)length {
     return _shadow.length;
 }
 - (void *)contents {
     return _shadow.mutableBytes;
 }
-- (MTLStorageMode)storageMode {
-    return MTLStorageModeShared;
+- (void)didModifyRange:(NSRange)range {
+    if(self.owner.submissionInFlight||range.location>self.length||range.length>self.length-range.location)
+        reject(@"buffer modification outside owned idle allocation");
 }
 @end
 
 @implementation DVMTexture
 - (NSUInteger)row {
-    return _width * (_pixelFormat == MTLPixelFormatRGBA16Float ? 8 : 4);
+    return _width * DVMFormatBytes(_pixelFormat);
 }
 - (MTLTextureType)textureType {
     return MTLTextureType2D;
 }
-- (MTLStorageMode)storageMode {
-    return MTLStorageModeShared;
-}
+- (BOOL)isFramebufferOnly {return NO;}
+- (BOOL)isShareable {return NO;}
+- (BOOL)isSparse {return NO;}
+- (id<MTLTexture>)parentTexture {return nil;}
+- (id<MTLResource>)rootResource {return self.backingBuffer?:self;}
+- (NSUInteger)parentRelativeLevel {return 0;}
+- (NSUInteger)parentRelativeSlice {return 0;}
+- (id<MTLBuffer>)buffer {return self.backingBuffer;}
+- (NSUInteger)bufferOffset {return self.backingOffset;}
+- (NSUInteger)bufferBytesPerRow {return self.backingRow;}
+- (IOSurfaceRef)iosurface {return NULL;}
+- (NSUInteger)iosurfacePlane {return 0;}
 - (NSUInteger)depth {
     return 1;
 }
@@ -352,6 +414,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             withBytes:(const void *)p
           bytesPerRow:(NSUInteger)row {
     [self check:r level:level row:row pointer:p];
+    if(self.backingBuffer) {
+        if(self.owner.submissionInFlight)reject(@"linear texture upload in flight");
+        for(NSUInteger y=0;y<_height;y++)memcpy((uint8_t *)self.backingBuffer.contents+self.backingOffset+y*self.backingRow,(const uint8_t *)p+y*row,[self row]);
+        return;
+    }
     NSMutableData *d = [NSMutableData dataWithLength:[self row] * _height];
     for (NSUInteger y = 0; y < _height; y++)
         memcpy((uint8_t *)d.mutableBytes + y * [self row], (const uint8_t *)p + y * row,
@@ -364,6 +431,9 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     if(self.owner.submissionInFlight)reject(@"texture read while GPU work is in flight");
     if(self.completedShadow)return self.completedShadow;
     NSError *e = nil;
+    if(self.backingBuffer) {
+        if(![self.owner call:@{@"op":@"upload",@"buffer":self.backingBuffer.handle,@"data":[self.backingBuffer.shadow base64EncodedStringWithOptions:0]} error:&e])reject(e.description?:@"linear upload");
+    }
     if (self.pendingUpload) {
         if (![self.owner call:@{@"op":@"upload", @"texture":self.handle,
               @"row":@([self row]), @"data":[self.pendingUpload base64EncodedStringWithOptions:0]} error:&e])
@@ -398,12 +468,29 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     b.commands = [NSMutableArray array];
     b.resources = [NSMutableArray array];
     b.handlers = [NSMutableArray array];
+    b.scheduledHandlers=[NSMutableArray array];
+    b.responsibleTaskIDs=@[];b.userDictionary=[NSMutableDictionary dictionary];
     b.completion = dispatch_group_create();
     b.status = MTLCommandBufferStatusNotEnqueued;
     return b;
 }
 @end
 @implementation DVMCommand
+- (void)setResponsibleTaskIDs:(const uint32_t *)ids count:(uint32_t)count {
+    // Exact MTLIOAccelCommandBuffer at 0x1a55a1334 copies count x 4 bytes
+    // (ldr/str w at +0x80/+0x84). Preserve guest attribution, never use it
+    // as a host Mach task identity. No encoder may be open during this update.
+    [self encoding];if(_openEncoders||count>16||(!ids&&count))reject(@"responsible guest task ID extent/state");
+    NSMutableArray *values=[NSMutableArray array];for(uint32_t i=0;i<count;i++)[values addObject:@(ids[i])];
+    self.responsibleTaskIDs=values;
+}
+- (BOOL)isCommitted {return self.status>=MTLCommandBufferStatusCommitted;}
+- (BOOL)synchronousDebugMode {return NO;}
+- (id<MTLRenderCommandEncoder>)renderCommandEncoderWithDescriptor:(MTLRenderPassDescriptor *)d {return DVMNewRenderEncoder(self,d);}
+- (void)setProtectionOptions:(NSUInteger)options {if(options)reject(@"protected commands unsupported");}
+- (NSUInteger)protectionOptions {return 0;}
+- (void)pushDebugGroup:(NSString *)s {(void)s;}
+- (void)popDebugGroup {}
 - (id<MTLDevice>)device {
     return _commandQueue.owner;
 }
@@ -411,9 +498,14 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return YES;
 }
 - (void)encoding {
-    if (self.status != MTLCommandBufferStatusNotEnqueued)
+    if (self.status > MTLCommandBufferStatusEnqueued)
         reject(@"command already committed");
 }
+- (void)enqueue {[self encoding];self.status=MTLCommandBufferStatusEnqueued;}
+- (void)addScheduledHandler:(MTLCommandBufferHandler)handler {
+    [self encoding];if(!handler)reject(@"nil scheduled handler");[_scheduledHandlers addObject:[handler copy]];
+}
+- (void)waitUntilScheduled {[self waitUntilCompleted];}
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
     [self encoding];
     if (_openEncoders)
@@ -429,7 +521,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (void)addCompletedHandler:(MTLCommandBufferHandler)handler {
     @synchronized(self) {
-        if (!handler || self.status != MTLCommandBufferStatusNotEnqueued)
+        if (!handler || self.status > MTLCommandBufferStatusEnqueued)
             reject(@"register completion before commit");
         [_handlers addObject:[handler copy]];
     }
@@ -437,8 +529,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (void)commit {
     @synchronized(self) {
         [self encoding];
-        if (_openEncoders || !_commands.count)
-            reject(@"unclosed or empty command buffer");
+        if (_openEncoders)
+            reject(@"unclosed command buffer");
         @synchronized(_commandQueue.owner) {
             if (_commandQueue.owner.submissionInFlight)
                 reject(@"only one in-flight command buffer supported");
@@ -451,15 +543,18 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     // remain strongly owned until completion even if the caller releases them.
     NSMutableArray *uploads = [NSMutableArray array], *buffers = [NSMutableArray array],
                    *textures = [NSMutableArray array], *readbacks = [NSMutableArray array];
+    BOOL render=!_commands.count||_commands[0][@"kind"]!=nil;
+    for(id o in [_resources copy])if([o isKindOfClass:DVMTexture.class]&&[(DVMTexture *)o backingBuffer])
+        [_resources addObject:[(DVMTexture *)o backingBuffer]];
     for (id o in _resources)
         if ([o isKindOfClass:DVMBuffer.class] && ![buffers containsObject:o]) {
             DVMBuffer *b = o;
             [buffers addObject:b];
-            [readbacks addObject:b.handle];
-            [uploads addObject:@{
+            if(!render)[readbacks addObject:b.handle];
+            if(!render)[uploads addObject:@{
                 @"op" : @"upload",
                 @"buffer" : b.handle,
-                @"data" : self.commandQueue.owner.binaryPayloads ? [b.shadow copy] : [b.shadow base64EncodedStringWithOptions:0]
+                @"data" : self.commandQueue.owner.binaryPayloads&&!render ? [b.shadow copy] : [b.shadow base64EncodedStringWithOptions:0]
             }];
         }
     for (id o in _resources)
@@ -468,29 +563,37 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             [textures addObject:t];
             if (t.pendingUpload)
                 [uploads addObject:@{@"texture":t.handle, @"row":@([t row]),
-                    @"data":self.commandQueue.owner.binaryPayloads ? t.pendingUpload : [t.pendingUpload base64EncodedStringWithOptions:0]}];
+                    @"data":self.commandQueue.owner.binaryPayloads&&!render ? t.pendingUpload : [t.pendingUpload base64EncodedStringWithOptions:0]}];
         }
     dispatch_async(_commandQueue.owner.serial, ^{
         @autoreleasepool {
             @try {
                 NSError *e = nil;
-                BOOL blur=self.commands[0][@"imageblock"]!=nil;
+                if(render)for(DVMBuffer *buffer in buffers) {
+                    for(NSUInteger offset=0;offset<buffer.length;offset+=32768){
+                        NSData *chunk=[buffer.shadow subdataWithRange:NSMakeRange(offset,MIN(32768,buffer.length-offset))];
+                        if(!self.commandQueue.owner.transport(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(offset),@"data":[chunk base64EncodedStringWithOptions:0]},&e))reject(e.description?:@"render buffer upload");
+                    }
+                }
+                BOOL blur=self.commands.count&&self.commands[0][@"imageblock"]!=nil;
                 DVMTexture *output=nil;
                 if(blur)for(DVMTexture *t in textures)if([t.handle isEqual:[self.commands.lastObject[@"textures"] lastObject]])output=t;
                 if(blur && (!output||!self.commandQueue.owner.binaryPayloads))reject(@"blur requires binary transport and output");
-                NSMutableDictionary *request=[@{@"op":blur?@"blurSubmit":@"submit",@"commands":self.commands,@"uploads":uploads,@"readbacks":readbacks} mutableCopy];
+                NSMutableDictionary *request=[@{@"op":render?@"renderSubmit":blur?@"blurSubmit":@"submit",@"commands":self.commands,@"uploads":uploads,@"readbacks":readbacks} mutableCopy];
+                if(render)request[@"guestTaskIDs"]=self.responsibleTaskIDs;
                 if(blur){request[@"w"]=@(output.width);request[@"h"]=@(output.height);}
                 NSDictionary *r=self.commandQueue.owner.transport(request,&e);
                 if (!r || [r[@"status"] integerValue] != MTLCommandBufferStatusCompleted)
                     self.error = e ?: error(@"GPU did not complete");
                 else {
+                    if(render){self.GPUStartTime=[r[@"gpu_start"] doubleValue];self.GPUEndTime=[r[@"gpu_end"] doubleValue];self.kernelStartTime=[r[@"kernel_start"] doubleValue];self.kernelEndTime=[r[@"kernel_end"] doubleValue];}
                     NSDictionary *returned = r[@"buffers"];
-                    if (![returned isKindOfClass:NSDictionary.class] || returned.count != buffers.count)
+                    if (![returned isKindOfClass:NSDictionary.class] || returned.count != (render?0:buffers.count))
                         reject(@"bad batched readback table");
                     NSMutableArray *decoded = [NSMutableArray array];
-                    for (DVMBuffer *b in buffers) {
+                    for (DVMBuffer *b in render?@[]:buffers) {
                         id encoded = returned[b.handle.stringValue];
-                        NSData *d = self.commandQueue.owner.binaryPayloads
+                        NSData *d = self.commandQueue.owner.binaryPayloads&&!render
                             ? ([encoded isKindOfClass:NSData.class] ? encoded : nil)
                             : ([encoded isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil);
                         if (d.length != b.length) reject(@"buffer readback size");
@@ -502,11 +605,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                         output.completedShadow=pixels;
                     }
                     // Validate all readbacks before publishing any CPU shadow.
-                    for (NSUInteger i = 0; i < buffers.count; i++) {
+                    for (NSUInteger i = 0; !render && i < buffers.count; i++) {
                         DVMBuffer *b = buffers[i]; NSData *d = decoded[i];
                         memcpy(b.contents, d.bytes, d.length);
                     }
-                    for (DVMTexture *t in textures) t.pendingUpload = nil;
+                    for (DVMTexture *t in textures) {t.pendingUpload = nil;if(render)t.completedShadow=nil;}
                 }
             } @catch (NSException *e) {
                 self.error = error(e.reason);
@@ -515,11 +618,13 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             @synchronized(self) {
                 self.status =
                     self.error ? MTLCommandBufferStatusError : MTLCommandBufferStatusCompleted;
-                handlers = [self.handlers copy];
+                handlers = [self.scheduledHandlers arrayByAddingObjectsFromArray:self.handlers];
+                [self.scheduledHandlers removeAllObjects];
                 [self.handlers removeAllObjects];
                 [self.resources removeAllObjects];
             }
             @synchronized(self.commandQueue.owner) {
+                self.commandQueue.owner.lastSubmissionError=self.error;
                 self.commandQueue.owner.submissionInFlight = NO;
             }
             dispatch_group_leave(self.completion);

@@ -135,6 +135,9 @@ class MMIOPeer(DriverPeer):
             with (self.out/'driver-audit.jsonl').open('a') as f:f.write(json.dumps(dict(seq=seq,line=line))+'\n')
         return lines
     def verify(self,events):
+        if getattr(self,'consumer',False):
+            from consumer_verify import verify
+            return verify(self.out,events,self.records)
         if self.present:return present_peer.verify(self.out,events,self.records)
         if hasattr(self,"blur_evidence"):return blur_peer.verify(self.out,events,self.records)
         return super().verify(events)

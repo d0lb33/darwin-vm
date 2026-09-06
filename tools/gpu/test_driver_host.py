@@ -99,12 +99,46 @@ class HostTests(unittest.TestCase):
         self.assertEqual(live['buffers'],1)
         self.assertEqual(live['textures'],0)
         self.assertEqual(live['resourceBytes'],16)
+    def test_linear_alias_bounds_coherence_and_parent_lifetime(self):
+        alignment=self.rpc('linearLayout',format=30)['alignment']
+        row=max(256,alignment);parent=self.rpc('buffer',length=row*128)['handle']
+        fields=dict(buffer=parent,width=128,height=128,format=30,usage=1,offset=0,row=row)
+        for bad in (dict(fields,offset=1),dict(fields,row=1),dict(fields,height=129)):
+            self.assertFalse(self.rpc('linearTexture',**bad)['ok'])
+        texture=self.rpc('linearTexture',**fields)['handle']
+        pattern=bytes((i%251 for i in range(row*128)))
+        self.assertTrue(self.rpc('upload',buffer=parent,data=base64.b64encode(pattern).decode())['ok'])
+        pixels=base64.b64decode(self.rpc('read',texture=texture)['data'])
+        self.assertEqual(pixels,b''.join(pattern[y*row:y*row+256] for y in range(128)))
+        self.assertFalse(self.rpc('release',handle=parent)['ok'])
+        self.assertTrue(self.rpc('release',handle=texture)['ok'])
+        self.assertTrue(self.rpc('release',handle=parent)['ok'])
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
+    def test_render_chunk_bounds_and_failed_batch_does_not_clear(self):
+        b=self.rpc('buffer',length=65536)['handle']
+        raw=base64.b64encode(bytes([91])*32768).decode()
+        self.assertFalse(self.rpc('writeRenderBuffer',buffer=b,offset=32769,data=raw)['ok'])
+        self.assertTrue(self.rpc('writeRenderBuffer',buffer=b,offset=32768,data=raw)['ok'])
+        self.assertEqual(base64.b64decode(self.rpc('read',buffer=b)['data']),bytes(32768)+bytes([91])*32768)
+        target=self.rpc('texture',width=64,height=64,format=80,usage=5)['handle']
+        original=bytes([71])*16384
+        self.rpc('upload',texture=target,row=256,data=base64.b64encode(original).decode())
+        good=dict(kind='render',target=target,load=2,store=1,clear=[1,0,0,1],operations=[])
+        for tasks in ([True],[-1],[2**32],list(range(17))):
+            self.assertFalse(self.rpc('renderSubmit',commands=[good],uploads=[],readbacks=[],guestTaskIDs=tasks)['ok'])
+        bad=dict(good,operations=[['pipeline',999999]])
+        self.assertFalse(self.rpc('renderSubmit',commands=[good,bad],uploads=[],readbacks=[])['ok'])
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=target)['data']),original)
+        result=self.rpc('renderSubmit',commands=[good],uploads=[],readbacks=[])
+        self.assertTrue(result['ok']);self.assertEqual(result['passes'],1)
+        self.assertGreaterEqual(result['gpu_end'],result['gpu_start'])
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=target)['data']),bytes([0,0,255,255])*4096)
 
 class DriverTests(unittest.TestCase):
     def test_capability_batch_is_negotiated_and_bound_to_validation(self):
         result=subprocess.run([str(BUILD/'driver_capability_test')],capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertIn('unsupported_stages_zero=1',result.stderr)
+        self.assertIn('bounded_render_stages=1',result.stderr)
     def test_host_bootstrap_precedes_guest_and_preserves_first_sequence(self):
         with tempfile.TemporaryDirectory() as root:
             peer=DriverPeer(Path(root),BUILD/'driver_host',AIR,boot=True)

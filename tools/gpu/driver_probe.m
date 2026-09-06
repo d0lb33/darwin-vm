@@ -249,7 +249,7 @@ static NSData *library(void) {
 #ifdef DVM_PRESENT_CONTRACT
 #include "present_contract.inc"
 #endif
-#ifdef DVM_DRIVER_PRESENT
+#if defined(DVM_DRIVER_PRESENT) && !defined(DVM_CA_PROBE)
 #include "present_workload.inc"
 #endif
 #ifdef DVM_CA_PROBE
@@ -391,6 +391,9 @@ int main(int argc, char **argv) {
         memoryBudget();
         #ifdef DVM_DRIVER_PRESENT
         double setupStart=now();
+#ifdef DVM_CA_PROBE
+        (void)setupStart;
+#endif
 #endif
         NSData *air = nil;
         @autoreleasepool {
@@ -424,8 +427,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "GPU_LOAD_DRIVER_STAGE device-created\n");
 #ifdef DVM_CA_PROBE
             DVMRunQuartzCoreConsumer(device);
-#endif
-            #if defined(DVM_DRIVER_PRESENT)
+#elif defined(DVM_DRIVER_PRESENT)
             DVMRunPresentedBlur(device,air,ns,handle,setupStart);
 #elif defined(DVM_DRIVER_BLUR)
             DVMRunBlur(device,air);
@@ -446,7 +448,9 @@ int main(int argc, char **argv) {
             usleep(10000);
         } while (now() < until);
         if (!stats || [stats[@"submissions"] unsignedIntegerValue] !=
-#if defined(DVM_DRIVER_PRESENT)
+#if defined(DVM_CA_PROBE)
+            [stats[@"submissions"] unsignedIntegerValue] || ![stats[@"renderPasses"] unsignedIntegerValue]
+#elif defined(DVM_DRIVER_PRESENT)
             ((uint32_t *)(ns.shared+DVM_PRESENT_METRICS))[1]
 #elif defined(DVM_DRIVER_BLUR)
             952
@@ -456,7 +460,9 @@ int main(int argc, char **argv) {
             ||
             [stats[@"live"][@"objects"] unsignedIntegerValue] != 0)
             fail("resource-retirement");
-#if defined(DVM_DRIVER_PRESENT)
+#if defined(DVM_CA_PROBE)
+        fprintf(stderr,"GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0\n");
+#elif defined(DVM_DRIVER_PRESENT)
         fprintf(stderr,"GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions=%u resources=0\n",((uint32_t *)(ns.shared+DVM_PRESENT_METRICS))[1]);
 #else
         fprintf(

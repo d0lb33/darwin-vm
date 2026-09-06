@@ -40,6 +40,7 @@ def main():
     p.add_argument('--probe-observe-display',action='store_true',
         help='after a standalone probe completes, require native presentation and stable input with a fresh ACK')
     p.add_argument('--driver-present',action='store_true',help='mode-3 resident blur acceptance with normal DCP frame witness')
+    p.add_argument('--driver-consumer',action='store_true',help='exact CARenderer offscreen acceptance using the mode-3 transport; separate from display acceptance')
     p.add_argument('--present-frames',type=int,default=33,help='bounded batch size, including first-use frame (2..8192)')
     p.add_argument('--present-hz',type=int,choices=(0,30,60),default=0,help='absolute guest pacing; zero is unpaced')
     p.add_argument('--driver-mmio',action='store_true',help='use shared RAM and MMIO notifications with --driver-worker')
@@ -70,6 +71,8 @@ def main():
     p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.driver_consumer and (not a.driver_present or not a.driver_worker or (a.driver_worker.parent/'consumer-probe.txt').read_text().strip()!='1'):
+        p.error('consumer acceptance requires matching opt-in mode-3 build')
     if not 2<=a.present_frames<=8192 or ((a.present_frames!=33 or a.present_hz) and not a.driver_present):
         p.error('paced batch requires --driver-present and 2..8192 frames')
     if a.driver_present and (not a.driver_mmio or not a.driver_worker or (a.driver_worker.parent/"transport-mode.txt").read_text().strip() not in ("--mmio-present","--mmio-present-pool")):
@@ -162,6 +165,7 @@ def main():
     if a.driver_worker:
         peer_class=MMIOPeer if a.driver_mmio else DriverPeer
         aux_peer=peer_class(out,a.driver_worker,a.library_cache,boot=driver_boot)
+        aux_peer.consumer=a.driver_consumer
         if a.driver_present and (a.present_frames!=33 or a.present_hz):
             aux_peer.present_config=(a.present_frames,a.present_hz)
             atomic_json(out/'present-config.json',dict(frames=a.present_frames,hz=a.present_hz))
@@ -291,10 +295,13 @@ def main():
                         driver_last_progress=time.monotonic()
                         if 'GPU_LOAD_DRIVER_READY' in line:driver_ready_seen=True
                         if 'GPU_LOAD_ERROR' in line:raise RuntimeError('shared-RAM guest failure: '+line)
+                        if a.driver_consumer and line=='GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0':
+                            audit_complete=True;aux_complete=True;reason='guest load probe completed'
                         if line in ('GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0',f'GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions={a.present_frames} resources=0'):
                             audit_complete=True;aux_complete=True
                             report['driver_complete_seconds']=time.monotonic()-started
                             report['completion_source']='shared-ram-audit'
+                    if audit_complete and a.driver_consumer:break
                     if audit_complete and a.driver_present:
                         if present_recovery_baseline is None:
                             present_recovery_baseline=json.loads((out/'input-status.json').read_text())
@@ -553,7 +560,7 @@ def main():
                     proc.kill(); proc.wait(timeout=5)
             report.update(elapsed=time.monotonic()-started, stop_reason=reason,
                 kept_paused=bool(proc and proc.poll() is None))
-            if a.driver_present and report.get('passed'):
+            if a.driver_present and not a.driver_consumer and report.get('passed'):
                 try:
                     import present_peer
                     report['presentation_final']=present_peer.verify_final(out,report['events'])

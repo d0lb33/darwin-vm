@@ -24,6 +24,8 @@ exports:
 ...\n''')
 
 foundation = {
+ '_NSStringFromClass','_NSStringFromSelector',
+ '_OBJC_CLASS_$_NSConstantArray','___NSArray0__struct',
  '_NSInternalInconsistencyException','_NSInvalidArgumentException','_NSLocalizedDescriptionKey',
  '_OBJC_CLASS_$_NSData','_OBJC_CLASS_$_NSDictionary','_OBJC_CLASS_$_NSError',
  '_OBJC_CLASS_$_NSException','_OBJC_CLASS_$_NSMutableArray','_OBJC_CLASS_$_NSMutableData',
@@ -43,7 +45,7 @@ iosurface = {
  '_kIOSurfaceBytesPerElement','_kIOSurfaceBytesPerRow','_kIOSurfaceHeight',
  '_kIOSurfacePixelFormat','_kIOSurfaceWidth',
 }
-metal = {'_OBJC_CLASS_$_MTLTextureDescriptor'}
+metal = {'_OBJC_CLASS_$_MTLTextureDescriptor','_OBJC_CLASS_$_MTLFunctionDescriptor'}
 objc = {
  '_OBJC_CLASS_$_NSObject','_OBJC_METACLASS_$_NSObject','__objc_empty_cache','_objc_alloc',
  '_objc_autorelease','_objc_autoreleasePoolPop','_objc_autoreleasePoolPush','_objc_autoreleaseReturnValue',
@@ -65,8 +67,8 @@ tbd('System/Library/Frameworks/Foundation.framework/Foundation.tbd','/System/Lib
 tbd('System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd','/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',corefoundation)
 tbd('System/Library/Frameworks/IOSurface.framework/IOSurface.tbd','/System/Library/Frameworks/IOSurface.framework/IOSurface',iosurface)
 tbd('System/Library/Frameworks/Metal.framework/Metal.tbd','/System/Library/Frameworks/Metal.framework/Metal',metal)
-tbd('System/Library/Frameworks/QuartzCore.framework/QuartzCore.tbd','/System/Library/Frameworks/QuartzCore.framework/QuartzCore', {'_OBJC_CLASS_$_CARenderer','_OBJC_CLASS_$_CALayer','_OBJC_CLASS_$_CATransaction','_kCARendererMetalCommandQueue'})
-tbd('System/Library/Frameworks/CoreGraphics.framework/CoreGraphics.tbd','/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics', {'_CGColorCreateGenericRGB','_CGColorRelease'})
+tbd('System/Library/Frameworks/QuartzCore.framework/QuartzCore.tbd','/System/Library/Frameworks/QuartzCore.framework/QuartzCore', {'_OBJC_CLASS_$_CARenderer','_OBJC_CLASS_$_CALayer','_OBJC_CLASS_$_CATransaction','_kCARendererMetalCommandQueue','_kCARendererColorSpace'})
+tbd('System/Library/Frameworks/CoreGraphics.framework/CoreGraphics.tbd','/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics', {'_CGColorCreateGenericRGB','_CGColorRelease','_CGColorCreate','_CGColorSpaceCreateWithName','_CGColorSpaceRelease','_kCGColorSpaceSRGB'})
 tbd('usr/lib/libobjc.A.tbd','/usr/lib/libobjc.A.dylib',objc)
 tbd('usr/lib/libobjc.tbd','/usr/lib/libobjc.A.dylib',objc)
 tbd('usr/lib/libSystem.tbd','/usr/lib/libSystem.B.dylib',system)

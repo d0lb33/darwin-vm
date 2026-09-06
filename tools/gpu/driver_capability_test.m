@@ -14,7 +14,7 @@ int main(void){@autoreleasepool{
 #undef CHECK_BOOL
 #undef CHECK_UINT
     check(requests==1,"one negotiation for the complete batch");
-    check(![caps maxFragmentTextures]&&![caps maxFragmentSamplers]&&![caps maxColorAttachments],"unimplemented stages not advertised");
+    check([caps maxFragmentTextures]==8&&[caps maxFragmentSamplers]==8&&[caps maxColorAttachments]==1,"bounded implemented render bindings");
     check(![device supportsFamily:MTLGPUFamilyApple1]&&![device supportsTextureSampleCount:4],"no unimplemented families/MSAA");
     MTLTextureDescriptor *texture=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:DVM_TEXTURE_DIMENSION+1 height:1 mipmapped:NO];
     texture.storageMode=MTLStorageModeShared;texture.usage=MTLTextureUsageShaderRead;
@@ -24,12 +24,12 @@ int main(void){@autoreleasepool{
     for(NSString *key in @[@"version",@"queries"]){
         id<MTLDevice> bad=DVMCreateMetalDevice(^NSDictionary *(NSDictionary *r,NSError **e){
             (void)r;(void)e;NSMutableDictionary *profile=[DVMContractProfile() mutableCopy];
-            if([key isEqual:@"version"])profile[key]=@2;
+            if([key isEqual:@"version"])profile[key]=@(DVM_CONTRACT_VERSION+1);
             else {NSMutableDictionary *queries=[profile[key] mutableCopy];queries[@"maxFragmentTextures"]=@128;profile[key]=queries;}
             return @{@"contract":profile};
         });
         BOOL refused=NO;@try{[(id<DVMCapabilityQueries>)bad maxFragmentTextures];}@catch(NSException *e){refused=[e.reason containsString:@"capability contract mismatch"];}
         check(refused,"mismatched host contract must fail closed");
     }
-    fprintf(stderr,"DVM_CAPABILITIES_PASS batch=1 cached=1 bounds=1 mismatch_rejected=1 unsupported_stages_zero=1\n");
+    fprintf(stderr,"DVM_CAPABILITIES_PASS batch=1 cached=1 bounds=1 mismatch_rejected=1 bounded_render_stages=1\n");
 }}

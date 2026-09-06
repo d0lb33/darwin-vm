@@ -30,6 +30,7 @@ enum {
 @property(nonatomic) NSUInteger textureBytes;
 @property(nonatomic) NSUInteger width, height, row;
 @property(nonatomic) MTLPixelFormat format;
+@property(nonatomic,strong) DVMEntry *parent;
 @end
 @implementation DVMEntry
 @end
@@ -39,6 +40,7 @@ enum {
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, DVMEntry *> *entries;
 @property(nonatomic) uint64_t nextHandle, lastSeq, creations, submissions;
+@property(nonatomic) NSUInteger renderPasses,renderDraws;
 @property(nonatomic) NSUInteger textureBytes,residentBytes;
 @end
 @implementation DVMHost
@@ -239,14 +241,8 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     NSUInteger bpp;
     if (!Number(request[@"format"], &format))
         return HostError(seq, EINVAL, @"invalid format");
-    if (format == MTLPixelFormatBGRA8Unorm) {
-        pixel = MTLPixelFormatBGRA8Unorm;
-        bpp = 4;
-    } else if (format == MTLPixelFormatRGBA16Float) {
-        pixel = MTLPixelFormatRGBA16Float;
-        bpp = 8;
-    } else
-        return HostError(seq, EINVAL, @"unsupported texture format");
+    bpp=DVMFormatBytes(format);pixel=format;
+    if(!bpp)return HostError(seq, EINVAL, @"unsupported texture format");
     NSUInteger bytes = (NSUInteger)width * (NSUInteger)height * bpp;
     if (bytes > DVM_TEXTURE_BYTES)
         return HostError(seq, EINVAL, @"texture exceeds framed transfer limit");
@@ -271,7 +267,7 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     entry.row = (NSUInteger)width * bpp;
     entry.format = pixel;
     host.textureBytes += bytes;
-    return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(entry.handle), @"row" : @(entry.row)};
+    return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(entry.handle), @"row" : @(entry.row), @"allocatedSize":@(texture.allocatedSize)};
 }
 static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) {
     DVMEntry *entry = Entry(host, request[@"texture"], @"texture");
@@ -326,6 +322,8 @@ static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request)
     if (!Number(request[@"handle"], &handle) || !host.entries[@(handle)])
         return HostError(seq, ENOENT, @"unknown handle");
     DVMEntry *entry = host.entries[@(handle)];
+    for(DVMEntry *other in host.entries.allValues)if(other.parent==entry)
+        return HostError(seq,EBUSY,@"buffer retained by texture view");
     if([entry.kind isEqual:@"resident"]&&[(DVMResidentBlur *)entry.object displayPending])
         return HostError(seq,EBUSY,@"managed release before display retirement");
     host.textureBytes -= entry.textureBytes;
@@ -358,7 +356,7 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
             @"residentWorkloads":@(host.residentBytes?1:0)
         },
         @"creations" : @(host.creations),
-        @"submissions" : @(host.submissions)
+        @"submissions" : @(host.submissions),@"renderPasses":@(host.renderPasses),@"renderDraws":@(host.renderDraws)
     };
 }
 static NSDictionary *Buffer(DVMHost *host, uint64_t seq, NSDictionary *r) {
@@ -372,7 +370,7 @@ static NSDictionary *Buffer(DVMHost *host, uint64_t seq, NSDictionary *r) {
     e.textureBytes = n;
     host.textureBytes += n;
     memset(b.contents, 0, n);
-    return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(e.handle)};
+    return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(e.handle), @"allocatedSize":@(b.allocatedSize)};
 }
 
 #include "blur_host_submit.inc"
@@ -526,6 +524,9 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
 }
 #include "present_host_submit.inc"
 #include "consumer_state_host.inc"
+#include "consumer_resource_host.inc"
+#include "consumer_render_host.inc"
+#include "consumer_function_host.inc"
 
 static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *request) {
     NSString *op = request[@"op"];
@@ -534,6 +535,13 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     if([op isEqual:@"capabilities"])return @{@"seq":@(seq),@"ok":@YES,@"contract":DVMContractProfile()};
     if([op hasPrefix:@"resident"])return ResidentRequest(host,seq,request);
     if([op isEqual:@"depthState"])return DepthState(host,seq,request);
+    if([op isEqual:@"linearLayout"])return LinearLayout(host,seq,request);
+    if([op isEqual:@"linearTexture"])return LinearTexture(host,seq,request);
+    if([op isEqual:@"renderPipeline"])return RenderPipeline(host,seq,request);
+    if([op isEqual:@"sampler"])return Sampler(host,seq,request);
+    if([op isEqual:@"renderSubmit"])return RenderSubmit(host,seq,request);
+    if([op isEqual:@"writeRenderBuffer"])return WriteRenderBuffer(host,seq,request);
+    if([op isEqual:@"function"])return SpecializedFunction(host,seq,request);
     if ([op isEqual:@"buffer"])
         return Buffer(host, seq, request);
     if ([op isEqual:@"library"])

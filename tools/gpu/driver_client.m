@@ -40,6 +40,7 @@ int main(int argc, const char **argv) {
                 NSMutableDictionary *r = [request mutableCopy];
                 r[@"seq"] = @(++seq);
                 NSData *d = [NSJSONSerialization dataWithJSONObject:r options:0 error:e];
+                if(getenv("DVM_CLIENT_AUDIT"))fprintf(stderr,"DVM_HOST_REQUEST %.*s\n",(int)d.length,(const char *)d.bytes);
                 uint32_t n = (uint32_t)d.length;
                 if (!d || !n || n > 2 * 1024 * 1024 || !transfer(1, &n, 4, YES) ||
                     !transfer(1, (void *)d.bytes, n, YES) || !transfer(0, &n, 4, NO) || !n ||
@@ -55,6 +56,7 @@ int main(int argc, const char **argv) {
                 NSDictionary *reply = [NSJSONSerialization JSONObjectWithData:out
                                                                       options:0
                                                                         error:e];
+                if(getenv("DVM_CLIENT_AUDIT")&&![reply[@"ok"] boolValue])fprintf(stderr,"DVM_HOST_REJECTION op=%s reply=%s\n",[r[@"op"] UTF8String],reply.description.UTF8String);
                 if (![reply isKindOfClass:NSDictionary.class] ||
                     [reply[@"seq"] unsignedLongLongValue] != seq) {
                     dead = YES;
@@ -93,10 +95,11 @@ int main(int argc, const char **argv) {
             usleep(1000);
             clock_gettime(CLOCK_MONOTONIC, &t);
         } while (t.tv_sec - started.tv_sec < 5);
+        BOOL consumer=!strcmp(argv[1],"consumer");
         if ([stats[@"live"][@"objects"] unsignedIntegerValue] ||
-            [stats[@"submissions"] unsignedIntegerValue] != (unsigned)atoi(argv[3]))
+            (consumer?![stats[@"renderPasses"] unsignedIntegerValue]:[stats[@"submissions"] unsignedIntegerValue] != (unsigned)atoi(argv[3])))
             return 1;
-        fprintf(stderr, "GPU_LOAD_COMPLETE scope=host-driver-luma result=pass resources=0\n");
+        fprintf(stderr, "GPU_LOAD_COMPLETE scope=%s result=pass resources=0\n",consumer?"host-quartzcore-rehearsal":"host-driver-luma");
         return 0;
     }
 }
