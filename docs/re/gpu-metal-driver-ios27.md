@@ -269,3 +269,46 @@ The next baseline change is synchronization with the newly merged SMC support
 on project and QEMU main, followed by an owned QEMU rebuild. All runtime results
 above predate that synchronization; they are not evidence for an SMC-enabled
 baseline.
+
+## SMC main integration (2026-09-06)
+
+Fetched both remotes, then merged the newer **local** main branches: project
+`533f7e7` into `ba636a9`, QEMU `2ee8f19` into `96fac9e`. The only project
+merge conflict was the submodule pointer, resolved to the QEMU merge containing
+both SMC and NS6 transport. Original main checkouts were not modified.
+
+The owned QEMU build completed with
+`ninja -j 8 qemu-system-aarch64 qemu-img`; executable SHA-256
+`577dc57e37246af6bc2bfdd0abafcf78a9000e9c3eb85c9a41c08bf9f4f6f4f5`.
+All 79 current project regressions and 11 driver tests passed, along with shell
+syntax checks. Driver tests reused the unchanged BUILD12 binaries; this is host
+validation, not a new guest GPU execution. Build and test logs are under
+`/tmp/dvm/METAL_DRIVER_SMC_SYNC`.
+
+The first restore smoke test accidentally enabled ANS/SEP/DCP in addition to
+the default restore SMC/SPMI features. It stopped on the first-contract failure
+`[SPTM] VIOLATION_NVME_ILLEGAL_NVMe_QUEUE_ENTRIES_MISMATCH: validate_nvme_queue_entries(nvme_validation.h:182) - queue_entries(0x41)`.
+SMC INITIALIZE and native RTC startup had occurred, but no shell was reached.
+It is not a valid default-restore regression test. The corrected test uses
+exactly run.sh's SMC/SPMI restore tree options and a fresh tag.
+
+The durable native-SMC system package traces through BATT_NB3 and
+CLOCK_SOFTWARE_INSTALL1, while this driver's reviewed input parent additionally
+contains INPUT_REVIEW_INSTALL3 lineage. Do not silently replace that parent or
+restore an old checkpoint against a changed device configuration. The next
+system test needs a guarded removal of the old battery publisher/restoration
+of original powerd on a disposable child of the retained input lineage, or an
+explicitly verified equivalent migration. SMC has not yet been tested as a
+remedy for the helper's readiness failure.
+
+Corrected smoke test `METAL_SMC_RESTORE2`: **xnu panics: 0; reached shell:
+yes**. SMC INITIALIZE appears in stderr line 39, AppleSMCKeysEndpoint in
+serial line 131, and AppleDialogSPMIPMURTC started in serial line 150. The
+45-second bounded probe shut down its owned VM. No system disk was attached.
+This validates merged restore startup only; it does not establish system UI
+or GPU readiness on SMC.
+
+Durable records (including failed runs):
+`/Users/jdolbe1/dvm-artifacts/research/gpu-metal-driver-ios27-20260906/`.
+The archive index records each source path and SHA-256; disks, RAM, binaries
+and Apple shader libraries remain excluded.
