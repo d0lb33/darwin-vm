@@ -52,7 +52,7 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION 13
+#define VERSION 14
 #define RECOVERY_ATTEMPTS 3
 #define RECOVERY_TIMEOUT_SECONDS 20
 
@@ -434,21 +434,55 @@ static bool post_button_at(uint64_t ts, unsigned usage, bool down) {
  * up, matching AppKit's normalised delta sign in ui/cocoa.m. */
 #define WHEEL_STEP_FRACTION 0.05     /* of the display height per notch */
 #define WHEEL_MAX_FRACTION  0.40
-static bool scroll_gesture(double x, double y, int notches) {
+/* The wheel is a miniature touch stream inside one worker operation.  Keep
+ * the actual contact state current between its individual HID calls so C and
+ * epoch changes can release it even though there is no queued T operation. */
+static bool wheel_cancelled(unsigned generation) {
+    pthread_mutex_lock(&lock);
+    bool cancelled = generation != op_generation;
+    pthread_mutex_unlock(&lock);
+    return cancelled;
+}
+static void wheel_note_touch(double x, double y, bool down) {
+    pthread_mutex_lock(&lock);
+    touch_down = down;
+    touch_x = x;
+    touch_y = y;
+    if (!down) touch_release_needed = false;
+    pthread_mutex_unlock(&lock);
+}
+static bool scroll_gesture(double x, double y, int notches, unsigned generation) {
     double distance = notches * WHEEL_STEP_FRACTION;
     if (distance > WHEEL_MAX_FRACTION) distance = WHEEL_MAX_FRACTION;
     if (distance < -WHEEL_MAX_FRACTION) distance = -WHEEL_MAX_FRACTION;
     double y_end = y + distance;
     if (y_end < 0.02) y_end = 0.02;
     if (y_end > 0.98) y_end = 0.98;
+    if (wheel_cancelled(generation)) return true;
     if (!post_touch_at(0, x, y, true, true)) return false;
+    wheel_note_touch(x, y, true);
     bool ok = true;
     for (int i = 1; i <= 8; i++) {
+        if (wheel_cancelled(generation)) {
+            bool released = post_touch_at(0, x, touch_y, false, true);
+            if (released) wheel_note_touch(x, touch_y, false);
+            return released;
+        }
         usleep(12000);
-        ok = post_touch_at(0, x, y + (y_end - y) * i / 8.0, true, false) && ok;
+        double step_y = y + (y_end - y) * i / 8.0;
+        bool posted = post_touch_at(0, x, step_y, true, false);
+        if (posted) wheel_note_touch(x, step_y, true);
+        ok = posted && ok;
+    }
+    if (wheel_cancelled(generation)) {
+        bool released = post_touch_at(0, x, touch_y, false, true);
+        if (released) wheel_note_touch(x, touch_y, false);
+        return released;
     }
     usleep(60000);
-    return post_touch_at(0, x, y_end, false, true) && ok;
+    bool released = post_touch_at(0, x, y_end, false, true);
+    if (released) wheel_note_touch(x, y_end, false);
+    return released && ok;
 }
 
 /* Reader side: queue one HID operation; false when the worker is too far behind. */
@@ -510,11 +544,15 @@ static bool cancel_input(const struct record *r) {
     touch_release_enqueued = false;
     buttons_release_enqueued = 0;
     held = false;
-    if (touch_down || (dispatching && active_op.kind == 'T' && active_op.down))
+    if (touch_down || (dispatching && active_op.kind == 'T' && active_op.down) ||
+        (dispatching && active_op.kind == 'W'))
         touch_release_needed = true;
     buttons_release_needed |= button_down;
     if (dispatching && active_op.kind == 'B' && active_op.down)
         buttons_release_needed |= button_bit(active_op.usage);
+    /* A running wheel observes its generation and posts its own release before
+     * returning.  Do not queue another up behind it. */
+    if (dispatching && active_op.kind == 'W') return true;
     return schedule_releases(r);
 }
 
@@ -615,7 +653,7 @@ static void *dispatch_thread(void *unused) {
         pthread_mutex_unlock(&lock);
         uint64_t t0 = now_us();
         bool ok = o.kind == 'B' ? post_button_at(o.ts, o.usage, o.down)
-                : o.kind == 'W' ? scroll_gesture(o.x, o.y, o.notches)
+                : o.kind == 'W' ? scroll_gesture(o.x, o.y, o.notches, o.generation)
                 : o.kind == 'T' ? post_touch_at(o.ts, o.x, o.y, o.down, o.edge)
                                 : false;
         uint64_t elapsed = now_us() - t0;
@@ -635,6 +673,13 @@ static void *dispatch_thread(void *unused) {
                 button_down &= ~button_bit(o.usage);
                 buttons_release_needed &= ~button_bit(o.usage);
             }
+        }
+        if (!ok && o.kind == 'W' && touch_down) {
+            /* A failed final wheel up is a real held contact.  Queue one
+             * release now; do not wait for an unrelated second failure. */
+            touch_release_needed = true;
+            struct record cleanup = {.epoch = epoch};
+            schedule_releases(&cleanup);
         }
         if (o.generation != op_generation) {
             struct record cleanup = {.epoch = epoch};
