@@ -154,7 +154,7 @@ def move(qmp, x, y):
 
 
 def screendump(hmp, path):
-    hmp.command(f'screendump {path} -f png')
+    hmp.command(f'screendump {json.dumps(str(path))} -f png')
     data = Path(path).read_bytes()
     return hashlib.sha256(data).hexdigest()
 

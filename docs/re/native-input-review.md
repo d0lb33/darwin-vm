@@ -2,7 +2,7 @@
 
 This reviews the DVMI2 implementation introduced by parent commit `60628ac`
 and QEMU commit `b0f7bc6`. The reviewed QEMU head is `8b46eb6` (including `31d0f88`); the revised
-guest helper reports version 14. Earlier boot/restore observations remain
+guest helper reports version 15. Earlier boot/restore observations remain
 historical evidence in [native-input.md](native-input.md).
 
 ## Correctness fixes
@@ -17,7 +17,11 @@ historical evidence in [native-input.md](native-input.md).
   bounds the scrolling that can remain after trackpad input stops.
 - The helper tracks each internal wheel contact. Cancellation interrupts the
   remaining wheel moves and releases it; a failed final up schedules an internal
-  retry immediately. Stubbed dispatch tests exercise both cases.
+  retry immediately. Stubbed dispatch tests exercise both cases. Six 20 ms
+  stationary touch samples before the final up explicitly provide zero motion
+  to the recognizer. The earlier 60 ms sleep provided no stationary samples;
+  a late content-offset change in FRESH4 could not separate list layout from
+  coasting, so it was not sufficient no-fling evidence.
 - A ten-second ACK timeout or thirty-second dispatch timeout opens a new
   epoch and clears queued work. These are guest virtual-time deadlines, so
   pausing does not expire them. Previously the host marked input lost but
@@ -159,18 +163,67 @@ advanced from 6:56 on Home to 6:57 in Settings. Evidence is under
 handler. A manually operated Cocoa window was not independently verified by
 the automation interface.
 
+## Final-helper controls
+
+FRESH4 (v14, final QEMU, RPC tracing enabled) reached early boot at 18.656 s,
+initial HID readiness at 47.264 s, and first presentation at 174.570 s with
+zero kernel panics. PID87 disappeared after becoming ready, before any input
+was sent; launchd started PID200, which announced R in epoch8. The initial
+five timeouts and five stale-epoch rejections preceded the measured UI actions.
+Lock-to-Home dispatched in 361.6 ms. Settings rendered on the second tap
+(356.8 ms dispatch; ten-second settle), and wheel -3 visibly scrolled it
+(588.7 ms dispatch, no contact held). Exactly seven user records had dispatched
+through this sequence; other host pointer movement had generated no touches.
+
+In-app Home then dispatched successfully in 297.1 ms but left the frame
+unchanged; presentations stayed at 420. This trace had **no rejected scanout**,
+so the later unsupported A408 shape seen in FRESH1 cannot explain the original
+submission stall. A service reset triggered v14 recovery in the same PID200
+(`serial.log:30342..30357`), reaching R on attempt 1 in epoch9. A later Home
+successfully dispatched; presentation returned with a lock screen at 7:11,
+not an app-to-Home proof. The clock had advanced through 7:07, 7:08, 7:09 before
+the stall. Evidence is in `/tmp/dvm/INPUT_REVIEW_FRESH4/ui/` and its serial/RPC
+logs. This remains a display/scene stability limit beyond HID submission.
+
+A diagnostic breakpoint on FRESH3's freshly slid SpringBoard Home handler
+at 0x23d598d80 matched the binary bytes and had zero hits, but 146 touch records
+overlapped the interval. The result is **inconclusive** and must not be used
+to infer where Home was dropped. The VM was paused and GDB disabled afterward;
+artifacts are `home-handler-*` under that run directory.
+
+FRESH5 tested the final v15 helper with normal RPC tracing disabled. Early
+boot completed at 18.883 s; replacement helper 141 was ready at 82.148 s; first
+presentation arrived at 144.190 s, with zero kernel panics. PID87 again
+disappeared during initialization. After the initial one timeout and two
+stale-epoch rejections, right-click dispatched in 410.1 ms and visibly unlocked.
+The first Settings tap dispatched in 359.5 ms, displayed a white launch surface
+at 12 seconds, and subsequently rendered Settings without a second tap.
+
+The first stop-probe attempt opened two simultaneous HMP clients and timed
+out before sending wheel input; the probe was corrected to close the initial
+client. `ui/wheel-stop2/` is the completed run: -3 dispatched in 708.1 ms,
+with no failed dispatch or held contact. Captures at 0.31, 1.058, 3.052 seconds
+after dispatch show continuing visible movement, while the dispatched count
+remains six. The subsequent +1 dispatched in 975.1 ms without errors but its
+three-second frame remained unchanged. Thus this is **not a passing no-fling
+or settled-display result**. It cannot distinguish deferred rendering from
+scroll inertia. No in-app Home press occurred in this sequence. The revised
+stationary tail has host regression coverage, while end-to-end scroll settling
+remains a runtime limit. `probe_wheel_stop.py` records the timed frames and
+counters without inventing a visual success verdict.
+
 ## Build and installation
 
-All **74 host tests pass** (`/tmp/dvm/input-review-v14-tests.log`).
+All **74 host tests pass** (`/tmp/dvm/input-review-v15-tests.log`).
 Tests include the real C queue/parser routines, replenished UART FIFO
 capacity, duplicate/stale completions, timeout cancellation, in-flight touch
 and Home cancellation, repeated cancel, queue overflow, and CLI false-success
 regressions. The signed iOS cross-build and QEMU build pass.
 
 The reviewed helper was installed by the restore guest into a new child of
-`CLOCK_SOFTWARE_INSTALL1`; `INPUT_REVIEW_INSTALL2/result.json` records the
+`CLOCK_SOFTWARE_INSTALL1`; `INPUT_REVIEW_INSTALL3/result.json` records the
 `DVM_HID_INSTALL_DONE` marker and seals the child read-only. The pinned source
-for independent boots is `/tmp/dvm/native-input-reviewed-v14/warm-manifest.json`.
+for independent boots is `/tmp/dvm/native-input-reviewed-v15/warm-manifest.json`.
 It retains the original disk lineage and trust cache plus the helper's new
 CDHash. No kernel or Apple-userspace patch was added by this review.
 
@@ -192,3 +245,31 @@ matching immutable parent. Use `tools/derive_warm_manifest.py` to pin the sealed
 installed child, helper trust cache, reviewed QEMU and `DARWIN_INPUT_UART=1`.
 All large disk attachments remain inside the restore guest; only the small
 ramdisk is attached to the host through `safe_attach.sh`.
+
+
+## Reproduce the reviewed candidate
+
+The pinned QEMU is
+`/tmp/dvm/native-input-reviewed-qemu2/qemu-system-aarch64` (commit `8b46eb6`).
+Helper v15, its exact trust caches, sealed install result, and launch manifest
+are under `/tmp/dvm/native-input-reviewed-v15/`. These paths are local review
+artifacts, not a replacement for rebuilding a portable image profile.
+
+Choose a fresh, unused tag. The probe stops at first presentation for evidence;
+resume explicitly before interacting so the displayed time does not appear
+frozen solely because of a test pause:
+
+```sh
+python3 tools/warm_boot_probe.py \
+  /tmp/dvm/native-input-reviewed-v15/warm-manifest.json \
+  --tag INPUT_USE_NEW --seconds 360 --stop-on 'iomfb: presented' --keep-paused
+python3 tools/hmp.py /tmp/dvm/INPUT_USE_NEW/monitor.sock cont
+python3 tools/input/native_input.py --run /tmp/dvm/INPUT_USE_NEW \
+  wait-ready --timeout 240
+```
+
+Click/drag the left button for touch; right-click or F5 for Home; F6 for Power;
+use the wheel for a bounded drag. Readiness and an idle queue are prerequisites.
+After a scene or system-service restart, wait for readiness before another
+attempt. A frozen frame despite successful dispatch requires display diagnosis;
+repeated button presses are not evidence of a transport repair.

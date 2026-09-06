@@ -1,6 +1,6 @@
 # Native input development (24A5430a)
 
-The current reviewed implementation is helper **v14** with QEMU `8b46eb6`.
+The current reviewed implementation is helper **v15** with QEMU `8b46eb6`.
 Read [the review and current runtime evidence](native-input-review.md) first: it
 fixes transport/recovery/cancellation defects and qualifies the historical
 Settings, Home, and restore conclusions below. A HID dispatch success is not
