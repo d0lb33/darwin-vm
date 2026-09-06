@@ -120,6 +120,8 @@ def main():
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40 or not 1 <= a.seconds <= 1200:
         p.error('invalid tag or seconds (1..1200)')
     m = json.loads(a.manifest.read_text())
+    if (a.driver_wait_display or a.driver_present) and m.get("qemu_env", {}).get("DARWIN_INPUT_UART") != "1":
+        p.error("display readiness requires explicit DARWIN_INPUT_UART=1 in the manifest")
     if driver_boot and m.get('guest_installation', {}).get('start_interval'):
         p.error('boot-time driver validation requires a RunAtLoad parent, not a delayed launch')
     if a.driver_late_launch and m.get('guest_installation', {}).get('start_interval') != 180:

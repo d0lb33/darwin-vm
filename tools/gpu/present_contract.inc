@@ -29,8 +29,26 @@ static void DVMDisplayContract(void) {
     if(!cacheMode||!*cacheMode)fail("present-cache-mode-symbol");
     fprintf(stderr,"GPU_LOAD_PRESENT_CACHE requested=0x700\n");
     const unsigned w=1179,h=2556,row=4864,bytes=row*h;
-    IOSurfaceRef surface=IOSurfaceCreate((__bridge CFDictionaryRef)@{(__bridge id)*cacheMode:@0x700,(id)kIOSurfaceWidth:@(w),(id)kIOSurfaceHeight:@(h),(id)kIOSurfaceBytesPerElement:@4,(id)kIOSurfaceBytesPerRow:@(row),(id)kIOSurfaceAllocSize:@(bytes),(id)kIOSurfacePixelFormat:@(0x42475241)});
+    NSMutableDictionary *properties=[@{(__bridge id)*cacheMode:@0x700,(id)kIOSurfaceWidth:@(w),(id)kIOSurfaceHeight:@(h),(id)kIOSurfaceBytesPerElement:@4,(id)kIOSurfaceBytesPerRow:@(row),(id)kIOSurfaceAllocSize:@(bytes),(id)kIOSurfacePixelFormat:@(0x42475241)} mutableCopy];
+#ifdef DVM_MANAGED_ADDRESS_CONTRACT
+    void *owned=NULL;size_t ownedBytes=(bytes+16383u)&~16383u;
+    if(posix_memalign(&owned,16384,ownedBytes)||!owned)fail("managed-address-allocation");
+    memset(owned,0,ownedBytes);
+    CFStringRef *addressKey=dlsym(RTLD_DEFAULT,"kIOSurfaceClientAddress");
+    if(!addressKey||!*addressKey)fail("managed-address-key");
+    properties[(__bridge id)*addressKey]=@((uintptr_t)owned);
+    fprintf(stderr,"GPU_LOAD_PRESENT_MANAGED_CREATE address=%p bytes=%zu cache=0x700\n",owned,ownedBytes);
+#endif
+    IOSurfaceRef surface=IOSurfaceCreate((__bridge CFDictionaryRef)properties);
     if(!surface||IOSurfaceGetBytesPerRow(surface)!=row||IOSurfaceGetAllocSize(surface)<bytes)fail("present-surface");
+#ifdef DVM_MANAGED_ADDRESS_CONTRACT
+    if(IOSurfaceLock(surface,0,NULL))fail("managed-address-lock");
+    volatile uint32_t *a=owned,*b=IOSurfaceGetBaseAddress(surface);
+    a[0]=0x44564d41;mmioBarrier();if(b[0]!=0x44564d41)fail("managed-alias-forward");
+    b[1]=0x44564d42;mmioBarrier();if(a[1]!=0x44564d42)fail("managed-alias-reverse");
+    if(IOSurfaceUnlock(surface,0,NULL))fail("managed-address-unlock");
+    fprintf(stderr,"GPU_LOAD_PRESENT_MANAGED_ALIAS verified=1 owned=%p surface=%p\n",owned,b);
+#endif
     CGRect rect={{0,0},{w,h}};
     for(unsigned frame=1;frame<=3;frame++) {
         if(IOSurfaceLock(surface,0,NULL))fail("present-lock");
@@ -48,6 +66,11 @@ static void DVMDisplayContract(void) {
         rc=wait(fb,swap,1,2.0);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN frame=%u op=wait rc=0x%x mode=1\n",frame,rc);if(rc)fail("present-wait");
     }
     rc=power(fb,0);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN op=power-off rc=0x%x\n",rc);if(rc)fail("present-power-off");
-    // Keep the final surface alive until the short-lived diagnostic exits.
+#ifdef DVM_MANAGED_ADDRESS_CONTRACT
+    // All three native mode-1 waits returned; destroy the surface before backing.
+    CFRelease(surface);free(owned);
+    fprintf(stderr,"GPU_LOAD_PRESENT_MANAGED_RELEASE verified=1 after_native_wait=1\n");
+#endif
+    // Other variants keep the final surface until the diagnostic exits.
     fprintf(stderr,"GPU_LOAD_PRESENT_CONTRACT pass=1 frames=3 scope=swap-api-returns-not-pixel-proof\n");
 }

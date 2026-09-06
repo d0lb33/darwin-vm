@@ -3,6 +3,10 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:?new output directory}
 mode=${2:-nvme}
+requested_mode=$mode
+shared_flags=(-UDVM_SHARED_SURFACE -UDVM_MANAGED_ADDRESS_CONTRACT)
+if [[ "$mode" == --mmio-present-managed-contract ]]; then mode=--mmio-present-contract; fi
+if [[ "$mode" == --mmio-present-shared-probe ]]; then mode=--mmio-present; shared_flags=(-DDVM_SHARED_SURFACE); fi
 [[ "$mode" == nvme || "$mode" == --mmio || "$mode" == --mmio-binary || "$mode" == --mmio-blur || "$mode" == --mmio-present-contract || "$mode" == --mmio-present ]] || exit 2
 extra_flags=(-UDVM_DRIVER_MMIO)
 if [[ "$mode" == --mmio || "$mode" == --mmio-binary ]]; then extra_flags=(-DDVM_DRIVER_MMIO); fi
@@ -10,6 +14,7 @@ if [[ "$mode" == --mmio-binary ]]; then extra_flags+=(-DDVM_DRIVER_BINARY); fi
 if [[ "$mode" == --mmio-blur ]]; then extra_flags=(-DDVM_DRIVER_MMIO -DDVM_DRIVER_BINARY -DDVM_DRIVER_BLUR); fi
 if [[ "$mode" == --mmio-present-contract ]]; then extra_flags=(-DDVM_DRIVER_MMIO -DDVM_DRIVER_BINARY -DDVM_PRESENT_CONTRACT); fi
 if [[ "$mode" == --mmio-present ]]; then extra_flags=(-DDVM_DRIVER_MMIO -DDVM_DRIVER_BINARY -DDVM_DRIVER_PRESENT); fi
+if [[ "$requested_mode" == --mmio-present-managed-contract ]]; then shared_flags=(-DDVM_MANAGED_ADDRESS_CONTRACT); fi
 test ! -e "$out"
 mkdir -p "$out/DVMProxy.bundle"
 python3 "$repo/tools/gpu/make_guest_link_stubs.py" "$out/stubs"
@@ -23,7 +28,7 @@ partial=(-Wno-protocol -Wno-objc-protocol-property-synthesis)
 for name in driver_guest driver_probe driver_workload; do
     optimize=(-O1)
     if [[ ( "$mode" == --mmio-blur || "$mode" == --mmio-present ) && "$name" == driver_probe ]]; then optimize=(-O3); fi
-    xcrun clang -target arm64-apple-ios27.0 -isysroot "$sdk" -Wno-incompatible-sysroot "${flags[@]}" "${partial[@]}" "${extra_flags[@]}" "${optimize[@]}" -c "$repo/tools/gpu/$name.m" -o "$out/$name.o"
+    xcrun clang -target arm64-apple-ios27.0 -isysroot "$sdk" -Wno-incompatible-sysroot "${flags[@]}" "${partial[@]}" "${extra_flags[@]}" "${shared_flags[@]}" "${optimize[@]}" -c "$repo/tools/gpu/$name.m" -o "$out/$name.o"
 done
 python3 - "$out" "$mode" <<'PY'
 from pathlib import Path
@@ -71,4 +76,4 @@ xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$rep
 cp "$repo/tools/gpu/present_"* "$repo/tools/gpu/blur_"* "$repo/tools/gpu/driver_"* "$repo/tools/gpu/build_driver.sh" "$out/"
 
 cp "$repo/qemu-sptm/include/xnu/darwin_gpu_transport.h" "$out/"
-printf "%s\n" "$mode" > "$out/transport-mode.txt"
+printf "%s\n" "$requested_mode" > "$out/transport-mode.txt"

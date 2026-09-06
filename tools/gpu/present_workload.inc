@@ -20,8 +20,28 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
     CGSize dimensions={0};if(size(fb,&dimensions)||dimensions.width!=1179||dimensions.height!=2556)fail("present-display-size");
     rc=power(fb,1);if(rc){fprintf(stderr,"GPU_LOAD_ERROR power-on=0x%x\n",rc);fail("present-power-on");}
     CFStringRef *cacheMode=dlsym(RTLD_DEFAULT,"kIOSurfaceCacheMode");if(!cacheMode||!*cacheMode)fail("present-cache-key");
-    IOSurfaceRef surface=IOSurfaceCreate((__bridge CFDictionaryRef)@{(__bridge id)*cacheMode:@0x700,(id)kIOSurfaceWidth:@DVM_PRESENT_WIDTH,(id)kIOSurfaceHeight:@DVM_PRESENT_HEIGHT,(id)kIOSurfaceBytesPerElement:@4,(id)kIOSurfaceBytesPerRow:@DVM_PRESENT_ROW,(id)kIOSurfaceAllocSize:@DVM_PRESENT_BYTES,(id)kIOSurfacePixelFormat:@(0x42475241)});
-    if(!surface||IOSurfaceGetBytesPerRow(surface)!=DVM_PRESENT_ROW||IOSurfaceGetAllocSize(surface)<DVM_PRESENT_BYTES)fail("present-surface-geometry");
+    NSMutableDictionary *properties=[@{(__bridge id)*cacheMode:@0x700,(id)kIOSurfaceWidth:@DVM_PRESENT_WIDTH,(id)kIOSurfaceHeight:@DVM_PRESENT_HEIGHT,(id)kIOSurfaceBytesPerElement:@4,(id)kIOSurfaceBytesPerRow:@DVM_PRESENT_ROW,(id)kIOSurfaceAllocSize:@DVM_PRESENT_BYTES,(id)kIOSurfacePixelFormat:@(0x42475241)} mutableCopy];
+#ifdef DVM_SHARED_SURFACE
+    CFStringRef *addressKey=dlsym(RTLD_DEFAULT,"kIOSurfaceClientAddress");
+    if(!addressKey||!*addressKey)fail("shared-surface-address-key");
+    properties[(__bridge id)*addressKey]=@((uintptr_t)(ns.shared+DVM_PRESENT_OFFSET));
+    fprintf(stderr,"GPU_LOAD_SHARED_CREATE key=%s address=%p bytes=%u cache=0x700\n",[(__bridge NSString *)*addressKey UTF8String],ns.shared+DVM_PRESENT_OFFSET,DVM_PRESENT_BYTES);
+#endif
+    IOSurfaceRef surface=IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+    if(!surface)fail("present-surface-create");
+    if(IOSurfaceGetBytesPerRow(surface)!=DVM_PRESENT_ROW||IOSurfaceGetAllocSize(surface)<DVM_PRESENT_BYTES)fail("present-surface-geometry");
+#ifdef DVM_SHARED_SURFACE
+    // No GPU work has been submitted. Prove two-way aliasing before using it.
+    if(IOSurfaceLock(surface,0,NULL))fail("shared-alias-lock");
+    volatile uint32_t *shared=(volatile uint32_t *)(ns.shared+DVM_PRESENT_OFFSET);
+    volatile uint32_t *alias=IOSurfaceGetBaseAddress(surface);
+    shared[0]=0x44564d41;mmioBarrier();
+    if(alias[0]!=0x44564d41)fail("shared-alias-forward");
+    alias[1]=0x44564d42;mmioBarrier();
+    if(shared[1]!=0x44564d42)fail("shared-alias-reverse");
+    if(IOSurfaceUnlock(surface,0,NULL))fail("shared-alias-unlock");
+    fprintf(stderr,"GPU_LOAD_SHARED_ALIAS verified=1 shared=%p surface=%p alloc=%zu\n",shared,alias,IOSurfaceGetAllocSize(surface));
+#endif
     NSError *error=nil;dispatch_data_t data=dispatch_data_create(air.bytes,air.length,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),DISPATCH_DATA_DESTRUCTOR_DEFAULT);
     id<MTLLibrary> library=[device newLibraryWithData:data error:&error];if(!library)fail("present-library");
     uint32_t nonce=arc4random();id resource=create(device,library,nonce);if(!resource)fail("present-resident-create");
@@ -29,9 +49,18 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
     struct Sample {double gpu,draw,delivery,swap,total;uint32_t swapID;} samples[33];
     CGRect rect={{0,0},{1179,2556}};double batchStart=now(),steadyStart=0;
     for(uint32_t frame=1;frame<=33;frame++){@autoreleasepool{
-        if(frame==2)steadyStart=now();double t0=now();NSDictionary *reply=draw(resource,frame);double t1=now();
+        if(frame==2)steadyStart=now();double t0=now();
+#ifdef DVM_SHARED_SURFACE
         if(IOSurfaceLock(surface,0,NULL))fail("present-surface-lock");
-        mmioBarrier();memcpy(IOSurfaceGetBaseAddress(surface),ns.shared+DVM_PRESENT_OFFSET,DVM_PRESENT_BYTES);
+#endif
+        NSDictionary *reply=draw(resource,frame);double t1=now();
+#ifndef DVM_SHARED_SURFACE
+        if(IOSurfaceLock(surface,0,NULL))fail("present-surface-lock");
+#endif
+        mmioBarrier();
+#ifndef DVM_SHARED_SURFACE
+        memcpy(IOSurfaceGetBaseAddress(surface),ns.shared+DVM_PRESENT_OFFSET,DVM_PRESENT_BYTES);
+#endif
         if(IOSurfaceUnlock(surface,0,NULL))fail("present-surface-unlock");double t2=now();
         uint32_t swap=UINT32_MAX;rc=begin(fb,&swap);if(rc)fail("present-begin");
         rc=layer(fb,0,surface,rect,rect,0);if(rc)fail("present-layer");
