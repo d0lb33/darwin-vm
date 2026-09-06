@@ -1,5 +1,11 @@
 # Warm disk boot and application stability — 2026-09-05
 
+Current battery baseline (2026-09-06): use the native SMC and unpatched powerd,
+`./run.sh`, and the `patched-native-battery` image profile. See
+[native-battery-smc.md](native-battery-smc.md). Virtual-publisher and powerd
+patch results below are historical evidence; their implementation and install
+paths have been removed from the current tree.
+
 ## Input transport replaced (2026-09-05, later)
 
 The relay/Recap bridge is superseded by the DVMI2 transport

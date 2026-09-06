@@ -241,7 +241,13 @@ and a one-time `AC-W` (6 requests), all with unknown semantics.
   (`TG0B`/`TG0V`/`TG0A`) are absent.
 - No SMC notification is raised for anything but the modelled battery state.
 
-## Candidate
+## Default baseline (merged 2026-09-06)
+
+`patched-native-battery` is the default option-based bootstrap profile.
+`patched` is an alias and also uses native SMC; the old powerd patcher and
+virtual publisher have been deleted, including their optional staging paths.
+The migration tool remains solely to remove them from legacy disk children.
+
 
 `tools/rootfs/bootstrap_profile.py --profile patched-native-battery` keeps
 the patched profile's display allocation, Settings scale, clock fallback,
@@ -270,3 +276,68 @@ run with `tools/warm_boot_probe.py`):
   stock binary already in it) plus the probe's CDHash;
 - `DARWIN_RTC_PV=0`, the display environment of the patched profile, no
   `DARWIN_SMC_*` variable (defaults: 80 %, charger attached, charging).
+
+## Durable local default
+
+`~/dvm-artifacts/native-smc/default.json` pins the merged QEMU build, generated
+SMC/SPMI device tree, SMP kernel, trust cache, firmware, and a standalone
+`system.qcow2`. The disk was flattened from the branch's `BATT_NB3` candidate;
+`qemu-img compare` reported identical guest contents. It inherits that disk's
+Data/Setup and helper history, rather than claiming a fresh profile rebuild.
+No saved RAM or PMU state file is used. The default battery is 80%, attached,
+charging. `./run.sh` creates a disposable child on every launch; Ctrl-C stops
+only that VM. `./run.sh --restore` selects the restore ramdisk explicitly.
+
+Repackage a migrated, immutable native-battery source when needed:
+
+```bash
+python3 tools/rootfs/package_native_smc.py \
+  --manifest /path/to/native-battery-manifest.json \
+  --dtree-raw firmware/dtree.raw --development-activation \
+  --out "$HOME/dvm-artifacts/native-smc-new"
+DVM_SMC_MANIFEST="$HOME/dvm-artifacts/native-smc-new/default.json" ./run.sh
+```
+
+Build the pinned QEMU before packaging. The packager copies the current build,
+regenerates the device tree, and flattens the disk; it requires a source already
+migrated to original powerd without the publisher. It does not turn an arbitrary
+legacy image into a native-battery image. Existing historical images/checkpoints
+are retained as evidence and are not modified or selected by the new default.
+
+## Main integration verification (2026-09-06)
+
+The submodule merge retains main's input fixes. Review then corrected two
+edge cases: only claim the SMC ASC after successful device creation, so an
+unusable firmware region really falls back to a bare mailbox; advertise and
+enforce the write-only flag for all six `zE*` event sinks.
+
+- `make -j18` completed; 79 host tests passed; Python compilation and shell
+  syntax checks passed. A shell-routing check confirmed `run.sh --vnc :7`
+  selects the durable native-SMC manifest and requested VNC display.
+- `SMC_MAIN_FALLBACK1`: a paused machine with the SMC region reduced to
+  `0x1000` logged the bare-mailbox fallback and `info qtree` contained
+  `role = "SMC"`. No guest code was run for this wiring check.
+- `SMC_MAIN_RESTORE1`: final QEMU build and freshly generated default
+  SMC/SPMI restore tree: **xnu panics: 0; reached shell: yes**.
+  `AppleSMCKeysEndpoint`, the SMC endpoint handshake, and
+  `AppleDialogSPMIPMURTC started!` are present in the logs.
+- `SMC_MAIN_DISK1`: flattened native-battery disk, merged QEMU before the two
+  edge-case corrections, fresh disk boot without RAM/PMU-state restore or
+  debugger. Early boot at 11.174 s, first presentation at 108.929 s, zero
+  panics. A 20-second continuation produced a legible lock screen with the
+  native green charging icon (`settled.png`). Guest power-source output at
+  serial lines 732–759 reports Current Capacity 80 and Max Capacity 100;
+  AppleSmartBattery reports BatteryInstalled 1 and IsCharging 1.
+
+- `SMC_MAIN_DISK2`: final build including both review fixes; independent fresh
+  child of the same standalone parent. Early boot at 17.352 s, first frame at
+  144.738 s, zero panics. Serial lines 729/750 report Current Capacity 80;
+  line 900 reports BatteryInstalled 1; lines 910/1096 report IsCharging 1.
+  A 20-second continuation was captured as `settled.png`; both owned disk-test
+  VMs were then stopped. Durable evidence lives under
+  `~/dvm-artifacts/native-smc/validation/`, including serial logs, exact launch
+  commands, frames, results, restore-probe verdict, build log, and host tests.
+
+The initial seeded-profile reconstruction was not rerun; these disk tests
+use the migrated branch candidate's inherited Data and helper state. Existing
+input/Settings stability limitations are not certified by this battery test.

@@ -1,33 +1,26 @@
 # Native and patched bootstrap profiles (24A5430a)
 
-Use `rebuild_persistent_parent.sh --profile native|patched` for the explicit
-profile pipeline. The legacy positional `rebuild_persistent_parent.sh RUN_DIR`
-remains the storage-only recovery command; it does not install runtime fixes.
+Use `rebuild_persistent_parent.sh --profile patched-native-battery` for the
+compatibility baseline. The option interface defaults to this profile;
+`--profile patched` is now an alias. Every profile uses the native SMC battery
+and unmodified powerd. The old battery patcher/publisher sources and staging
+paths have been removed. See [native-battery-smc.md](../../docs/re/native-battery-smc.md).
 
-`--profile patched-native-battery` is the patched profile without the
-powerd null guard and without the virtual battery publisher: the emulated
-SMC battery (`qemu-sptm/hw/arm/darwin_smc.c`, `-enable smc`) is the only
-internal power source and the original powerd consumes it. See
-`docs/re/native-battery-smc.md`.
+The positional `rebuild_persistent_parent.sh RUN_DIR` remains storage-only and
+does not install runtime accommodations.
 
-| Configuration | Native | Patched |
+| Property | `native` | `patched-native-battery` / `patched` |
 |---|---|---|
-| Existing project boot firmware adaptations, Data seeding, ANS/SEP/SMC | Yes | Yes |
-| DCP model and measured software scanout configuration | Yes | Yes |
-| Native SPMI/PMU RTC and Apple IORTC driver | Yes; no RTC kernel patch | Yes; no RTC kernel patch |
-| Additional SMP kernelcache adapter | No; one CPU | Yes; six CPUs |
-| Apple-userspace binary edits | None added | QuartzCore allocation, Settings scale, clock UIKit/non-glass fallback, powerd null guard |
-| Runtime helper services | None added | Current input helper and virtual battery publisher, built from repo source |
-| Development activation | Only with `--development-activation` | Only with `--development-activation` |
-| Buddy completion / activation records | Unchanged | Unchanged |
-| Saved RAM, debugger callbacks, diagnostic graphics/activation probes | None | None |
+| Battery / powerd | Native SMC / original | Native SMC / original |
+| Clock | Native SPMI/PMU RTC | Native SPMI/PMU RTC |
+| Apple-userspace edits | None added | Display allocation, Settings scale, software clock rendering |
+| Runtime helpers | None added | Current input helper |
+| CPUs / kernel adapter | 1 / none | 6 / SMP adapter |
+| Setup completion / saved RAM | Unchanged / none | Unchanged / none |
 
-“Native” is a hardware bring-up baseline, not an unmodified physical-iPhone
-boot or a guarantee of usable UI. It still uses the project's prepared boot
-firmware and emulated device models. In particular, it does not inherit the
-patched profile's SMP adapter. Both profiles use `-enable spmi` and explicitly
-set `DARWIN_RTC_PV=0`; the previous RTC kernel adapter is no longer applied. Neither profile claims native Setup.app
-completion, reliable HID startup, or freedom from service crashes.
+All profiles enable SMC and SPMI and force `DARWIN_RTC_PV=0`. They retain the
+project firmware adaptations, SEP/SKS storage models, and Data seeder. The
+compatibility profile's software clock rendering is separate from RTC time.
 
 ## Inputs
 
@@ -60,7 +53,7 @@ verification** or proof that arbitrary supplied Data state is pristine.
 Build the pinned QEMU submodule before running either profile; see `CLAUDE.md`.
 Never rebuild a QEMU binary while another VM is using it. `--qemu` and
 `--qemu-img` allow an explicitly selected existing build. Both profiles reject a
-binary without the native SPMI/PMU device models. The feature check does not prove that a
+binary without the native SMC battery and SPMI/PMU device models. The feature check does not prove that a
 binary was built from the current commit; its exact SHA-256 is recorded.
 
 The default firmware directory is the checkout's `firmware`. A different
@@ -87,7 +80,7 @@ tools/rootfs/rebuild_persistent_parent.sh \
   --out /tmp/dvm/native-baseline-1
 ```
 
-For the compatibility baseline, use `--profile patched` and a different
+For the compatibility baseline, use `--profile patched-native-battery` and a different
 `--out`. Add `--development-activation` only when that experiment is intended;
 it changes the device tree and does not mark Buddy complete.
 

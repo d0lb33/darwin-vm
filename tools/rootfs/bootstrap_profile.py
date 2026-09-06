@@ -25,8 +25,10 @@ sys.path[:0] = [str(REPO / 'tools'), str(REPO / 'tools/input'), str(REPO / 'tool
 from checkpoint_common import atomic_json, qcow2_backing_chain, sha256
 from prepare_display_policy import PAGE_SIZE, parse_code_directory, OFFSET, EXPECTED, REPLACEMENT
 from prepare_guarded_cache_patch import reviewed_edits
-from patch_powerd_virtual_battery import SOURCE_SHA256
 from smp_pv_patch import SHA256 as KC_SHA256
+
+# Original 24A5430a powerd, verified before installation; never patched.
+SOURCE_SHA256 = '31254642770ac63ce22a55a5717246cf2289297f478f7ab753d15b6f88436268'
 
 CACHE_ROOT = '/System/Library/Caches/com.apple.dyld/'
 POWERD = '/System/Library/CoreServices/powerd.bundle/powerd'
@@ -66,21 +68,16 @@ def profile_config(profile, development_activation=False):
     if profile not in PROFILES:
         raise ValueError('unknown profile')
     patched = profile != 'native'
-    # patched-native-battery keeps every graphics/input accommodation of the
-    # patched profile but leaves powerd untouched and installs no virtual
-    # battery publisher: the emulated SMC battery (darwin_smc.c) is the only
-    # internal power source.
-    native_battery = profile == 'patched-native-battery'
     env = dict(DISPLAY_ENV, DARWIN_RTC_PV='0')
     if patched:
         env.update(DARWIN_SMP_PV='1')
     return dict(profile=profile, cpus=6 if patched else 1, env=env,
                 development_activation=development_activation,
-                userspace_patches=(['display-allocation', 'settings-scale', 'clock-label-and-non-glass']
-                                   + ([] if native_battery else ['powerd-null-guard'])) if patched else [],
-                runtime_helpers=(['input'] + ([] if native_battery else ['power-pv-service'])) if patched else [],
+                userspace_patches=['display-allocation', 'settings-scale',
+                                   'clock-label-and-non-glass'] if patched else [],
+                runtime_helpers=['input'] if patched else [],
                 kernel_adapters=['smp-pv'] if patched else [],
-                battery_source='emulated-smc' if native_battery or not patched else 'virtual-publisher',
+                battery_source='emulated-smc',
                 clock_source='native-spmi-pmu',
                 setup_completion='unchanged', saved_ram=False)
 
@@ -216,19 +213,6 @@ def prepare(a, out, config, env):
         run('bash', REPO / 'tools/input/build.sh', out / 'input', env=env)
         helpers = [('input', out / 'input/dvm-input')]
         helper_tcs.append(out / 'input/helper.tc')
-        if 'power-pv-service' in config['runtime_helpers']:
-            run('bash', REPO / 'tools/re/build_power_pv_service.sh', out / 'power', env=env)
-            helpers.append(('power-pv-service', out / 'power/power-pv-service'))
-            helper_tcs.append(out / 'power/power-pv-service.tc')
-        if 'powerd-null-guard' in config['userspace_patches']:
-            run(sys.executable, REPO / 'tools/re/patch_powerd_virtual_battery.py',
-                a.powerd, out / 'powerd', env=env)
-            # Reuse the preimage above; replacement retains the existing file mode.
-            shutil.copyfile(out / 'powerd', payload / 'profile-powerd')
-            writes.append((POWERD, 'profile-powerd', None, 0))
-            info = subprocess.check_output(['codesign', '-d', '--verbose=4', str(out / 'powerd')],
-                                            stderr=subprocess.STDOUT, text=True)
-            hashes.append(re.search(r'^CDHash=([0-9a-f]{40})$', info, re.M).group(1))
         cached = original_launchd(a.launchd_cache)
         for name, binary in helpers:
             job = service(name)
@@ -313,7 +297,8 @@ def verdict(serial, stderr, profile):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('--profile', required=True, choices=PROFILES)
+    p.add_argument('--profile', default='patched-native-battery', choices=PROFILES,
+                   help='default: patched-native-battery; patched is a compatibility alias')
     source = p.add_mutually_exclusive_group(required=True)
     source.add_argument('--base-image', type=Path, help='merged raw System disk with Data/Preboot/Hardware slots; seed fresh Data')
     source.add_argument('--parent', type=Path, help='explicit read-only seeded qcow2; inherits its Data/Setup history')
@@ -367,8 +352,8 @@ def main():
     if sha256(a.firmware / 'bootkc') != KC_SHA256 or sha256(a.powerd) != SOURCE_SHA256:
         p.error('requires the reviewed 24A5430a bootkc and original powerd')
     binary = a.qemu.read_bytes()
-    if any(name not in binary for name in (b'darwin-spmi', b'darwin-pmu')):
-        p.error('QEMU binary lacks native SPMI/PMU RTC support; build the current pinned submodule')
+    if any(name not in binary for name in (b'darwin-spmi', b'darwin-pmu', b'darwin-smc-battery')):
+        p.error('QEMU binary lacks native SMC battery or SPMI/PMU RTC support; build the current pinned submodule')
     original_launchd(a.launchd_cache)
     # Validate all cache preimages before building or mounting anything.
     for spec in specs():

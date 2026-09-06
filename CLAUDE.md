@@ -9,13 +9,33 @@ Settings crash evidence, and remaining stability gates, read
 `docs/re/warm-boot-stability.md`. A rendered-RAM restore is not evidence of
 an independent disk boot.
 
-For explicit native/patched image construction, use
-`tools/rootfs/rebuild_persistent_parent.sh --profile native|patched` and read
-`tools/rootfs/PROFILES.md`. Native adds no Apple-userspace patches or runtime
-helpers; patched stages the reviewed compatibility fixes. Neither profile
-marks Setup complete. Both profiles use the native SPMI/PMU RTC with
-`DARWIN_RTC_PV=0`; patched retains the separate software clock-rendering fix.
-The legacy positional rebuild remains storage-only.
+The default battery is the native SMC device model: AppleSMC and
+AppleSmartBattery publish the battery for the original, unpatched powerd.
+Use `docs/re/native-battery-smc.md` for the protocol, runtime controls, and
+validation evidence. The default is 80%, charger attached, charging.
+The old powerd null-guard patcher and userspace battery publisher have been
+removed. Do not reinstall them or boot an old virtual-battery image as a new
+baseline. Historical notes and checkpoints describe the configurations they
+actually tested; they are not current bootstrap instructions.
+
+For image construction, use
+`tools/rootfs/rebuild_persistent_parent.sh --profile patched-native-battery`
+and read `tools/rootfs/PROFILES.md`. This is the default profile for the option
+interface; `patched` is an alias with the same native battery. `native` adds no
+Apple-userspace patches or runtime helpers. The compatibility profiles retain
+the reviewed display, Settings, software clock-rendering, input, and SMP fixes.
+All profiles enable SMC and native SPMI/PMU RTC (`DARWIN_RTC_PV=0`); none marks
+Setup complete. The positional rebuild remains storage-only.
+
+`./run.sh` boots a fresh child of `~/dvm-artifacts/native-smc/system.qcow2`
+using its pinned `default.json` when installed; this durable package contains
+the native battery and original powerd. It starts from disk, without saved RAM.
+Use `./run.sh --restore` for the ramdisk shell. Without an installed system
+manifest, the launcher uses the restore path; both paths enable SMC. Restore
+boots regenerate their tree from `firmware/dtree.raw` (or `DTREE_RAW`), which
+`get_files.sh` now preserves. Never try to restore deleted nodes from an old
+fixed tree. For bounded default disk validation:
+`PATH="$PWD/qemu-sptm/build:$PATH" python3 tools/warm_boot_probe.py --tag SMC_CHECK --seconds 480 --stop-on 'iomfb: presented '`.
 
 Use saved RAM/device checkpoints for diagnosis: reproducing Settings crashes,
 inspecting services, testing input, and trying debugger hypotheses. Reserve
@@ -54,7 +74,8 @@ API was obsoleted in that SDK:
 ```
 tools/probe.sh --secs 60 --tag mytest                 # baseline, expect: reached shell yes
 tools/probe.sh --dtree /tmp/dvm/dt_dcp.bin --secs 100 --tag dcp --grep 'RTBuddy|panic\('
-./run.sh --vnc :0                                     # interactive, with a screen
+./run.sh --vnc :0                                     # native-SMC system disk, with a screen
+./run.sh --restore --nographic                        # restore ramdisk shell
 ```
 
 `probe.sh` prints serial progress, XNU panics, and decodes an SPTM panic

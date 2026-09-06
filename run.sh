@@ -13,22 +13,28 @@ set -euo pipefail
 # With a display, XNU is booted with serial=2 (serial *input*, console *output*
 # on the screen), so the console shows up in the window and keys typed into the
 # window (or into this terminal) go to the guest. Use DISPLAY_MODE=none (or
-# ./run.sh --nographic) for the classic serial-only root shell.
+# ./run.sh --restore --nographic) for the classic serial-only root shell.
 
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$REPO"
 FIRMWARE_DIR="firmware"
+RESTORE=0
+SMC_MANIFEST="${DVM_SMC_MANIFEST:-$HOME/dvm-artifacts/native-smc/default.json}"
 QEMU="qemu-sptm/build/qemu-system-aarch64"
 
 usage() {
     cat <<USAGE
-usage: $0 [--nographic] [--vnc [:N]] [--sdl] [--cocoa] [--fb WxH[@scale]|off] [--graphics]
+usage: $0 [--restore] [--nographic] [--vnc [:N]] [--sdl] [--cocoa] [--fb WxH[@scale]|off] [--graphics]
 
-  --nographic      serial console in this terminal only (classic mode)
+  --restore        boot the restore ramdisk instead of the native-SMC system disk
+  --nographic      no display; restore mode uses the serial console in this terminal only (classic mode)
   --vnc [:N]       expose the screen over VNC on display :N (default :0)
   --sdl / --cocoa  pick the QEMU display backend
   --fb SPEC        framebuffer size, eg. 828x1792@2 (iPhone) or 1440x900 (Mac)
   --graphics       boot graphics (progress spinner) instead of the text console
 
-Environment variables DISPLAY_MODE, FB, FBMODE, VNC, BOOT_ARGS do the same thing.
+The native-SMC system disk is the default when $SMC_MANIFEST exists.
+DISPLAY_MODE, FB and VNC select the display. FBMODE and BOOT_ARGS apply to restore boots.
 USAGE
     exit 1
 }
@@ -66,6 +72,29 @@ boot_qemu() {
         fb="off"
     fi
 
+    if [[ "$RESTORE" == 0 && -f "$SMC_MANIFEST" ]]; then
+        local system_args=(--manifest "$SMC_MANIFEST")
+        case "$display_mode" in
+            vnc) system_args+=(--display none --vnc "$vnc") ;;
+            cocoa) system_args+=(--display cocoa,zoom-to-fit=on) ;;
+            *) system_args+=(--display "$display_mode") ;;
+        esac
+        [[ "$fb" == off ]] || system_args+=(--fb "${FB:-1179x2556}")
+        python3 "$REPO/tools/boot_native_smc.py" "${system_args[@]}"
+        return
+    fi
+
+    # Always regenerate the restore tree from the raw input: an older fixed
+    # tree has already lost the SMC node and cannot be upgraded in place.
+    local dtree_raw="${DTREE_RAW:-${FIRMWARE_DIR}/dtree.raw}"
+    if [[ ! -f "$dtree_raw" ]]; then
+        echo "Missing raw device tree $dtree_raw; run get_files.sh or set DTREE_RAW." >&2
+        return 1
+    fi
+    local dtree
+    dtree="$(mktemp "${TMPDIR:-/tmp}/dvm-smc-dtree.XXXXXX")"
+    python3 "$REPO/dt_fixup.py" "$dtree_raw" "$dtree" -nvram "$REPO/nvram.bin" -enable smc -enable spmi -dram 8G
+
     # serial=3: serial in+out (console on the UART)
     # serial=2: serial in only, console output goes to the framebuffer
     local serial_mode=3
@@ -78,7 +107,7 @@ boot_qemu() {
     args=(
         -M darwin
         -bootkc   "${FIRMWARE_DIR}/bootkc"
-        -dtree    "${FIRMWARE_DIR}/dtree"
+        -dtree    "$dtree"
         -tc       "${FIRMWARE_DIR}/ramdisk.tc"
         -ramdisk  "${FIRMWARE_DIR}/ramdisk.dmg"
         -args     "${boot_args}"
@@ -105,12 +134,16 @@ boot_qemu() {
         *)     args+=( -display "${display_mode}" ) ;;
     esac
 
-    "${QEMU}" "${args[@]}"
+    local rc=0
+    DARWIN_RTC_PV=0 "${QEMU}" "${args[@]}" || rc=$?
+    rm -f "$dtree"
+    return "$rc"
 }
 
 main() {
     while [[ $# -gt 0 ]]; do
         case "$1" in
+            --restore)   RESTORE=1 ;;
             --nographic) DISPLAY_MODE=none ;;
             --vnc)       DISPLAY_MODE=vnc; if [[ "${2:-}" == :* ]]; then VNC="$2"; shift; fi ;;
             --sdl)       DISPLAY_MODE=sdl ;;

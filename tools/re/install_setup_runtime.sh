@@ -21,13 +21,13 @@ test "$(dd if="$dyld" bs=4096 count=1 | cksum)" = "$(cksum < /libexec/dvm-policy
 test "$(dd if="$dyld" bs=1 skip=70968036 count=16 | cksum)" = "$(cksum < /libexec/dvm-policy-before)"
 test "$(dd if="$dyld" bs=1 skip="$hash_offset" count=32 | cksum)" = "$(cksum < /libexec/dvm-policy-old-hash)"
 
-for name in input graphics-probe power-rtc-probe activation-probe power-pv-service; do
+for name in input graphics-probe power-rtc-probe activation-probe; do
     test ! -e "$root/usr/local/libexec/dvm-$name"
     test ! -e "$root/System/Library/LaunchDaemons/com.apple.dvm-$name.plist"
 done
 
 mkdir -p "$root/usr/local/libexec"
-for name in input graphics-probe power-rtc-probe activation-probe power-pv-service; do
+for name in input graphics-probe power-rtc-probe activation-probe; do
     source="/libexec/dvm-$name"
     target="$root/usr/local/libexec/dvm-$name"
     cp "$source" "$target"

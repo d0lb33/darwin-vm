@@ -22,15 +22,11 @@ def main():
     p.add_argument('--power-tc', type=Path)
     p.add_argument('--activation-binary', type=Path)
     p.add_argument('--activation-tc', type=Path)
-    p.add_argument('--power-service-binary', type=Path)
-    p.add_argument('--power-service-tc', type=Path)
     a = p.parse_args()
     if bool(a.power_binary) != bool(a.power_tc):
         p.error('--power-binary and --power-tc must be supplied together')
     if bool(a.activation_binary) != bool(a.activation_tc):
         p.error('--activation-binary and --activation-tc must be supplied together')
-    if bool(a.power_service_binary) != bool(a.power_service_tc):
-        p.error('--power-service-binary and --power-service-tc must be supplied together')
     source = a.cache.read_bytes()
     cache = plistlib.loads(source)
     service_path = '/System/Library/LaunchDaemons/com.apple.dvm-graphics-probe.plist'
@@ -45,7 +41,6 @@ def main():
     for name, binary, tc, persistent in [
         ('power-rtc-probe', a.power_binary, a.power_tc, False),
         ('activation-probe', a.activation_binary, a.activation_tc, False),
-        ('power-pv-service', a.power_service_binary, a.power_service_tc, True),
     ]:
         if not binary:
             continue

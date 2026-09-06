@@ -4,7 +4,8 @@ Scripts that assemble the disk images we boot. **They live here, in the repo,
 on purpose.**
 
 For explicit **native** and **patched** baselines, use
-`rebuild_persistent_parent.sh --profile native|patched`; see
+`rebuild_persistent_parent.sh --profile patched-native-battery` (default;
+`native` is the minimal profile, and `patched` is a compatibility alias); see
 [PROFILES.md](PROFILES.md) for required inputs, exact differences and boot
 validation. The positional rebuild command below remains storage-only.
 The profile pipeline starts from an already merged base or an unpatched seeded

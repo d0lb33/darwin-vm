@@ -57,7 +57,7 @@ class BootstrapProfileTests(unittest.TestCase):
         patched = bp.profile_config('patched')
         self.assertTrue(native['development_activation'])
         self.assertFalse(patched['development_activation'])
-        self.assertEqual(patched['runtime_helpers'], ['input', 'power-pv-service'])
+        self.assertEqual(patched['runtime_helpers'], ['input'])
         self.assertEqual(patched['env']['DARWIN_RTC_PV'], '0')
         self.assertEqual(patched['kernel_adapters'], ['smp-pv'])
         self.assertEqual(patched['cpus'], 6)
@@ -72,9 +72,9 @@ class BootstrapProfileTests(unittest.TestCase):
         self.assertEqual(hybrid['runtime_helpers'], ['input'])
         self.assertNotIn('powerd-null-guard', hybrid['userspace_patches'])
         self.assertEqual(set(patched['userspace_patches']) - set(hybrid['userspace_patches']),
-                         {'powerd-null-guard'})
+                         set())
         self.assertEqual(hybrid['battery_source'], 'emulated-smc')
-        self.assertEqual(patched['battery_source'], 'virtual-publisher')
+        self.assertEqual(patched['battery_source'], 'emulated-smc')
         self.assertEqual(bp.profile_config('native')['battery_source'], 'emulated-smc')
         with self.assertRaises(ValueError):
             bp.profile_config('patched-native')

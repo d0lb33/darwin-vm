@@ -108,7 +108,8 @@ patch_dtree() {
         die "No device tree (${dtree})"
     fi
 
-    "${ADT_FIXUP}" -nvram "${NVRAM_BIN}" "${dtree}" "${dtree}_patch"
+    cp "${dtree}" "${FW_DIR}/dtree.raw"
+    "${ADT_FIXUP}" -enable smc -enable spmi -nvram "${NVRAM_BIN}" "${dtree}" "${dtree}_patch"
     mv "${dtree}_patch" "${dtree}"
 }
 
