@@ -62,7 +62,7 @@ try:
 finally:subprocess.run([str(wrapper),'detach',str(mount)],check=True)
 subprocess.run([sys.executable,str(repo/'tools/rootfs/merge_tc.py'),str(a.out/'system.tc'),str(a.system_tc),str(a.build/'helper.tc')],check=True)
 inputs={str(f.resolve()):sha256(f) for f in a.build.rglob('*') if f.is_file() and
-        (f.suffix in ('.m','.h','.sh','.plist') or f.name in ('dvm-gpu-load','DVMProxy','helper.tc'))}
+        (f.suffix in ('.c','.m','.h','.sh','.plist') or f.name in ('dvm-gpu-load','DVMProxy','helper.tc'))}
 (a.out/'provenance.json').write_text(json.dumps(dict(build=str(a.build.resolve()),inputs=inputs,
     before_build=str(a.before_build.resolve()),cache_sha256=sha256(a.cache),
     start_interval=a.start_interval,

@@ -36,6 +36,8 @@ def main():
     p.add_argument('--tag', required=True)
     p.add_argument('--seconds', type=int, default=600)
     p.add_argument('--keep-paused', action='store_true')
+    p.add_argument('--probe-observe-display',action='store_true',
+        help='after a standalone probe completes, require native presentation and stable input with a fresh ACK')
     p.add_argument('--aux-namespace', action='store_true',
         help='create an owned 64 MiB raw auxiliary namespace; needs opt-in QEMU and DT')
     p.add_argument('--aux-probe', action='store_true', help='run auxiliary bulk/response/timeout peer')
@@ -62,6 +64,8 @@ def main():
     p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.probe_observe_display and (a.worker or a.driver_worker or a.surface_worker or a.aux_probe or a.aux_latency or a.aux_header_only or a.aux_post_boot or a.aux_wait_input or a.keep_paused):
+        p.error('standalone probe display observation cannot combine with another workload or keep-paused')
     if a.driver_wait_display and not a.driver_worker:p.error('display gate requires driver worker')
     driver_boot=bool(a.driver_worker and not (a.driver_wait_display or a.driver_late_launch))
     if a.driver_late_launch and (not a.driver_worker or a.seconds != 300):
@@ -173,7 +177,7 @@ def main():
         model['DARWIN_ANS_AUX_DRIVE'] = 'gpu_aux'
     if a.aux_header_only:model['DARWIN_ANS_AUX_TRACE']='1'
     model['DARWIN_TOUCH_EVENTS'] = str(out/'events.jsonl')
-    if a.surface_worker or a.driver_worker:
+    if a.surface_worker or a.driver_worker or a.probe_observe_display:
         model['DARWIN_INPUT_STATUS']=str(out/'input-status.json')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DARWIN_', 'DVM_', 'GXFSTAT_'))}
     env.update(model)
@@ -220,8 +224,26 @@ def main():
         surface_ack_baseline=None
         surface_ack_evidence=None
         surface_present_baseline=0
+        probe_ready_since=None
+        probe_ready_identity=None
+        probe_ready_acks=0
         with (out/'wire.log').open('wb') as log:
             while time.monotonic()-started < a.seconds and proc.poll() is None:
+                if a.probe_observe_display and aux_complete:
+                    try:status=json.loads((out/'input-status.json').read_text())
+                    except (OSError,ValueError):status={}
+                    if status.get('presents',0)>0 and status.get('guest_state')=='R':
+                        identity=(status.get('guest_pid'),status.get('guest_epoch'))
+                        if probe_ready_since is None or identity!=probe_ready_identity:
+                            probe_ready_since=time.monotonic();probe_ready_identity=identity
+                            probe_ready_acks=status.get('acked',0)
+                        if time.monotonic()-probe_ready_since>=10 and status.get('acked',0)>probe_ready_acks:
+                            report['native_observation']=dict(seconds=time.monotonic()-started,
+                                input_status=status,stable_seconds=10,fresh_ack=True,
+                                scope='native-presentation-and-helper-ready-not-home-or-gesture')
+                            reason='guest load probe completed'
+                            break
+                    else:probe_ready_since=None
                 if a.driver_failure_snapshot and driver_poll_seen and not driver_ready_seen and time.monotonic()-driver_last_progress>35:
                     raise TimeoutError('driver readiness loop stopped progressing for 35 seconds')
                 if a.driver_worker and aux_peer.released_at is not None:
@@ -327,6 +349,8 @@ def main():
                         input_ack = True
                     if 'GPU_LOAD_COMPLETE' in line:
                         aux_complete = True
+                        if a.probe_observe_display:
+                            report['probe_complete_seconds']=time.monotonic()-started
                         if driver_boot:
                             report['driver_complete_seconds']=time.monotonic()-started
                             try:report['display_at_driver_completion']=json.loads((out/'input-status.json').read_text())
@@ -339,7 +363,7 @@ def main():
                             except (OSError,ValueError):
                                 surface_ack_baseline=None
                         elif not a.aux_wait_input or input_ack:
-                            if not driver_boot and (not a.driver_worker or not driver_child_seen or driver_child_exited):
+                            if not a.probe_observe_display and not driver_boot and (not a.driver_worker or not driver_child_seen or driver_child_exited):
                                 reason = 'guest load probe completed'
                     elif 'GPU_LOAD_ERROR' in line or 'GPU_BUNDLE_ERROR' in line or 'panic(cpu' in line:
                         reason = 'guest reported failure'
@@ -355,6 +379,10 @@ def main():
             if not bridge.finished or bridge.close_status!=0 or 'original input start marker observed' not in reason:
                 raise RuntimeError('roundtrip lacks protected successful close and original input start marker')
             report['roundtrip']=verify_roundtrip(out)
+            report['passed']=True
+        if a.probe_observe_display:
+            if reason!='guest load probe completed' or 'native_observation' not in report:
+                raise RuntimeError('standalone probe did not complete with native display/input observation')
             report['passed']=True
         if a.aux_header_only:
             if reason!='guest load probe completed':raise RuntimeError('initial header completion not observed')
