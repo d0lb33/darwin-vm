@@ -76,9 +76,10 @@ class HMP:
 
 
 def norm(value, size, px):
-    if not px:
-        return int(value)
-    return round(int(value) * 32767 / size)
+    result = round(int(value) * 32767 / size) if px else int(value)
+    if not 0 <= result <= 32767:
+        raise ValueError('coordinate outside the framebuffer')
+    return result
 
 
 def read_status(path):
@@ -97,6 +98,44 @@ def wait_status(path, predicate, timeout, what):
             return last
         time.sleep(0.05)
     raise TimeoutError(f'{what} not observed within {timeout}s; last status: {last}')
+
+
+def idle(status):
+    return (status['inflight'] == 0 and status['queue_len'] == 0 and
+            status.get('wire_pending', 0) == 0 and status.get('wheel_pending', 0) == 0)
+
+
+def ready(args, path):
+    return wait_status(path, lambda s: s['guest_state'] == 'R' and idle(s) and
+                       not s['contact_sent'], args.ready_timeout, 'idle guest helper')
+
+
+def completed(args, path, before, minimum):
+    def done(s):
+        if s['epoch'] != before['epoch']:
+            raise RuntimeError('input epoch changed during the operation; retry after recovery')
+        sent = s['sent'] - before['sent'] - (s['pings'] - before['pings'])
+        dispatched = (s['dispatched'] + s['dispatch_failed'] -
+                      before['dispatched'] - before['dispatch_failed'])
+        rejected = sum(s[k] - before[k] for k in ('ack_failed', 'ack_not_ready', 'ack_rejected'))
+        return (idle(s) and sent >= minimum and dispatched + rejected >= sent and
+                not s['contact_sent'])
+    return wait_status(path, done, args.ack_timeout, 'HID operation completion')
+
+
+def outcome(before, after):
+    keys = ('sent', 'acked', 'ack_failed', 'ack_not_ready', 'ack_rejected',
+            'timeouts', 'dispatched', 'dispatch_failed', 'overflow_or_not_ready_drops')
+    result = {k: after[k] - before[k] for k in keys}
+    result['records_sent'] = result.pop('sent')
+    result['records_acked'] = result.pop('acked')
+    return result
+
+
+def successful(result):
+    return (result['records_acked'] >= result['records_sent'] and
+            not any(result[k] for k in ('ack_failed', 'ack_not_ready', 'ack_rejected',
+                                       'timeouts', 'dispatch_failed', 'overflow_or_not_ready_drops')))
 
 
 def send(qmp, x, y, down):
@@ -123,32 +162,28 @@ def screendump(hmp, path):
 def key_press(args, run, qcode, hold_ms, button=None):
     """Home through the F5 key (qcode) or through the right mouse button."""
     status_path = run / 'input-status.json'
-    before = wait_status(status_path, lambda s: s['guest_state'] == 'R', args.ready_timeout,
-                         'guest helper readiness')
+    before = ready(args, status_path)
     qmp = QMP(run / 'qmp.sock')
     hmp = HMP(run / 'monitor.sock')
     frames = {}
     if args.frames:
         frames['before'] = screendump(hmp, args.frames + '-before.png')
     t0 = time.monotonic()
-    for down in (True, False):
+    def key_event(down):
         if button:
             event = dict(type='btn', data=dict(button=button, down=down))
         else:
             event = dict(type='key', data=dict(down=down, key=dict(type='qcode', data=qcode)))
         qmp.execute('input-send-event', events=[event])
-        if down:
-            time.sleep(hold_ms / 1000)
-    after = wait_status(status_path,
-                        lambda s: s['inflight'] == 0 and s['queue_len'] == 0 and
-                        s['sent'] >= before['sent'] + 2,
-                        args.ack_timeout, 'button acknowledgement')
-    result = dict(stage_host_to_ack_complete_ms=round((time.monotonic() - t0) * 1000, 1),
-                  records_sent=after['sent'] - before['sent'],
-                  records_acked=after['acked'] - before['acked'],
-                  ack_failed=after['ack_failed'] - before['ack_failed'],
-                  timeouts=after['timeouts'] - before['timeouts'],
-                  ack_last_us=after['ack_last_us'], guest_state=after['guest_state'])
+    try:
+        key_event(True)
+        time.sleep(hold_ms / 1000)
+    finally:
+        key_event(False)
+    after = completed(args, status_path, before, 2)
+    result = outcome(before, after)
+    result.update(stage_host_to_dispatch_complete_ms=round((time.monotonic() - t0) * 1000, 1),
+                  dispatch_last_us=after['dispatch_last_us'], guest_state=after['guest_state'])
     if args.frames:
         time.sleep(args.settle)
         frames['after'] = screendump(hmp, args.frames + '-after.png')
@@ -160,9 +195,10 @@ def key_press(args, run, qcode, hold_ms, button=None):
 def wheel(args, run, x, y, notches):
     """Mouse wheel at (x, y): QEMU batches the notches into one W record and
     the guest performs a drag that ends at rest."""
+    if not 1 <= abs(notches) <= 8:
+        raise ValueError('wheel batch must be between 1 and 8 notches')
     status_path = run / 'input-status.json'
-    before = wait_status(status_path, lambda s: s['guest_state'] == 'R', args.ready_timeout,
-                         'guest helper readiness')
+    before = ready(args, status_path)
     qmp = QMP(run / 'qmp.sock')
     hmp = HMP(run / 'monitor.sock')
     frames = {}
@@ -175,17 +211,10 @@ def wheel(args, run, x, y, notches):
         qmp.execute('input-send-event', events=[
             dict(type='btn', data=dict(button=name, down=True)),
             dict(type='btn', data=dict(button=name, down=False))])
-    after = wait_status(status_path,
-                        lambda s: s['inflight'] == 0 and s['queue_len'] == 0 and
-                        s['sent'] > before['sent'] and s['contact_sent'] is False and
-                        s['dispatched'] + s['dispatch_failed'] > before['dispatched'] + before['dispatch_failed'],
-                        args.ack_timeout, 'wheel gesture dispatch')
-    result = dict(stage_host_to_dispatch_complete_ms=round((time.monotonic() - t0) * 1000, 1),
-                  records_sent=after['sent'] - before['sent'],
-                  dispatch_last_us=after['dispatch_last_us'],
-                  dispatch_failed=after['dispatch_failed'] - before['dispatch_failed'],
-                  timeouts=after['timeouts'] - before['timeouts'],
-                  contact_sent=after['contact_sent'])
+    after = completed(args, status_path, before, 1)
+    result = outcome(before, after)
+    result.update(stage_host_to_dispatch_complete_ms=round((time.monotonic() - t0) * 1000, 1),
+                  dispatch_last_us=after['dispatch_last_us'], contact_sent=after['contact_sent'])
     if args.frames:
         time.sleep(args.settle)
         frames['after'] = screendump(hmp, args.frames + '-after.png')
@@ -197,55 +226,30 @@ def wheel(args, run, x, y, notches):
 def gesture(args, run, points, hold_ms):
     """Down at points[0], moves through the rest, up at the last point."""
     status_path = run / 'input-status.json'
-    before = wait_status(status_path, lambda s: s['guest_state'] == 'R', args.ready_timeout,
-                         'guest helper readiness')
+    before = ready(args, status_path)
     qmp = QMP(run / 'qmp.sock')
     hmp = HMP(run / 'monitor.sock')
     frames = {}
     if args.frames:
         frames['before'] = screendump(hmp, args.frames + '-before.png')
     t0 = time.monotonic()
-    send(qmp, points[0][0], points[0][1], True)
-    step = hold_ms / max(1, len(points) - 1) / 1000 if len(points) > 1 else hold_ms / 1000
-    for x, y in points[1:]:
-        time.sleep(step)
-        move(qmp, x, y)
-    if len(points) == 1:
-        time.sleep(hold_ms / 1000)
-    send(qmp, points[-1][0], points[-1][1], False)
-    sent_at = time.monotonic()
-    # Every record of this gesture must be acknowledged, not merely queued.
-    after = wait_status(status_path,
-                        lambda s: s['inflight'] == 0 and s['queue_len'] == 0 and
-                        s['sent'] > before['sent'] and s['contact_sent'] is False,
-                        args.ack_timeout, 'gesture acknowledgement')
-    ack_done = time.monotonic()
-    # Stage 2: the helper's worker must have dispatched every touch record
-    # (pings and cancels are not dispatched).
-    expected = (after['sent'] - before['sent']) - (after['pings'] - before['pings'])
-    def dispatched(s):
-        return (s['dispatched'] + s['dispatch_failed']) - (before['dispatched'] + before['dispatch_failed'])
     try:
-        after = wait_status(status_path, lambda s: dispatched(s) >= expected, args.ack_timeout,
-                            'HID dispatch completion')
-        dispatch_note = None
-    except TimeoutError as error:
-        dispatch_note = str(error).split(';')[0]
-    result = dict(
-        stage_host_to_ack_complete_ms=round((ack_done - t0) * 1000, 1),
+        send(qmp, points[0][0], points[0][1], True)
+        step = hold_ms / max(1, len(points) - 1) / 1000
+        for x, y in points[1:]:
+            time.sleep(step)
+            move(qmp, x, y)
+        if len(points) == 1:
+            time.sleep(hold_ms / 1000)
+    finally:
+        send(qmp, points[-1][0], points[-1][1], False)
+    sent_at = time.monotonic()
+    after = completed(args, status_path, before, 2)
+    result = outcome(before, after)
+    result.update(
         stage_host_to_dispatch_complete_ms=round((time.monotonic() - t0) * 1000, 1),
-        dispatched=dispatched(after), dispatch_failed=after['dispatch_failed'] - before['dispatch_failed'],
         dispatch_last_us=after['dispatch_last_us'], dispatch_max_us=after['dispatch_max_us'],
-        delivery_last_ms=after['delivery_last_ms'], delivery_max_ms=after['delivery_max_ms'],
-        dispatch_note=dispatch_note,
-        records_sent=after['sent'] - before['sent'],
-        records_acked=after['acked'] - before['acked'],
-        ack_failed=after['ack_failed'] - before['ack_failed'],
-        ack_not_ready=after['ack_not_ready'] - before['ack_not_ready'],
-        ack_rejected=after['ack_rejected'] - before['ack_rejected'],
-        timeouts=after['timeouts'] - before['timeouts'],
         coalesced=after['coalesced'] - before['coalesced'],
-        ack_last_us=after['ack_last_us'], ack_max_us=after['ack_max_us'],
         guest_state=after['guest_state'], epoch=after['epoch'],
     )
     if args.frame_wait:
@@ -277,19 +281,22 @@ def main():
     p.add_argument('--frame-wait', type=float, default=5, help='seconds to wait for a presented frame')
     p.add_argument('--settle', type=float, default=1.5, help='seconds before the after-frame')
     p.add_argument('--ready-timeout', type=float, default=5)
-    p.add_argument('--ack-timeout', type=float, default=15)
+    p.add_argument('--ack-timeout', type=float, default=40)
     p.add_argument('--log', type=Path, help='append the JSON result here')
     sub = p.add_subparsers(dest='cmd', required=True)
     s = sub.add_parser('tap'); s.add_argument('x'); s.add_argument('y')
     s = sub.add_parser('swipe'); [s.add_argument(n) for n in ('x1', 'y1', 'x2', 'y2')]
     s = sub.add_parser('home'); s.add_argument('--button', choices=('right',),
                                                 help='use the right mouse button instead of F5')
+    sub.add_parser('power', help='press F6 (Power)')
     s = sub.add_parser('wheel'); s.add_argument('x'); s.add_argument('y')
     s.add_argument('notches', type=int, help='positive = wheel up (content scrolls up)')
     sub.add_parser('status')
     s = sub.add_parser('wait-ready'); s.add_argument('--timeout', type=float, default=600)
     s = sub.add_parser('frame'); s.add_argument('path')
     args = p.parse_args()
+    if args.hold_ms < 0 or args.settle < 0:
+        p.error('hold and settle durations must be nonnegative')
     run = args.run
     status_path = run / 'input-status.json'
     if args.cmd == 'status':
@@ -302,15 +309,13 @@ def main():
     if args.cmd == 'frame':
         print(json.dumps(dict(path=args.path, sha256=screendump(HMP(run / 'monitor.sock'), args.path))))
         return
-    if args.cmd == 'home':
-        # F5 is bound to the consumer-page Home button (darwin_fb.c); it
-        # travels as a B record with both edges.
-        result = dict(command='home', run=str(run), unix=time.time())
+    if args.cmd in ('home', 'power'):
+        result = dict(command=args.cmd, run=str(run), unix=time.time())
         try:
-            result.update(key_press(args, run, 'f5', args.hold_ms, button=args.button))
-            result['ok'] = (result['records_acked'] >= result['records_sent'] and
-                            not result['ack_failed'] and not result['timeouts'])
-        except TimeoutError as error:
+            result.update(key_press(args, run, 'f5' if args.cmd == 'home' else 'f6',
+                                    args.hold_ms, button=getattr(args, 'button', None)))
+            result['ok'] = successful(result)
+        except (TimeoutError, RuntimeError, OSError, ValueError) as error:
             result.update(ok=False, error=str(error))
         print(json.dumps(result, indent=1))
         if args.log:
@@ -322,8 +327,8 @@ def main():
         try:
             result.update(wheel(args, run, norm(args.x, FB_W, args.px), norm(args.y, FB_H, args.px),
                                 args.notches))
-            result['ok'] = not result['dispatch_failed'] and not result['timeouts'] and not result['contact_sent']
-        except TimeoutError as error:
+            result['ok'] = successful(result)
+        except (TimeoutError, RuntimeError, OSError, ValueError) as error:
             result.update(ok=False, error=str(error))
         print(json.dumps(result, indent=1))
         if args.log:
@@ -343,10 +348,8 @@ def main():
     try:
         result.update(gesture(args, run, points, args.hold_ms))
         # Pings sent between the gesture's records are acknowledged too.
-        result['ok'] = (result['records_acked'] >= result['records_sent'] and
-                        not result['ack_failed'] and not result['timeouts'] and
-                        not result['dispatch_failed'] and result['dispatch_note'] is None)
-    except TimeoutError as error:
+        result['ok'] = successful(result)
+    except (TimeoutError, RuntimeError, OSError, ValueError) as error:
         result.update(ok=False, error=str(error))
     print(json.dumps(result, indent=1))
     if args.log:

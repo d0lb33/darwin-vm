@@ -66,6 +66,8 @@ int main(void) {{
     assert(handle(&(struct record){{.epoch=2,.seq=7,.kind='W',.a=1,.b=1,.c=1}}) == 'E');
     held = false; op_len = OP_QUEUE;
     assert(handle(&(struct record){{.epoch=2,.seq=8,.kind='D',.a=1,.b=1}}) == 'F');
+    assert(!held && op_len <= 3);
+    assert(op_len == 1 && ops[op_head].kind == 'B' && !ops[op_head].down);
     return 0;
 }}
 '''

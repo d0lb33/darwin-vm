@@ -68,7 +68,7 @@ class DeviceQueueTests(unittest.TestCase):
                          source.index('static void darwin_input_pump(DarwinInputState *s);')]
         body = defines + source[source.index('static void darwin_input_pump(DarwinInputState *s);'):
                       source.index('/* ---------------- guest replies ---------------- */')]
-        replies = source[source.index('static void ack_line('):source.index('/* ---------------- timer ---------------- */')]
+        replies = source[source.index('static bool needs_dispatch('):source.index('/* ---------------- timer ---------------- */')]
         return r'''
 #include <assert.h>
 #include <inttypes.h>
@@ -88,8 +88,8 @@ class DeviceQueueTests(unittest.TestCase):
 static int64_t fake_clock = 1000 * SCALE_MS;
 static int64_t qemu_clock_get_ns(int type) { (void)type; return fake_clock; }
 static void timer_mod(void *t, int64_t when) { (void)t; (void)when; }
-/* The fake FIFO accepts `fifo_space` bytes per call and records the stream. */
-static int fifo_space = 16;
+/* The fake FIFO has a replenishable byte budget and records the stream. */
+static int fifo_space = 8192;
 static char wire_log[8192];
 static size_t wire_len;
 static int exynos4210_uart_inject(void *dev, const uint8_t *buf, int len) {
@@ -97,6 +97,7 @@ static int exynos4210_uart_inject(void *dev, const uint8_t *buf, int len) {
     if (len > fifo_space) len = fifo_space;
     memcpy(wire_log + wire_len, buf, len);
     wire_len += len;
+    fifo_space -= len;
     return len;
 }
 ''' + header + body + replies + r'''
@@ -130,6 +131,10 @@ int main(void) {
     assert(count(" U 149 200 ") == 0);
     while (s.inflight_n) {
         char line[64]; snprintf(line, sizeof(line), "1 %u S R 7", s.inflight[0].seq);
+        if (needs_dispatch(s.inflight[0].kind)) {
+            char done[64]; snprintf(done, sizeof(done), "1 %u S 7", s.inflight[0].seq);
+            dispatch_line(&s, done);
+        }
         ack_line(&s, line);
     }
     assert(count(" D 100 200 ") == 1);
@@ -142,15 +147,19 @@ int main(void) {
     assert(s.inflight_n == DARWIN_INPUT_WINDOW && s.q_len == 2);
     while (s.inflight_n) {
         char line[64]; snprintf(line, sizeof(line), "1 %u S R 7", s.inflight[0].seq);
+        if (needs_dispatch(s.inflight[0].kind)) {
+            char done[64]; snprintf(done, sizeof(done), "1 %u S 7", s.inflight[0].seq);
+            dispatch_line(&s, done);
+        }
         ack_line(&s, line);
     }
     assert(s.q_len == 0 && s.c_acked >= 10 && s.c_ack_failed == 0);
     /* Partial FIFO writes keep byte order across ticks. */
     fifo_space = 3;
     darwin_input_button(&s, true); darwin_input_sync(&s);
-    for (int i = 0; i < 40; i++) darwin_input_pump(&s);
+    for (int i = 0; i < 40; i++) { fifo_space = 3; darwin_input_pump(&s); }
     assert(strstr(wire_log, " D 149 200 "));
-    fifo_space = 16;
+    fifo_space = 8192;
     /* Guest restart: new epoch, held contact is cancelled, nothing replays. */
     uint32_t epoch = s.epoch;
     ready_line(&s, "I 215 0");
@@ -184,6 +193,14 @@ int main(void) {
     fake_clock += 50 * SCALE_MS;
     flush_wheel(&s);
     assert(count(" W 149 200 2 ") == 1 && s.wheel_notches == 0);
+    for (int i = 0; i < 100; i++) {
+        darwin_input_wheel(&s, -1);
+        fake_clock += 50 * SCALE_MS;
+        flush_wheel(&s);
+    }
+    assert(s.q_len == 1 && queue_tail(&s)->kind == 'W' && queue_tail(&s)->c == -8);
+    assert(count(" W 149 200 ") == 1); /* slow guest never accumulates wheel drags */
+    queue_clear(&s);
     darwin_input_button(&s, true); darwin_input_sync(&s);
     darwin_input_wheel(&s, -1);
     assert(s.wheel_notches == 0);
@@ -214,6 +231,86 @@ int main(void) {
             binary = build(harness, directory, 'darwin-input-harness')
             result = subprocess.run([str(binary)], check=True, capture_output=True, text=True)
             self.assertIn('ok sent=', result.stdout)
+
+    def test_stale_replies_timeouts_and_partial_epoch(self):
+        source = DEVICE.read_text()
+        harness = self.harness().split('int main(void) {')[0]
+        timeouts = source[source.index('static void check_timeouts('):source.index('static void write_status(')]
+        harness += timeouts + r'''
+int main(void) {
+    s.enabled = true; s.epoch = 10; s.next_seq = 1;
+    s.cancel_pending = true;
+    darwin_input_pump(&s);
+    assert(wire_len == 0); /* even cancel waits for a console reader */
+    ready_line(&s, "I 87 0");
+    ack_line(&s, "10 1 Q I 1");
+    darwin_input_button(&s, true); darwin_input_sync(&s);
+    assert(!s.contact_sent && s.q_len == 0);
+    ready_line(&s, "R 87 10");
+    darwin_input_button(&s, false); darwin_input_sync(&s);
+    darwin_input_consumer(&s, 64, true);
+    uint32_t seq = s.inflight[0].seq;
+    char ack[80], done[80];
+    snprintf(ack, sizeof(ack), "10 %u Q R 1", seq);
+    snprintf(done, sizeof(done), "10 %u S 2", seq);
+    ack_line(&s, ack);
+    assert(s.inflight_n == 1); /* Q is acceptance, not dispatch */
+    uint64_t acked = s.c_acked;
+    ack_line(&s, ack);
+    assert(s.c_acked == acked && s.inflight_n == 1);
+    dispatch_line(&s, done);
+    assert(s.inflight_n == 0 && s.c_dispatched == 1);
+    dispatch_line(&s, done);
+    assert(s.c_dispatched == 1);
+    /* A fast worker can print its dispatch before the reader's ACK. */
+    darwin_input_consumer(&s, 64, false);
+    seq = s.inflight[0].seq;
+    snprintf(ack, sizeof(ack), "10 %u Q R 1", seq);
+    snprintf(done, sizeof(done), "10 %u S 2", seq);
+    dispatch_line(&s, done);
+    assert(s.inflight_n == 1);
+    ack_line(&s, ack);
+    assert(s.inflight_n == 0);
+    for (int i = 0; i < 8; i++) darwin_input_consumer(&s, 64, i & 1);
+    assert(s.q_len == 4 && s.inflight_n == 4);
+    fake_clock += 11 * NANOSECONDS_PER_SECOND;
+    check_timeouts(&s);
+    assert(s.epoch == 11 && s.guest_state == 'L' && s.q_len == 0 && !s.inflight_n);
+    ack_line(&s, ack);
+    assert(s.guest_state == 'L'); /* stale R cannot revive input */
+    /* Only cancel, not the queued button edges, follows the timeout. */
+    size_t cut = wire_len;
+    darwin_input_pump(&s);
+    assert(wire_log[cut] == '\n' && !strstr(wire_log + cut, " B "));
+    /* Simulate a prefix already accepted by the UART, with the FIFO full. */
+    s.wire_len = 5; s.wire_pos = 2;
+    memcpy(s.wire, "DVMI2", 5);
+    memcpy(wire_log + wire_len, "DV", 2); wire_len += 2;
+    new_epoch(&s, "partial UART record");
+    cut = wire_len;
+    darwin_input_pump(&s);
+    assert(wire_log[cut] == '\n' && strstr(wire_log + cut, "DVMI2 12 "));
+    /* A cancelled wheel batch must not retain the old expired deadline. */
+    s.guest_state = 'R';
+    darwin_input_wheel(&s, 1); darwin_input_wheel(&s, -1);
+    assert(!s.wheel_notches && !s.wheel_deadline_vns);
+    /* Once accepted, a slow HID call has its separate bounded deadline. */
+    memset(&s, 0, sizeof(s));
+    s.enabled = true; s.epoch = 20; s.next_seq = 1; s.guest_state = 'R';
+    darwin_input_consumer(&s, 64, true);
+    ack_line(&s, "20 1 Q R 1");
+    fake_clock += 11 * NANOSECONDS_PER_SECOND;
+    check_timeouts(&s);
+    assert(!s.c_timeouts && s.inflight_n == 1);
+    fake_clock += 20 * NANOSECONDS_PER_SECOND;
+    check_timeouts(&s);
+    assert(s.c_timeouts == 1 && s.epoch == 21 && s.guest_state == 'L');
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory() as directory:
+            binary = build(harness, directory, 'input-failure-paths')
+            subprocess.run([str(binary)], check=True, capture_output=True, text=True)
 
 
 if __name__ == '__main__':

@@ -57,6 +57,8 @@ def main():
     env = {k:v for k,v in os.environ.items() if not k.startswith(('DARWIN_', 'GXFSTAT_'))}
     model_env = dict(source.get('qemu_env', source.get('env', {})))
     model_env['DARWIN_TOUCH_EVENTS'] = str(out/'events.jsonl')
+    if model_env.get('DARWIN_INPUT_UART', '0') != '0':
+        model_env['DARWIN_INPUT_STATUS'] = str(out/'input-status.json')
     # Full RPC dumps are unnecessary for latency testing; errors stay logged.
     model_env['DARWIN_DCP_IOMFB_RPC_TRACE'] = '0'
     env.update(model_env)

@@ -205,9 +205,16 @@ static bool create_service(struct vservice *v, dispatch_queue_t queue) {
     Ref matching = make_dict(mk, mv, 2);
     client_set_matching(v->client, matching);
     cf_release(matching);
+    for (unsigned i = 0; i < 2; i++) {
+        cf_release(mk[i]);
+        cf_release(mv[i]);
+    }
     client_set_queue(v->client, queue);
     client_activate(v->client);
-    v->service = vsc_create(v->client, v->props, &callbacks, v, NULL);
+    Ref service = vsc_create(v->client, v->props, &callbacks, v, NULL);
+    pthread_mutex_lock(&lock);
+    v->service = service;
+    pthread_mutex_unlock(&lock);
     if (!v->service) { say("DVM_HID_ERROR service=%s virtual-service-create\n", v->name); return false; }
     CFRef rid = svc_registry_id(v->service);
     long long id = 0;
@@ -324,12 +331,10 @@ static bool initialize_hid(void) {
 static void *hid_thread(void *unused) {
     (void)unused;
     say("DVM_HID_INIT begin pid=%d\n", getpid());
-    struct timeval t0, t1;
-    gettimeofday(&t0, NULL);
+    uint64_t t0 = now_us();
     bool ok = initialize_hid();
-    gettimeofday(&t1, NULL);
-    say("DVM_HID_INIT done ok=%d ms=%lld\n", ok,
-        (long long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_usec - t0.tv_usec) / 1000));
+    say("DVM_HID_INIT done ok=%d ms=%llu\n", ok,
+        (unsigned long long)((now_us() - t0) / 1000));
     pthread_mutex_lock(&lock);
     state = ok && !need_recovery ? 'R' : 'L';
     announce();
@@ -552,11 +557,14 @@ static void recover_services(void) {
     pthread_detach(watchdog);
     destroy_services();
     for (unsigned attempt = 1; attempt <= RECOVERY_ATTEMPTS; attempt++) {
+        pthread_mutex_lock(&lock);
+        need_recovery = false;
+        pthread_mutex_unlock(&lock);
         dispatch_queue_t queue = dispatch_queue_create("dvm-hid.services", DISPATCH_QUEUE_SERIAL);
         bool ok = create_service(&touch_service, queue) && create_service(&button_service, queue);
         dispatch_release(queue);
         pthread_mutex_lock(&lock);
-        if (ok) {
+        if (ok && !need_recovery) {
             need_recovery = false;
             held = false;
             touch_down = touch_release_needed = touch_release_enqueued = false;
@@ -678,6 +686,13 @@ static char handle(const struct record *r) {
             touch_down = touch_release_needed = touch_release_enqueued = false;
             button_down = buttons_release_needed = buttons_release_enqueued = 0;
         }
+    }
+    /* Reserve room for the touch/Home/Power cleanup even with an older
+     * host that only waits for queue acceptance. Never drop a release while
+     * retaining the down that it was meant to balance. */
+    if (state == 'R' && strchr("DMUBW", r->kind) && op_len >= OP_QUEUE - 3) {
+        cancel_input(r);
+        return 'F';
     }
     switch (r->kind) {
     case 'P': return 'Q';
