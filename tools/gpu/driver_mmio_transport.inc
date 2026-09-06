@@ -3,11 +3,20 @@
 #include "../../qemu-sptm/include/xnu/darwin_gpu_transport.h"
 #include "driver_binary.h"
 #include "blur_wire.h"
-#ifdef DVM_DRIVER_BLUR
+#if defined(DVM_DRIVER_BLUR) || defined(DVM_DRIVER_PRESENT)
 static double blurRPCus,blurDoorbellus;
 #define DVM_AUDIT_SLOTS 120
 #else
 #define DVM_AUDIT_SLOTS 64
+#endif
+#ifdef DVM_DRIVER_PRESENT
+#undef DVM_GPU_REPLY_DATA
+#define DVM_GPU_REPLY_DATA 0x200000u
+#undef DVM_GPU_MAX_BYTES
+#define DVM_GPU_MAX_BYTES 0x10000u
+#define DVM_EXPECTED_MODE 3
+#else
+#define DVM_EXPECTED_MODE 2
 #endif
 #include <signal.h>
 #include <sys/ucontext.h>
@@ -101,7 +110,7 @@ int DVMReport(FILE *stream,const char *format,...) {
         NSData *returnedData=[NSData dataWithBytes:_shared+DVM_GPU_REPLY_DATA length:n];
         NSDictionary *reply=DVMBMagic(returnedData)==DVM_BLUR_REPLY?DVMBlurReplyDecode(returnedData):DVMBMagic(returnedData)==DVM_BIN_REPLY?DVMBDecodeReply(returnedData):[NSJSONSerialization JSONObjectWithData:returnedData options:0 error:error];
         if (![reply isKindOfClass:NSDictionary.class]||[reply[@"seq"] unsignedLongLongValue]!=seq) fail("mmio-reply-json");
-#ifdef DVM_DRIVER_BLUR
+#if defined(DVM_DRIVER_BLUR) || defined(DVM_DRIVER_PRESENT)
         (void)polls;blurRPCus+=(now()-started)*1e6;blurDoorbellus+=(completed-submitted)*1e6;
 #else
         fprintf(stderr,"GPU_LOAD_DRIVER_MMIO_RPC seq=%llu op=%s total_us=%.3f doorbell_us=%.3f polls=%llu\n",seq,[request[@"op"] UTF8String],(now()-started)*1e6,(completed-submitted)*1e6,polls);
@@ -135,7 +144,7 @@ static Namespace *openMMIO(void *lib) {
     kr=p_IOConnectMapMemory64(client,DVM_GPU_MEMORY_TYPE+1,mach_task_self(),&regs,&regsN,kIOMapAnywhere);
     if(kr||regsN!=DVM_GPU_REG_SIZE)fail("mmio-map-regs");ns.regs=(volatile uint8_t *)regs;
     mmioBarrier();uint32_t magic;memcpy(&magic,ns.shared,4);
-    if(magic!=DVM_GPU_MAGIC||*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_MODE)!=2||*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_DONE))fail("mmio-identity");
+    if(magic!=DVM_GPU_MAGIC||*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_MODE)!=DVM_EXPECTED_MODE||*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_DONE))fail("mmio-identity");
     ns.identity=[NSData dataWithBytes:ns.shared+16 length:16];
     mmioReportLock=[NSObject new];mmioReportRAM=ns.shared;
     fprintf(stderr,"GPU_LOAD_DRIVER_MMIO_MAPPED ram=%llu registers=%llu ram_va=%p regs_va=%p\n",ramN,regsN,ns.shared,ns.regs);

@@ -5,6 +5,9 @@
 #import <Metal/Metal.h>
 #include "driver_binary.h"
 #include "blur_wire.h"
+#include "present_host.h"
+#include <fcntl.h>
+#include <sys/stat.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,7 +38,7 @@ enum {
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, DVMEntry *> *entries;
 @property(nonatomic) uint64_t nextHandle, lastSeq, creations, submissions;
-@property(nonatomic) NSUInteger textureBytes;
+@property(nonatomic) NSUInteger textureBytes,residentBytes;
 @end
 @implementation DVMHost
 @end
@@ -323,6 +326,7 @@ static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request)
         return HostError(seq, ENOENT, @"unknown handle");
     DVMEntry *entry = host.entries[@(handle)];
     host.textureBytes -= entry.textureBytes;
+    if([entry.kind isEqual:@"resident"])host.residentBytes=0;
     [host.entries removeObjectForKey:@(handle)];
     return @{@"seq" : @(seq), @"ok" : @YES};
 }
@@ -347,7 +351,8 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
             @"textures" : @(textures),
             @"buffers" : @(buffers),
             @"objects" : @(host.entries.count),
-            @"resourceBytes" : @(host.textureBytes)
+            @"resourceBytes" : @(host.textureBytes+host.residentBytes),
+            @"residentWorkloads":@(host.residentBytes?1:0)
         },
         @"creations" : @(host.creations),
         @"submissions" : @(host.submissions)
@@ -516,10 +521,13 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         @"dispatches" : @(items.count)
     };
 }
+#include "present_host_submit.inc"
+
 static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *request) {
     NSString *op = request[@"op"];
     if (![op isKindOfClass:NSString.class])
         return HostError(seq, EINVAL, @"request lacks op");
+    if([op hasPrefix:@"resident"])return ResidentRequest(host,seq,request);
     if ([op isEqual:@"buffer"])
         return Buffer(host, seq, request);
     if ([op isEqual:@"library"])

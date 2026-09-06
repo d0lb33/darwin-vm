@@ -17,6 +17,7 @@ from driver_peer import DriverPeer, MAX
 from surface_peer import AIR_SHA
 from driver_binary import REQUEST, REPLY, decode_request, decode_reply
 import blur_peer
+import present_peer
 
 RAM_SIZE=0x1000000
 MAGIC=0x44564d31
@@ -28,13 +29,18 @@ class MMIOPeer(DriverPeer):
         self.released=False;self.released_at=None;self.buffer=b'';self.rx=b'';self.sock=None
         self.library=Path(library);self.worker=Path(worker);self.boot=boot;self.audit_seen=0
         mode=self.worker.parent/"transport-mode.txt"
-        self.audit_limit=120 if mode.exists() and mode.read_text().strip()=="--mmio-blur" else 64
+        self.present=mode.exists() and mode.read_text().strip()=="--mmio-present"
+        self.audit_limit=120 if self.present or (mode.exists() and mode.read_text().strip()=="--mmio-blur") else 64
+        self.reply_offset=0x200000 if self.present else 0x800000
+        self.max_bytes=0x10000 if self.present else MAX
         raw=self.library.read_bytes()
         if len(raw)!=2705796 or hashlib.sha256(raw).hexdigest()!=AIR_SHA:raise ValueError('exact AIR cache mismatch')
         self.fd=os.open(self.out/'shared-ram.bin',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
         os.ftruncate(self.fd,RAM_SIZE);self.ram=mmap.mmap(self.fd,RAM_SIZE)
         self.log=(self.out/'driver-worker.log').open('xb')
         env={k:v for k,v in os.environ.items() if k!='DVM_DRIVER_BOOTSTRAP'}
+        if self.present:env['DVM_DRIVER_PRESENT_RAM']=str(self.out/'shared-ram.bin')
+        else:env.pop('DVM_DRIVER_PRESENT_RAM',None)
         env.update(DVM_DRIVER_LIBRARY=str(self.library),DVM_DRIVER_BOOTSTRAP='1')
         self.proc=subprocess.Popen([str(self.worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,env=env)
         (self.out/'driver-inputs.json').write_text(json.dumps(dict(worker=str(self.worker),worker_sha256=hashlib.sha256(self.worker.read_bytes()).hexdigest(),library=str(self.library),air_sha256=AIR_SHA,transport='shared-ram-mmio'),indent=2)+'\n')
@@ -69,7 +75,7 @@ class MMIOPeer(DriverPeer):
         self.rx+=data
         if len(self.rx)<16:return
         seq,n,checksum=struct.unpack('<QII',self.rx);self.rx=b''
-        if not self.released or seq!=len(self.seen)+1 or not 0<n<=MAX:raise ValueError('MMIO notification contract')
+        if not self.released or seq!=len(self.seen)+1 or not 0<n<=self.max_bytes:raise ValueError('MMIO notification contract')
         expected=self.header+struct.pack('<QII',seq,n,checksum)
         if self.ram[0x40:0x60]!=expected or self.ram[16:32]!=self.header:raise ValueError('MMIO request header/session')
         raw=self.ram[0x10000:0x10000+n]
@@ -80,10 +86,10 @@ class MMIOPeer(DriverPeer):
         if not isinstance(request,dict) or request.get('seq')!=seq:raise ValueError('MMIO request inner sequence')
         started=time.monotonic_ns();self.proc.stdin.write(struct.pack('<I',n)+raw);self.proc.stdin.flush()
         length,=struct.unpack('<I',self.read(4))
-        if not 0<length<=MAX:raise ValueError('host reply length')
+        if not 0<length<=self.max_bytes:raise ValueError('host reply length')
         output=self.read(length);reply=blur_peer.reply(output) if struct.unpack_from("<I",output)[0]==blur_peer.REPLY else decode_reply(output) if struct.unpack_from("<I",output)[0]==REPLY else json.loads(output)
         if not isinstance(reply,dict) or reply.get('seq')!=seq:raise ValueError('host reply sequence')
-        self.ram[0x800000:0x800000+length]=output
+        self.ram[self.reply_offset:self.reply_offset+length]=output
         self.ram[0x80:0xa0]=self.header+struct.pack('<QII',seq,length,zlib.crc32(output))
         self.sock.sendall(struct.pack('<QII',seq,0,0))
         service_us=(time.monotonic_ns()-started)/1000
@@ -94,7 +100,7 @@ class MMIOPeer(DriverPeer):
             if reply.get("ok"):self.blur_evidence.add(request,reply,raw,output)
         if binary:request=decode_request(raw)  # Evidence conversion follows completion publication.
         record=dict(wire_encoding="blur-v1" if blur else "binary-v1" if binary else "json",seq=seq,op=request.get('op'),request_bytes=n,reply_bytes=length,
-            host_service_us=service_us,
+            host_service_us=service_us,host_received_ns=started,host_completed_ns=time.monotonic_ns(),
             request={k:v for k,v in request.items() if k!='data'},reply=reply)
         if binary:
             (self.out/f"binary-request-{seq:04d}.bin").write_bytes(raw)
@@ -119,6 +125,7 @@ class MMIOPeer(DriverPeer):
             with (self.out/'driver-audit.jsonl').open('a') as f:f.write(json.dumps(dict(seq=seq,line=line))+'\n')
         return lines
     def verify(self,events):
+        if self.present:return present_peer.verify(self.out,events,self.records)
         if hasattr(self,"blur_evidence"):return blur_peer.verify(self.out,events,self.records)
         return super().verify(events)
     def close(self):

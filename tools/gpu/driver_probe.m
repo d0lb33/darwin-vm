@@ -71,7 +71,7 @@ static void memoryBudget(void) {
     }
     fprintf(stderr, "GPU_LOAD_DRIVER_MEMORY before_active=%d before_inactive=%d\n", limits.active,
             limits.inactive);
-#ifdef DVM_DRIVER_BLUR
+#if defined(DVM_DRIVER_BLUR) || defined(DVM_DRIVER_PRESENT)
     const int memoryMB=256;
 #else
     const int memoryMB=64;
@@ -246,6 +246,12 @@ static NSData *library(void) {
 #ifdef DVM_DRIVER_BLUR
 #include "blur_workload.inc"
 #endif
+#ifdef DVM_PRESENT_CONTRACT
+#include "present_contract.inc"
+#endif
+#ifdef DVM_DRIVER_PRESENT
+#include "present_workload.inc"
+#endif
 int main(int argc, char **argv) {
     @autoreleasepool {
         setvbuf(stderr, NULL, _IONBF, 0);
@@ -380,6 +386,9 @@ int main(int argc, char **argv) {
 #endif
         fprintf(stderr, "GPU_LOAD_DRIVER_READY\n");
         memoryBudget();
+        #ifdef DVM_DRIVER_PRESENT
+        double setupStart=now();
+#endif
         NSData *air = nil;
         @autoreleasepool {
             air = library();
@@ -410,12 +419,17 @@ int main(int argc, char **argv) {
             if (![device conformsToProtocol:@protocol(MTLDevice)])
                 fail("device-protocol");
             fprintf(stderr, "GPU_LOAD_DRIVER_STAGE device-created\n");
-            #ifdef DVM_DRIVER_BLUR
+            #if defined(DVM_DRIVER_PRESENT)
+            DVMRunPresentedBlur(device,air,ns,handle,setupStart);
+#elif defined(DVM_DRIVER_BLUR)
             DVMRunBlur(device,air);
 #else
             DVMRunLuma(device, air, 8);
 #endif
         }
+        #ifdef DVM_PRESENT_CONTRACT
+        DVMDisplayContract();
+#endif
         // Retire queues run asynchronously; a bounded stats check also detects leaks.
         until = now() + 5;
         NSDictionary *stats = nil;
@@ -426,7 +440,9 @@ int main(int argc, char **argv) {
             usleep(10000);
         } while (now() < until);
         if (!stats || [stats[@"submissions"] unsignedIntegerValue] !=
-#ifdef DVM_DRIVER_BLUR
+#if defined(DVM_DRIVER_PRESENT)
+            33
+#elif defined(DVM_DRIVER_BLUR)
             952
 #else
             8
@@ -436,7 +452,9 @@ int main(int argc, char **argv) {
             fail("resource-retirement");
         fprintf(
             stderr,
-            #ifdef DVM_DRIVER_BLUR
+            #if defined(DVM_DRIVER_PRESENT)
+            "GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions=33 resources=0\n"
+#elif defined(DVM_DRIVER_BLUR)
             "GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0\n"
 #else
             "GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0\n"

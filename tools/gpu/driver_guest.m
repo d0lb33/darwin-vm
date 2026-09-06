@@ -576,3 +576,33 @@ id<MTLDevice> DVMCreateBinaryMetalDevice(DVMMetalRPC rpc) {
     DVMDevice *d=(DVMDevice *)DVMCreateMetalDevice(rpc);
     d.binaryPayloads=YES;return d;
 }
+
+// Narrow resident-workload extension. This is not an implementation of general
+// MTLTexture shared backing; explicit entry points keep that limitation visible.
+@interface DVMResidentTask : DVMObject
+@property(nonatomic,strong) DVMLibrary *library;
+@property(nonatomic) uint32_t lastFrame;
+@end
+@implementation DVMResidentTask
+@end
+id DVMCreateResidentBlur(id<MTLDevice> device,id<MTLLibrary> library,uint32_t nonce) {
+    if(![(id)device isKindOfClass:DVMDevice.class]||![(id)library isKindOfClass:DVMLibrary.class])reject(@"resident object type");
+    DVMDevice *d=(id)device;DVMLibrary *l=(id)library;
+    if(l.owner!=d||!d.binaryPayloads||d.submissionInFlight)reject(@"resident device ownership/state");
+    NSError *e=nil;NSDictionary *r=[d call:@{@"op":@"residentCreate",@"library":l.handle,@"nonce":@(nonce)} error:&e];
+    if(!r)reject(e.description);
+    DVMResidentTask *task=[DVMResidentTask new];task.owner=d;task.library=l;task.handle=r[@"handle"];return task;
+}
+NSDictionary *DVMDrawResidentBlur(id object,uint32_t frame) {
+    if(![object isKindOfClass:DVMResidentTask.class])reject(@"resident object type");
+    DVMResidentTask *task=object;
+    if(frame!=task.lastFrame+1||frame>33||task.owner.submissionInFlight)reject(@"resident frame sequence");
+    NSError *e=nil;NSDictionary*r=[task.owner call:@{@"op":@"residentDraw",@"handle":task.handle,@"frame":@(frame)} error:&e];
+    if(!r||[r[@"frame"] unsignedIntValue]!=frame||[r[@"status"] unsignedIntValue]!=4)reject(e.description?:@"resident completion");
+    task.lastFrame=frame;return r;
+}
+NSDictionary *DVMVerifyResidentBlur(id object) {
+    if(![object isKindOfClass:DVMResidentTask.class]||((DVMResidentTask *)object).lastFrame!=33)reject(@"resident final verification state");
+    DVMResidentTask *task=object;NSError *e=nil;
+    NSDictionary*r=[task.owner call:@{@"op":@"residentVerify",@"handle":task.handle} error:&e];if(!r)reject(e.description);return r;
+}

@@ -36,10 +36,18 @@ class MMIOPeerTests(unittest.TestCase):
         self.wire.sendall(packet[5:]);self.peer.pump()
         self.assertEqual(self.wire.recv(16),struct.pack('<QII',1,0,0))
         session,seq,n,crc=struct.unpack('<16sQII',self.peer.ram[0x80:0xa0])
-        raw=self.peer.ram[0x800000:0x800000+n]
+        present=(BUILD/"transport-mode.txt").read_text().strip()=="--mmio-present"
+        offset=0x200000 if present else 0x800000
+        raw=self.peer.ram[offset:offset+n]
+        self.assertEqual(self.peer.ram[0x300000:0x300040],bytes(64))
         self.assertEqual(zlib.crc32(raw),crc);self.assertEqual(seq,1)
         self.assertEqual(session,b'owned-session-01');self.assertTrue(json.loads(raw)['ok'])
         self.assertEqual(len(self.peer.records),1)
+    def test_payload_bound_rejected_before_worker(self):
+        present=(BUILD/"transport-mode.txt").read_text().strip()=="--mmio-present"
+        self.wire.sendall(struct.pack("<QII",1,(0x10000 if present else 0x200000)+1,0))
+        with self.assertRaisesRegex(ValueError,"notification"):self.peer.pump()
+        self.assertEqual(self.peer.seen,set())
     def test_bad_crc_never_reaches_worker(self):
         self.wire.sendall(self.request(crc_bad=True))
         with self.assertRaisesRegex(ValueError,'CRC'):self.peer.pump()

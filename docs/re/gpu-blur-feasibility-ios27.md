@@ -1,5 +1,10 @@
 # Exact-guest blur workload feasibility
 
+Follow-up: [resident GPU conversion and display acceptance](gpu-blur-presentation-ios27.md)
+proves the host segment with final-only verification, but the guest's direct
+presentation prerequisite fails its native swap-wait contract. It does not yet
+establish displayed VM performance.
+
 ## Preregistered guest comparison
 
 This experiment follows binary-submission commit a2d98f9, preserving exact iOS

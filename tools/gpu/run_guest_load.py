@@ -39,6 +39,7 @@ def main():
     p.add_argument('--keep-paused', action='store_true')
     p.add_argument('--probe-observe-display',action='store_true',
         help='after a standalone probe completes, require native presentation and stable input with a fresh ACK')
+    p.add_argument('--driver-present',action='store_true',help='mode-3 resident blur acceptance with normal DCP frame witness')
     p.add_argument('--driver-mmio',action='store_true',help='use shared RAM and MMIO notifications with --driver-worker')
     p.add_argument('--mmio-echo',action='store_true',help='owned 16 MiB shared RAM and dedicated MMIO echo device; no auxiliary namespace')
     p.add_argument('--aux-namespace', action='store_true',
@@ -67,6 +68,10 @@ def main():
     p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.driver_present and (not a.driver_mmio or not a.driver_worker or (a.driver_worker.parent/"transport-mode.txt").read_text().strip()!="--mmio-present"):
+        p.error("presentation requires the matching resident MMIO build")
+    if a.driver_worker and (a.driver_worker.parent/"transport-mode.txt").is_file() and (a.driver_worker.parent/"transport-mode.txt").read_text().strip()=="--mmio-present" and not a.driver_present:
+        p.error("resident MMIO build requires --driver-present and its display witness")
     if a.driver_mmio and (not a.driver_worker or a.aux_namespace or a.driver_failure_snapshot):
         p.error("MMIO requires driver worker without namespace or snapshot")
     if a.mmio_echo and (a.aux_namespace or a.aux_probe or a.aux_latency or a.aux_header_only or a.aux_post_boot or a.worker or a.surface_worker or a.driver_worker or a.keep_paused):
@@ -153,6 +158,9 @@ def main():
             shutil.copyfile(Path(__file__).with_name("driver_mmio_peer.py"),out/"driver_mmio_peer.py")
             shutil.copyfile(Path(__file__).with_name("driver_binary.py"),out/"driver_binary.py")
             shutil.copyfile(Path(__file__).with_name("blur_peer.py"),out/"blur_peer.py")
+            shutil.copyfile(Path(__file__).with_name("present_peer.py"),out/"present_peer.py")
+            for item in a.driver_worker.parent.glob("present_*"):
+                if item.suffix in (".h",".m",".inc"):shutil.copyfile(item,out/item.name)
             for item in a.driver_worker.parent.glob("blur_*"):
                 if item.suffix in (".h",".m",".inc"):shutil.copyfile(item,out/item.name)
             shutil.copyfile(a.driver_worker.parent/"driver_mmio_transport.inc",out/"driver_mmio_transport.inc")
@@ -191,6 +199,13 @@ def main():
     if a.driver_mmio:
         argv += ['-chardev',f'socket,id=dvm_gpu_notify,path={out}/gpu-notify.sock,server=on,wait=off']
     if a.mmio_echo or a.driver_mmio:model['DARWIN_GPU_SHM_PATH']=str(out/'shared-ram.bin')
+    if 'DARWIN_DCP_GPU_PRESENT_DIR' in model:
+        model['DARWIN_DCP_GPU_PRESENT_DIR']=str(out)
+    if model.get('DARWIN_GPU_PRESENT_TRANSPORT')=='1' and not a.driver_present:
+        raise ValueError('mode-3 manifest requires --driver-present')
+    if a.driver_present:
+        model['DARWIN_GPU_PRESENT_TRANSPORT']='1'
+        model['DARWIN_DCP_GPU_PRESENT_DIR']=str(out)
     if 'DARWIN_ANS_AUX_DRIVE' in model:
         raise ValueError('manifest must not carry an uncontrolled auxiliary backend')
     if a.aux_namespace:
@@ -219,7 +234,7 @@ def main():
     driver_ready_seen=False
     driver_last_progress=started
     report.update(host_runner_monotonic_origin=started, aux_latency=a.aux_latency,
-        driver_boot=driver_boot, driver_mmio=a.driver_mmio, mmio_echo=a.mmio_echo,
+        driver_boot=driver_boot, driver_mmio=a.driver_mmio, driver_present=a.driver_present, mmio_echo=a.mmio_echo,
         driver_late_launch=a.driver_late_launch,
         aux_post_boot=a.aux_post_boot,
         global_deadline_seconds=a.seconds,
@@ -258,7 +273,7 @@ def main():
                         driver_last_progress=time.monotonic()
                         if 'GPU_LOAD_DRIVER_READY' in line:driver_ready_seen=True
                         if 'GPU_LOAD_ERROR' in line:raise RuntimeError('shared-RAM guest failure: '+line)
-                        if line in ('GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0'):
+                        if line in ('GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions=33 resources=0'):
                             audit_complete=True;aux_complete=True
                             report['driver_complete_seconds']=time.monotonic()-started
                             report['completion_source']='shared-ram-audit'
@@ -504,8 +519,16 @@ def main():
                     proc.kill(); proc.wait(timeout=5)
             report.update(elapsed=time.monotonic()-started, stop_reason=reason,
                 kept_paused=bool(proc and proc.poll() is None))
+            if a.driver_present and report.get('passed'):
+                try:
+                    import present_peer
+                    report['presentation_final']=present_peer.verify_final(out,report['events'])
+                except (ValueError,OSError) as error:
+                    report['passed']=False;report['presentation_error']=str(error)
             atomic_json(out/'result.json', report)
             print(json.dumps(report), flush=True)
+    if report.get('presentation_error'):
+        raise RuntimeError(report['presentation_error'])
 
 
 if __name__ == '__main__':

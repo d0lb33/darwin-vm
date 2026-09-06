@@ -33,6 +33,11 @@ def main():
             if a.mmio_frames:
                 if path.name=='shared-ram.bin' and path.stat().st_size==16*1024*1024:
                     with path.open('rb') as f:mmio=f.read(4)==b'1MVD'
+                elif path.name=='output-ram.bin' and path.stat().st_size==16*1024*1024 and (path.parent/'plan.json').is_file():
+                    # Final-only output of the resident host presentation probe.
+                    with path.open('rb') as f:
+                        f.seek(0x300000)
+                        mmio=f.read(16)==bytes.fromhex('4d5644ff535250ff524c42ff210000ff')
                 elif re.fullmatch(r'binary-(request|reply)-[0-9]+\.bin',path.name):
                     data=path.read_bytes()
                     mmio=(len(data)==28672 and data[:4]==b'DVB1') or (len(data)==272 and data[:4]==b'DVR1')

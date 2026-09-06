@@ -3,11 +3,13 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:?new output directory}
 mode=${2:-nvme}
-[[ "$mode" == nvme || "$mode" == --mmio || "$mode" == --mmio-binary || "$mode" == --mmio-blur ]] || exit 2
+[[ "$mode" == nvme || "$mode" == --mmio || "$mode" == --mmio-binary || "$mode" == --mmio-blur || "$mode" == --mmio-present-contract || "$mode" == --mmio-present ]] || exit 2
 extra_flags=(-UDVM_DRIVER_MMIO)
 if [[ "$mode" == --mmio || "$mode" == --mmio-binary ]]; then extra_flags=(-DDVM_DRIVER_MMIO); fi
 if [[ "$mode" == --mmio-binary ]]; then extra_flags+=(-DDVM_DRIVER_BINARY); fi
 if [[ "$mode" == --mmio-blur ]]; then extra_flags=(-DDVM_DRIVER_MMIO -DDVM_DRIVER_BINARY -DDVM_DRIVER_BLUR); fi
+if [[ "$mode" == --mmio-present-contract ]]; then extra_flags=(-DDVM_DRIVER_MMIO -DDVM_DRIVER_BINARY -DDVM_PRESENT_CONTRACT); fi
+if [[ "$mode" == --mmio-present ]]; then extra_flags=(-DDVM_DRIVER_MMIO -DDVM_DRIVER_BINARY -DDVM_DRIVER_PRESENT); fi
 test ! -e "$out"
 mkdir -p "$out/DVMProxy.bundle"
 python3 "$repo/tools/gpu/make_guest_link_stubs.py" "$out/stubs"
@@ -20,7 +22,7 @@ flags=(-fobjc-arc -fobjc-arc-exceptions -O1 -Wall -Wextra -Werror -fno-objc-msgs
 partial=(-Wno-protocol -Wno-objc-protocol-property-synthesis)
 for name in driver_guest driver_probe driver_workload; do
     optimize=(-O1)
-    if [[ "$mode" == --mmio-blur && "$name" == driver_probe ]]; then optimize=(-O3); fi
+    if [[ ( "$mode" == --mmio-blur || "$mode" == --mmio-present ) && "$name" == driver_probe ]]; then optimize=(-O3); fi
     xcrun clang -target arm64-apple-ios27.0 -isysroot "$sdk" -Wno-incompatible-sysroot "${flags[@]}" "${partial[@]}" "${extra_flags[@]}" "${optimize[@]}" -c "$repo/tools/gpu/$name.m" -o "$out/$name.o"
 done
 python3 - "$out" "$mode" <<'PY'
@@ -45,7 +47,7 @@ for rel,names in extra.items():
  f=p/'stubs'/rel;s=f.read_text();s=s.replace('symbols: [ ','symbols: [ '+''.join('"_'+n+'", ' for n in names));f.write_text(s)
 (p/'entitlements.plist').write_bytes(plistlib.dumps({'platform-application':True,'com.apple.AppleNVMeNamespaceDevice.allow':True,'com.apple.security.exception.iokit-user-client-class':['AppleNVMeNamespaceUC','IOSurfaceRootUserClient']}))
 if sys.argv[2]!='nvme':
- (p/'entitlements.plist').write_bytes(plistlib.dumps({'platform-application':True,'org.darwin-vm.transport':True,'com.apple.security.exception.iokit-user-client-class':['IOKitDiagnosticsClient','IOSurfaceRootUserClient']}))
+ (p/'entitlements.plist').write_bytes(plistlib.dumps({'platform-application':True,'org.darwin-vm.transport':True,'com.apple.security.exception.iokit-user-client-class':['IOKitDiagnosticsClient','IOSurfaceRootUserClient']+(['IOMobileFramebufferUserClient'] if sys.argv[2] in ('--mmio-present-contract','--mmio-present') else [])}))
 (p/'DVMProxy.bundle/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier='org.darwin-vm.metal-driver',CFBundleName='DVMProxy',CFBundleExecutable='DVMProxy',CFBundlePackageType='BNDL',CFBundleVersion='1')))
 PY
 link=(-target arm64-apple-ios27.0 -isysroot "$sdk" -Wno-incompatible-sysroot -F "$out/stubs/System/Library/Frameworks" -L "$out/stubs/usr/lib")
@@ -66,7 +68,7 @@ python3 "$repo/build_tc.py" "$out/hashes.txt" "$out/helper.tc"
 xcrun clang "${flags[@]}" "$repo/tools/gpu/driver_host.m" -framework Metal -framework Foundation -o "$out/driver_host"
 xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_workload.m" "$repo/tools/gpu/driver_client.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/driver_client"
 xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_contract_test.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/driver_contract_test"
-cp "$repo/tools/gpu/blur_"* "$repo/tools/gpu/driver_"* "$repo/tools/gpu/build_driver.sh" "$out/"
+cp "$repo/tools/gpu/present_"* "$repo/tools/gpu/blur_"* "$repo/tools/gpu/driver_"* "$repo/tools/gpu/build_driver.sh" "$out/"
 
 cp "$repo/qemu-sptm/include/xnu/darwin_gpu_transport.h" "$out/"
 printf "%s\n" "$mode" > "$out/transport-mode.txt"
