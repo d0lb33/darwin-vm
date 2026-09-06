@@ -106,6 +106,12 @@ superseded.
 
 ## What is still open
 
+- The definitive stall (HVF_KC_LONG1, 600 s) is right after
+  `AppleOLYHAL::start ... bailing` (wlan), before the SMC/RTBuddy
+  coprocessor and the ignition sequence that follow it in TCG. The ASC
+  mailbox model receives zero traffic, so a driver is blocked before it
+  ever pokes the coprocessor. This is a correctness bug, not slowness:
+  it hangs identically with interrupts disabled and with counter scaling.
 - Reaching the restore shell natively and then `Early boot complete` on
   the system volume. The blocker is a stall in IOKit driver start-up, not
   interrupt delivery: `HVF_KC_BOOT33` with `DARWIN_AIC_DEBUG=1` shows the
@@ -128,9 +134,21 @@ superseded.
 - Timer delivery works: `HVF_KC_BOOT29` delivered 105,698 FIQs, 248 SVCs
   and 235 data aborts into the kernel's vectors in 150 s (gxfstat exception
   counters). IRQ from the AIC has not been exercised yet.
-- Multicore, snapshots, DMA invalidation from the ANS model, and the
-  performance work: at this phase the bridge runs about 15x slower than
-  TCG by GENTER rate.
+- Multicore, snapshots, DMA invalidation from the ANS model.
+- Performance: about 15x slower than TCG in this phase. Measured lever
+  test (2026-09-06): deferring the per-alias hv_vm_unmap syscalls and
+  scoping the invalidation memset (HVF_KC_OPT1) left the guarded-call
+  rate unchanged (9,631 vs 9,555 genters in the first 10 wall-seconds).
+  The bridge is exit-bound, not host-overhead-bound: this run took 15.6
+  million system-register reads (~40,000/s), each a guest exit. Boot-time
+  speedup would require eliminating traps (rewriting XNU register reads to
+  non-trapping storage), whose ceiling for this trap-dense phase is low
+  (docs/re/hvf-fastpath-ceiling.md). The optimisation is kept because it
+  cuts host syscalls with no guest-visible change (matrix 117/117), not as
+  a speedup. Diagnostic knobs added this session, all default-off:
+  QEMU_HVF_VIRTUAL_NO_VIRQ (skip interrupt delivery),
+  QEMU_HVF_VIRTUAL_TIME_DIV (slow the emulated counter),
+  QEMU_HVF_VIRTUAL_STOP_ON_FAULT (matrix fault semantics).
 
 ## Reproduce
 
