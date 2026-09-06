@@ -3,10 +3,15 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include "present_layout.h"
+#include "managed_host.h"
 @interface DVMResidentBlur : NSObject
 @property DVMBlurHost *blur;
 @property void *ownedMap;
 @property int ownedFD;
+@property size_t ownedLength;
+@property void *pixels;
+@property BOOL managed,displayPending;
+@property unsigned completionDelayUS;
 @property uint32_t nonce,lastFrame;
 @property id<MTLComputePipelineState> convert;
 @property id<MTLBuffer> destination;
@@ -17,10 +22,11 @@
 - (void)dealloc {
     // GPU calls are synchronous; destroy buffer aliases before their mapping.
     _destination=nil;_blur=nil;
-    if(_ownedMap){munmap(_ownedMap,0x1000000);close(_ownedFD);}
+    if(_ownedMap){munmap(_ownedMap,_ownedLength?:0x1000000);close(_ownedFD);}
 }
 - (instancetype)initWithDevice:(id<MTLDevice>)device library:(id<MTLLibrary>)library destination:(void *)pointer nonce:(uint32_t)nonce {
     self=[super init];if(!self)return nil;
+    _pixels=pointer;
     if((uintptr_t)pointer%16384)return nil;
     _blur=[[DVMBlurHost alloc]initWithDevice:device library:library width:1184 height:2560];if(!_blur)return nil;
     // This host-authored kernel only converts the exact guest blur's output.
@@ -42,6 +48,14 @@
 }
 - (id<MTLCommandBuffer>)encodeFrame:(uint32_t)frame {
     id<MTLCommandBuffer> cb=[_blur encode];
+    if(_completionDelayUS&&frame==1) {
+        // Host-only fault injection: hold the GPU before it writes the shared
+        // output. The ordinary command completion must remain blocked.
+        id<MTLSharedEvent> event=[_blur.output.device newSharedEvent];
+        if(!event)return nil;
+        [cb encodeWaitForEvent:event value:1];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)_completionDelayUS*1000),dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),^{event.signaledValue=1;});
+    }
     id<MTLComputeCommandEncoder> e=[cb computeCommandEncoder];[e setComputePipelineState:_convert];[e setTexture:_blur.output atIndex:0];[e setBuffer:_destination offset:0 atIndex:0];[e setBytes:&frame length:4 atIndex:1];
     [e dispatchThreadgroups:MTLSizeMake((1179+15)/16,(2556+15)/16,1) threadsPerThreadgroup:MTLSizeMake(16,16,1)];[e endEncoding];return cb;
 }

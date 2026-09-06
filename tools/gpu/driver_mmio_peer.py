@@ -29,7 +29,8 @@ class MMIOPeer(DriverPeer):
         self.released=False;self.released_at=None;self.buffer=b'';self.rx=b'';self.sock=None
         self.library=Path(library);self.worker=Path(worker);self.boot=boot;self.audit_seen=0
         mode=self.worker.parent/"transport-mode.txt"
-        self.present=mode.exists() and mode.read_text().strip()=="--mmio-present"
+        self.managed=mode.exists() and mode.read_text().strip()=="--mmio-present-pool"
+        self.present=self.managed or (mode.exists() and mode.read_text().strip()=="--mmio-present")
         self.audit_limit=120 if self.present or (mode.exists() and mode.read_text().strip()=="--mmio-blur") else 64
         self.reply_offset=0x200000 if self.present else 0x800000
         self.max_bytes=0x10000 if self.present else MAX
@@ -41,6 +42,12 @@ class MMIOPeer(DriverPeer):
         env={k:v for k,v in os.environ.items() if k!='DVM_DRIVER_BOOTSTRAP'}
         if self.present:env['DVM_DRIVER_PRESENT_RAM']=str(self.out/'shared-ram.bin')
         else:env.pop('DVM_DRIVER_PRESENT_RAM',None)
+        for key in ('DVM_DRIVER_MANAGED_RAM','DVM_DRIVER_MANAGED_PAGES','DVM_DRIVER_MANAGED_DELAY_US'):env.pop(key,None)
+        if self.managed:
+            fd=os.open(self.out/'managed-ram.bin',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
+            os.ftruncate(fd,0x300000000);os.close(fd)
+            env['DVM_DRIVER_MANAGED_RAM']=str(self.out/'managed-ram.bin')
+            env['DVM_DRIVER_MANAGED_PAGES']=str(self.out/'managed-pages.bin')
         env.update(DVM_DRIVER_LIBRARY=str(self.library),DVM_DRIVER_BOOTSTRAP='1')
         self.proc=subprocess.Popen([str(self.worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,env=env)
         (self.out/'driver-inputs.json').write_text(json.dumps(dict(worker=str(self.worker),worker_sha256=hashlib.sha256(self.worker.read_bytes()).hexdigest(),library=str(self.library),air_sha256=AIR_SHA,transport='shared-ram-mmio'),indent=2)+'\n')

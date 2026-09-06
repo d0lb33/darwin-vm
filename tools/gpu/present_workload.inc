@@ -1,6 +1,9 @@
 #import <IOSurface/IOSurface.h>
 #import <CoreGraphics/CGGeometry.h>
 #include "present_reference.h"
+#ifdef DVM_SERVICE_POOL_CONTRACT
+#include "managed_guest.h"
+#endif
 static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void *bundle,double setupStart) {
     id (*create)(id<MTLDevice>,id<MTLLibrary>,uint32_t)=dlsym(bundle,"DVMCreateResidentBlur");
     NSDictionary *(*draw)(id,uint32_t)=dlsym(bundle,"DVMDrawResidentBlur");
@@ -22,10 +25,23 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
     CFStringRef *cacheMode=dlsym(RTLD_DEFAULT,"kIOSurfaceCacheMode");if(!cacheMode||!*cacheMode)fail("present-cache-key");
     NSMutableDictionary *properties=[@{(__bridge id)*cacheMode:@0x700,(id)kIOSurfaceWidth:@DVM_PRESENT_WIDTH,(id)kIOSurfaceHeight:@DVM_PRESENT_HEIGHT,(id)kIOSurfaceBytesPerElement:@4,(id)kIOSurfaceBytesPerRow:@DVM_PRESENT_ROW,(id)kIOSurfaceAllocSize:@DVM_PRESENT_BYTES,(id)kIOSurfacePixelFormat:@(0x42475241)} mutableCopy];
 #ifdef DVM_SHARED_SURFACE
+    uint8_t *surfaceBacking=ns.shared+DVM_PRESENT_OFFSET;
+#ifdef DVM_SERVICE_POOL_CONTRACT
+    void (*retire)(id,uint32_t)=dlsym(bundle,"DVMRetireResidentBlur");
+    __typeof__(&IOConnectMapMemory64) map=dlsym(RTLD_DEFAULT,"IOConnectMapMemory64");
+    mach_vm_address_t pool=0;mach_vm_size_t poolBytes=0;
+    if(!map||!retire)fail("pool-symbol");
+    kern_return_t mapped=map(ns.client,DVM_GPU_MEMORY_TYPE+2,mach_task_self(),&pool,&poolBytes,kIOMapAnywhere|0x700);
+    fprintf(stderr,"GPU_LOAD_POOL_MAP rc=0x%x address=0x%llx bytes=%llu\n",mapped,pool,poolBytes);
+    if(mapped||poolBytes!=DVM_PRESENT_BUFFER_BYTES||pool%16384)fail("pool-map");
+    surfaceBacking=(uint8_t *)pool;
+    surfaceBacking=DVMCheckManagedOwner(ns,surfaceBacking);
+    memset(surfaceBacking,0,poolBytes);
+#endif
     CFStringRef *addressKey=dlsym(RTLD_DEFAULT,"kIOSurfaceClientAddress");
     if(!addressKey||!*addressKey)fail("shared-surface-address-key");
-    properties[(__bridge id)*addressKey]=@((uintptr_t)(ns.shared+DVM_PRESENT_OFFSET));
-    fprintf(stderr,"GPU_LOAD_SHARED_CREATE key=%s address=%p bytes=%u cache=0x700\n",[(__bridge NSString *)*addressKey UTF8String],ns.shared+DVM_PRESENT_OFFSET,DVM_PRESENT_BYTES);
+    properties[(__bridge id)*addressKey]=@((uintptr_t)surfaceBacking);
+    fprintf(stderr,"GPU_LOAD_SHARED_CREATE key=%s address=%p bytes=%u cache=0x700\n",[(__bridge NSString *)*addressKey UTF8String],surfaceBacking,DVM_PRESENT_BYTES);
 #endif
     IOSurfaceRef surface=IOSurfaceCreate((__bridge CFDictionaryRef)properties);
     if(!surface)fail("present-surface-create");
@@ -33,7 +49,7 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
 #ifdef DVM_SHARED_SURFACE
     // No GPU work has been submitted. Prove two-way aliasing before using it.
     if(IOSurfaceLock(surface,0,NULL))fail("shared-alias-lock");
-    volatile uint32_t *shared=(volatile uint32_t *)(ns.shared+DVM_PRESENT_OFFSET);
+    volatile uint32_t *shared=(volatile uint32_t *)surfaceBacking;
     volatile uint32_t *alias=IOSurfaceGetBaseAddress(surface);
     shared[0]=0x44564d41;mmioBarrier();
     if(alias[0]!=0x44564d41)fail("shared-alias-forward");
@@ -45,6 +61,10 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
     NSError *error=nil;dispatch_data_t data=dispatch_data_create(air.bytes,air.length,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),DISPATCH_DATA_DESTRUCTOR_DEFAULT);
     id<MTLLibrary> library=[device newLibraryWithData:data error:&error];if(!library)fail("present-library");
     uint32_t nonce=arc4random();id resource=create(device,library,nonce);if(!resource)fail("present-resident-create");
+#ifdef DVM_SERVICE_POOL_CONTRACT
+    mmioBarrier();if(((volatile uint32_t *)IOSurfaceGetBaseAddress(surface))[2]!=0x44564d43)fail("pool-host-to-guest-alias");
+    fprintf(stderr,"GPU_LOAD_POOL_HOST_ALIAS verified=1 bytes=%u per_frame_copy=0 lifetime=vm\n",DVM_PRESENT_BUFFER_BYTES);
+#endif
     fprintf(stderr,"GPU_LOAD_PRESENT_SETUP us=%.0f nonce=%u surface=%u cache=0x700 width=1179 height=2556 row=4864\n",(now()-setupStart)*1e6,nonce,IOSurfaceGetID(surface));
     struct Sample {double gpu,draw,delivery,swap,total;uint32_t swapID;} samples[33];
     CGRect rect={{0,0},{1179,2556}};double batchStart=now(),steadyStart=0;
@@ -68,6 +88,9 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
         // Match the guest's WaitSurface (0x22a3bf7c4): mode 1 waits for
         // pending surface work; mode 0 additionally tracks the current image.
         rc=wait(fb,swap,1,2.0);if(rc){fprintf(stderr,"GPU_LOAD_ERROR frame=%u swap-wait=0x%x\n",frame,rc);fail("present-wait");}
+#ifdef DVM_SERVICE_POOL_CONTRACT
+        retire(resource,frame);
+#endif
         double t3=now();samples[frame-1]=(struct Sample){[reply[@"gpu_us"] doubleValue],(t1-t0)*1e6,(t2-t1)*1e6,(t3-t2)*1e6,(t3-t0)*1e6,swap};
         if(frame%8==0)fprintf(stderr,"GPU_LOAD_PRESENT_PROGRESS frame=%u\n",frame);
     }}
@@ -82,4 +105,8 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
     NSDictionary *checked=verify(resource);if(![checked[@"verified"] boolValue])fail("present-host-final");
     fprintf(stderr,"GPU_LOAD_PRESENT_FINAL verified=1 frame=33 nonce=%u sha=%s bad_pixels=0\n",nonce,text);
     CFRelease(surface);
+#ifdef DVM_SERVICE_POOL_CONTRACT
+    if(ns.unmap(ns.client,DVM_GPU_MEMORY_TYPE+2,mach_task_self(),(uintptr_t)surfaceBacking))fail("pool-unmap");
+    fprintf(stderr,"GPU_LOAD_POOL_UNMAP after_native_retirement=1 physical_lifetime=vm\n");
+#endif
 }

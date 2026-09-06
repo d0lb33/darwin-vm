@@ -34,7 +34,7 @@ def branch(source,target):
     return struct.pack('<I',0x14000000|((delta//4)&0x3ffffff))
 
 
-def extend_tree(data):
+def extend_tree(data, managed_export=False):
     root,end=decode(data,0)
     if any(data[end:]):raise ValueError('DT trailer')
     arm=root.child('arm-io')
@@ -46,7 +46,7 @@ def extend_tree(data):
         reg=n.get('reg')
         if reg and len(reg)%16==0:
             for lo,length in struct.iter_unpack('<QQ',reg):
-                if length and lo<relative+SIZE+REGSIZE and lo+length>relative:
+                if length and lo<relative+SIZE+REGSIZE*(2 if managed_export else 1) and lo+length>relative:
                     raise ValueError('existing DT reg overlaps candidate: '+str(n.name()))
         for c in n.children:overlaps(c)
     for c in arm.children:overlaps(c)
@@ -54,7 +54,9 @@ def extend_tree(data):
     node.set('name',b'dvm-transport\0')
     node.set('device_type',b'dvm-transport\0')
     node.set('compatible',b'dvm,shm-transport-v1\0')
-    node.set('reg',struct.pack('<QQQQ',relative,SIZE,relative+SIZE,REGSIZE))
+    reg=struct.pack('<QQQQ',relative,SIZE,relative+SIZE,REGSIZE)
+    if managed_export:reg+=struct.pack('<QQ',relative+SIZE+REGSIZE,REGSIZE)
+    node.set('reg',reg)
     arm.children.append(node)
     output=encode(root)
     before,after=properties(data),properties(output)
@@ -70,10 +72,13 @@ def main():
     p.add_argument('--bootkc',type=Path,required=True)
     p.add_argument('--dtree',type=Path,required=True)
     p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--managed-pool',action='store_true')
+    p.add_argument('--managed-export',action='store_true')
     a=p.parse_args()
     original=a.bootkc.read_bytes()
     if sha(original)!=BOOT_SHA:raise ValueError('requires pinned native-SMC 24A5430a BootKC')
-    dt=extend_tree(a.dtree.read_bytes())
+    if a.managed_export:a.managed_pool=True
+    dt=extend_tree(a.dtree.read_bytes(),a.managed_export)
     if any(original[CAVE-BASE:CAVE_END-BASE]):raise ValueError('executable padding not empty')
     prologue=bytes.fromhex('7f2303d5ffc301d1')
     unsupported=bytes.fromhex('5f2403d5e05880520000bc72c0035fd6')
@@ -86,6 +91,22 @@ def main():
             (0x7e58dd0,0x1e8,0x0c9c,None),
             (0x7e58dd0,0x370,0x93b7,None),(0x7e58dd0,0x3c8,0x6c99,None),
             (0x7e58dd0,0x3b8,0xabe0,None),(0x7e58dd0,0x2f0,0x5ec5,None)]
+    if a.managed_pool:
+        # Exact class constructor at b246a48 names IOBufferMemoryDescriptor;
+        # metaclass alloc at b246558 installs object vtable 7e57290.
+        checks += [(0x7e58dd0,0x2c0,0x4529,0xfffffff00b1fcd04),
+                   (0x7e58dd0,0x300,0xc6b2,0xfffffff00b1faef8),
+                   (0x7e58dd0,0x308,0x8a43,0xfffffff00b1facbc),
+                   (0x7e58dd0,0xc8,0xff53,0xfffffff00b1edb34),
+                   (0x7e58dd0,0x118,0x37a5,0xfffffff00b1ed38c),
+                   (0x7e57290,0x128,0x1c03,0xfffffff00b245af4)]
+        if a.managed_export:
+            checks += [(0x7e57290,0xd8,0xf5b3,0xfffffff00b255f8c),
+                       (0x7e57290,0xe8,0x3ed6,0xfffffff00b251dfc),
+                       (0x7e57290,0x98,0x649a,0xfffffff00b256e60),
+                       (0x7e1ed48,0x78,0x34f6,0xfffffff00b251a50)]
+        if original[0xb175ad8-0x7004000:0xb175ad8-0x7004000+16] != bytes.fromhex('7f2303d5f44fbea9fd7b01a9fd430091'):
+            raise ValueError('class factory prologue guard')
     for table,slot,diversity,target in checks:
         value,=struct.unpack_from('<Q',original,(0xfffffff000000000|table)+slot-BASE)
         if not value>>63 or (value>>32)&65535!=diversity or (target and BASE+(value&0xffffffff)!=target):
@@ -99,6 +120,8 @@ def main():
         '-I',str(sdk/'System/Library/Frameworks/Kernel.framework/Headers'),
         '-DKERNEL','-mkernel','-fno-exceptions','-fno-rtti','-fno-stack-protector',
         '-fno-builtin','-std=c++17','-Os','-S',str(src),'-o',str(a.out/'shim.s')]
+    if a.managed_pool:command.insert(2,'-DDVM_MANAGED_POOL')
+    if a.managed_export:command.insert(2,'-DDVM_MANAGED_EXPORT')
     subprocess.run(command,check=True)
     asm=(a.out/'shim.s').read_text()
     if '.ptrauth_kernel_abi_version 0' not in asm:raise ValueError('kernel PAC ABI missing')
@@ -118,7 +141,7 @@ def main():
     lines+=['.text','.p2align 2','.global _dvm_original_uc','_dvm_original_uc:',
             '.inst 0xd503237f','.inst 0xd101c3ff','b _dvm_uc_continue']
     (a.out/'shim-elf.s').write_text('\n'.join(lines)+'\n')
-    (a.out/'layout.ld').write_text(f'SECTIONS {{ . = {CAVE:#x}; .text : {{ *(.text) }} .rodata : {{ *(.rodata) }} /DISCARD/ : {{ *(.comment) *(.note*) }} }}\n_dvm_uc_continue = {UC+8:#x};\n')
+    (a.out/'layout.ld').write_text(f'SECTIONS {{ . = {CAVE:#x}; .text : {{ *(.text) }} .rodata : {{ *(.rodata) }} /DISCARD/ : {{ *(.comment) *(.note*) }} }}\n_dvm_uc_continue = {UC+8:#x};\n_dvm_alloc_class = 0xfffffff00b175ad8;\n')
     llvm=Path('/opt/homebrew/opt/llvm/bin')
     subprocess.run(['xcrun','clang','-target','aarch64-none-elf','-march=armv8.3-a','-c',str(a.out/'shim-elf.s'),'-o',str(a.out/'shim.o')],check=True)
     linker=shutil.which('ld.lld')
@@ -163,6 +186,7 @@ def main():
     (a.out/'bootkc').write_bytes(patched)
     (a.out/'system.dtree').write_bytes(dt)
     ledger=dict(scope='owned DT memory + gated stock IOKit allocation/mapping; no runtime kext',
+        managed_pool=a.managed_pool,managed_export=a.managed_export,
         source_bootkc=str(a.bootkc.resolve()),source_bootkc_sha256=BOOT_SHA,
         output_bootkc_sha256=sha(patched),source_dtree_sha256=sha(a.dtree.read_bytes()),output_dtree_sha256=sha(dt),
         shim_source_sha256=sha(src.read_bytes()),payload_sha256=sha(payload),payload_address=hex(CAVE),payload_bytes=len(payload),

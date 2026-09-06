@@ -6,7 +6,8 @@
  * This small prerequisite uses CPU pixels, not the GPU acceptance workload. */
 #import <IOSurface/IOSurface.h>
 #import <CoreGraphics/CGGeometry.h>
-static void DVMDisplayContract(void) {
+static void DVMDisplayContract(Namespace *ns) {
+    (void)ns;
     void *lib=dlopen("/System/Library/PrivateFrameworks/IOMobileFramebuffer.framework/IOMobileFramebuffer",RTLD_NOW|RTLD_LOCAL);
     if(!lib)fail("present-framework-load");
     int (*get)(void **)=dlsym(lib,"IOMobileFramebufferGetMainDisplay");
@@ -32,7 +33,17 @@ static void DVMDisplayContract(void) {
     NSMutableDictionary *properties=[@{(__bridge id)*cacheMode:@0x700,(id)kIOSurfaceWidth:@(w),(id)kIOSurfaceHeight:@(h),(id)kIOSurfaceBytesPerElement:@4,(id)kIOSurfaceBytesPerRow:@(row),(id)kIOSurfaceAllocSize:@(bytes),(id)kIOSurfacePixelFormat:@(0x42475241)} mutableCopy];
 #ifdef DVM_MANAGED_ADDRESS_CONTRACT
     void *owned=NULL;size_t ownedBytes=(bytes+16383u)&~16383u;
+#ifdef DVM_SERVICE_POOL_CONTRACT
+    __typeof__(&IOConnectMapMemory64) map=dlsym(RTLD_DEFAULT,"IOConnectMapMemory64");
+    mach_vm_address_t pool=0;mach_vm_size_t poolBytes=0;
+    if(!map)fail("pool-map-symbol");
+    kern_return_t mapped=map(ns.client,DVM_GPU_MEMORY_TYPE+2,mach_task_self(),&pool,&poolBytes,kIOMapAnywhere|0x700);
+    fprintf(stderr,"GPU_LOAD_POOL_MAP rc=0x%x address=0x%llx bytes=%llu\n",mapped,pool,poolBytes);
+    if(mapped||poolBytes!=ownedBytes||pool%16384)fail("pool-map");
+    owned=(void *)pool;
+#else
     if(posix_memalign(&owned,16384,ownedBytes)||!owned)fail("managed-address-allocation");
+#endif
     memset(owned,0,ownedBytes);
     CFStringRef *addressKey=dlsym(RTLD_DEFAULT,"kIOSurfaceClientAddress");
     if(!addressKey||!*addressKey)fail("managed-address-key");
@@ -68,7 +79,12 @@ static void DVMDisplayContract(void) {
     rc=power(fb,0);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN op=power-off rc=0x%x\n",rc);if(rc)fail("present-power-off");
 #ifdef DVM_MANAGED_ADDRESS_CONTRACT
     // All three native mode-1 waits returned; destroy the surface before backing.
-    CFRelease(surface);free(owned);
+    CFRelease(surface);
+#ifdef DVM_SERVICE_POOL_CONTRACT
+    if(ns.unmap(ns.client,DVM_GPU_MEMORY_TYPE+2,mach_task_self(),(uintptr_t)owned))fail("pool-unmap");
+#else
+    free(owned);
+#endif
     fprintf(stderr,"GPU_LOAD_PRESENT_MANAGED_RELEASE verified=1 after_native_wait=1\n");
 #endif
     // Other variants keep the final surface until the diagnostic exits.

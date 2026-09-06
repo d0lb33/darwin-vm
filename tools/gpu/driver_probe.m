@@ -428,7 +428,7 @@ int main(int argc, char **argv) {
 #endif
         }
         #ifdef DVM_PRESENT_CONTRACT
-        DVMDisplayContract();
+        DVMDisplayContract(ns);
 #endif
         // Retire queues run asynchronously; a bounded stats check also detects leaks.
         until = now() + 5;

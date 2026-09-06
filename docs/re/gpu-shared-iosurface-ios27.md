@@ -1,5 +1,10 @@
 # Reusable shared IOSurface backing, exact iOS 27
 
+**Follow-up:** [Managed shared GPU surface](gpu-managed-pool-ios27.md) resolves
+the managed-page export blocker for one retained service-owned allocation and
+proves a displayed exact-guest GPU batch without the per-frame guest copy.
+The findings below retain the earlier failed MMIO shortcut and its controls.
+
 **Result: guest-managed caller memory aliases and presents successfully; direct
 MMIO backing panics in XNU managed-page lookup. Zero-copy GPU sharing is blocked
 on managed-page export and lifetime ownership.** The reconstructed copying GPU

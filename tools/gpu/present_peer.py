@@ -39,6 +39,11 @@ def verify(out,events,records):
     if [int(x['frame']) for x in frames]!=list(range(1,34)) or [r['request']['frame'] for r in draws]!=list(range(1,34)):raise ValueError('present frame sequence')
     if any(not r['reply'].get('ok') for r in records) or any(r['reply'].get('status')!=4 or r['reply'].get('dispatches')!=3 for r in draws):raise ValueError('present GPU completion')
     ops=[r['op'] for r in records]
+    managed=(out/'managed-pages.bin').exists()
+    if managed:
+        transitions=[(r['op'],r['request'].get('frame')) for r in records if r['op'] in ('residentDraw','residentRetire')]
+        if transitions!=[(op,frame) for frame in range(1,34) for op in ('residentDraw','residentRetire')]:raise ValueError('managed draw/retire order')
+        if not any(x.startswith('GPU_LOAD_POOL_HOST_ALIAS verified=1 ') and 'per_frame_copy=0' in x for x in lines):raise ValueError('managed alias proof missing')
     if ops.count('residentCreate')!=1 or ops.count('residentVerify')!=1 or ops.index('residentVerify')<max(i for i,v in enumerate(ops) if v=='residentDraw'):raise ValueError('present setup/final-only verification')
     stats=records[-1]['reply']
     if records[-1]['op']!='stats' or stats['live']['objects'] or stats['live']['resourceBytes'] or stats['submissions']!=33 or stats['creations']!=2:raise ValueError('present retirement')
@@ -56,7 +61,13 @@ def verify(out,events,records):
 def verify_final(out,events):
     out=Path(out);final=[fields(e['line']) for e in events if e['line'].startswith('GPU_LOAD_PRESENT_FINAL ')]
     if len(final)!=1 or final[0].get('frame')!='33' or final[0].get('verified')!='1' or final[0].get('bad_pixels')!='0':raise ValueError('guest final pixel oracle')
-    presented=(out/'last-presented.bgra').read_bytes();ram=(out/'shared-ram.bin').read_bytes()[0x300000:0x300000+BYTES]
+    presented=(out/'last-presented.bgra').read_bytes()
+    if (out/'managed-pages.bin').exists():
+        from managed_pages import read_resource
+        backing=read_resource(out);ram=backing[:BYTES]
+        if backing[BYTES:]!=b'\xcd'*(len(backing)-BYTES):raise ValueError('managed tail guard')
+        (out/'managed-final.bgra').write_bytes(ram)
+    else:ram=(out/'shared-ram.bin').read_bytes()[0x300000:0x300000+BYTES]
     if len(presented)!=BYTES or presented!=ram or hashlib.sha256(presented).hexdigest()!=final[0]['sha']:raise ValueError('display pixels differ from verified guest surface / GPU mapping')
     if struct.unpack_from('<4I',presented)!=(0xff44564d,0xff505253,0xff424c52,0xff000021):raise ValueError('final scanout frame marker')
     log=(out/'stderr.log').read_text(errors='replace')

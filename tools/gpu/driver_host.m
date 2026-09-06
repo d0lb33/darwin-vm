@@ -325,6 +325,8 @@ static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request)
     if (!Number(request[@"handle"], &handle) || !host.entries[@(handle)])
         return HostError(seq, ENOENT, @"unknown handle");
     DVMEntry *entry = host.entries[@(handle)];
+    if([entry.kind isEqual:@"resident"]&&[(DVMResidentBlur *)entry.object displayPending])
+        return HostError(seq,EBUSY,@"managed release before display retirement");
     host.textureBytes -= entry.textureBytes;
     if([entry.kind isEqual:@"resident"])host.residentBytes=0;
     [host.entries removeObjectForKey:@(handle)];

@@ -68,9 +68,9 @@ def main():
     p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
-    if a.driver_present and (not a.driver_mmio or not a.driver_worker or (a.driver_worker.parent/"transport-mode.txt").read_text().strip()!="--mmio-present"):
+    if a.driver_present and (not a.driver_mmio or not a.driver_worker or (a.driver_worker.parent/"transport-mode.txt").read_text().strip() not in ("--mmio-present","--mmio-present-pool")):
         p.error("presentation requires the matching resident MMIO build")
-    if a.driver_worker and (a.driver_worker.parent/"transport-mode.txt").is_file() and (a.driver_worker.parent/"transport-mode.txt").read_text().strip()=="--mmio-present" and not a.driver_present:
+    if a.driver_worker and (a.driver_worker.parent/"transport-mode.txt").is_file() and (a.driver_worker.parent/"transport-mode.txt").read_text().strip() in ("--mmio-present","--mmio-present-pool") and not a.driver_present:
         p.error("resident MMIO build requires --driver-present and its display witness")
     if a.driver_mmio and (not a.driver_worker or a.aux_namespace or a.driver_failure_snapshot):
         p.error("MMIO requires driver worker without namespace or snapshot")
@@ -161,6 +161,8 @@ def main():
             shutil.copyfile(Path(__file__).with_name("driver_binary.py"),out/"driver_binary.py")
             shutil.copyfile(Path(__file__).with_name("blur_peer.py"),out/"blur_peer.py")
             shutil.copyfile(Path(__file__).with_name("present_peer.py"),out/"present_peer.py")
+            shutil.copyfile(Path(__file__).with_name("managed_pages.py"),out/"managed_pages.py")
+            if (a.driver_worker.parent/"managed_host.h").exists():shutil.copyfile(a.driver_worker.parent/"managed_host.h",out/"managed_host.h")
             for item in a.driver_worker.parent.glob("present_*"):
                 if item.suffix in (".h",".m",".inc"):shutil.copyfile(item,out/item.name)
             for item in a.driver_worker.parent.glob("blur_*"):
@@ -201,6 +203,10 @@ def main():
     if a.driver_mmio:
         argv += ['-chardev',f'socket,id=dvm_gpu_notify,path={out}/gpu-notify.sock,server=on,wait=off']
     if a.mmio_echo or a.driver_mmio:model['DARWIN_GPU_SHM_PATH']=str(out/'shared-ram.bin')
+    if any(key.startswith('DARWIN_GPU_MANAGED_') for key in model):raise ValueError('uncontrolled managed backend')
+    if a.driver_mmio and aux_peer.managed:
+        model['DARWIN_GPU_MANAGED_RAM_PATH']=str(out/'managed-ram.bin')
+        model['DARWIN_GPU_MANAGED_PAGES_PATH']=str(out/'managed-pages.bin')
     if 'DARWIN_DCP_GPU_PRESENT_DIR' in model:
         model['DARWIN_DCP_GPU_PRESENT_DIR']=str(out)
     if model.get('DARWIN_GPU_PRESENT_TRANSPORT')=='1' and not a.driver_present:

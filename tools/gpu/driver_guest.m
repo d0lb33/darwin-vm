@@ -606,3 +606,9 @@ NSDictionary *DVMVerifyResidentBlur(id object) {
     DVMResidentTask *task=object;NSError *e=nil;
     NSDictionary*r=[task.owner call:@{@"op":@"residentVerify",@"handle":task.handle} error:&e];if(!r)reject(e.description);return r;
 }
+void DVMRetireResidentBlur(id object,uint32_t frame) {
+    if(![object isKindOfClass:DVMResidentTask.class])reject(@"resident retirement object");
+    DVMResidentTask *task=object;NSError *e=nil;
+    if(frame!=task.lastFrame)reject(@"resident retirement sequence");
+    if(![task.owner call:@{@"op":@"residentRetire",@"handle":task.handle,@"frame":@(frame)} error:&e])reject(e.description);
+}

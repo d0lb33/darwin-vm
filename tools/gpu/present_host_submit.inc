@@ -13,9 +13,27 @@ static NSDictionary *ResidentRequest(DVMHost *host,uint64_t seq,NSDictionary *r)
         if(map==MAP_FAILED){close(fd);return HostError(seq,ENOMEM,@"resident map");}
         uint32_t magic;memcpy(&magic,map,4);
         if(magic!=0x44564d31){munmap(map,0x1000000);close(fd);return HostError(seq,EINVAL,@"resident RAM identity");}
-        DVMResidentBlur *resource=[[DVMResidentBlur alloc]initWithDevice:host.device library:library.object destination:(uint8_t *)map+DVM_PRESENT_OFFSET nonce:(uint32_t)nonce];
-        if(!resource){munmap(map,0x1000000);close(fd);return HostError(seq,EIO,@"resident Metal setup");}
-        resource.ownedMap=map;resource.ownedFD=fd;resource.nonce=(uint32_t)nonce;
+        BOOL managed=getenv("DVM_DRIVER_MANAGED_RAM")!=NULL;
+        size_t mapLength=0x1000000;void *pixels=(uint8_t *)map+DVM_PRESENT_OFFSET;
+        if(managed) {
+            int managedFD=-1;void *managedMap=DVMMapManaged((uint8_t *)map+16,&managedFD);
+            munmap(map,mapLength);close(fd);
+            if(!managedMap)return HostError(seq,EINVAL,@"managed registration/mapping contract");
+            map=managedMap;fd=managedFD;mapLength=DVM_PRESENT_BUFFER_BYTES;pixels=map;
+            // Two-way alias prerequisite: guest wrote these words before create.
+            if(((uint32_t *)pixels)[0]!=0x44564d41||((uint32_t *)pixels)[1]!=0x44564d42){munmap(map,mapLength);close(fd);return HostError(seq,EILSEQ,@"managed guest-to-host alias");}
+            ((uint32_t *)pixels)[2]=0x44564d43;
+            memset((uint8_t *)pixels+DVM_PRESENT_BYTES,0xcd,DVM_PRESENT_BUFFER_BYTES-DVM_PRESENT_BYTES);
+        }
+        DVMResidentBlur *resource=[[DVMResidentBlur alloc]initWithDevice:host.device library:library.object destination:pixels nonce:(uint32_t)nonce];
+        if(!resource){munmap(map,mapLength);close(fd);return HostError(seq,EIO,@"resident Metal setup");}
+        resource.ownedMap=map;resource.ownedFD=fd;resource.ownedLength=mapLength;resource.managed=managed;resource.nonce=(uint32_t)nonce;
+        const char *delay=getenv("DVM_DRIVER_MANAGED_DELAY_US");
+        if(managed&&delay) {
+            char *tail=NULL;unsigned long value=strtoul(delay,&tail,10);
+            if(!*delay||*tail||value>250000)return HostError(seq,EINVAL,@"managed delay limit");
+            resource.completionDelayUS=(unsigned)value;
+        }
         DVMEntry *entry;if(!Add(host,@"resident",resource,&entry))return HostError(seq,ENOSPC,@"resident table");
         host.residentBytes=(1216ull*2592+1184ull*2592+1184ull*2560)*8+DVM_PRESENT_BUFFER_BYTES;
         return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle),@"textures":@3,@"pipelines":@2,@"buffers":@1,@"resourceBytes":@(host.residentBytes)};
@@ -23,15 +41,26 @@ static NSDictionary *ResidentRequest(DVMHost *host,uint64_t seq,NSDictionary *r)
     DVMEntry *entry=Entry(host,r[@"handle"],@"resident");if(!entry)return HostError(seq,ENOENT,@"resident handle");
     DVMResidentBlur *resource=entry.object;
     if([op isEqual:@"residentDraw"]) {
+        if(resource.displayPending)return HostError(seq,EBUSY,@"managed surface awaits display retirement");
         uint64_t frame;if(!Number(r[@"frame"],&frame)||frame!=resource.lastFrame+1||frame>33)return HostError(seq,EINVAL,@"resident frame sequence");
-        id<MTLCommandBuffer>cb=[resource encodeFrame:(uint32_t)frame];[cb commit];[cb waitUntilCompleted];
+        id<MTLCommandBuffer>cb=[resource encodeFrame:(uint32_t)frame];
+        if(!cb)return HostError(seq,EIO,@"resident command allocation");
+        [cb commit];[cb waitUntilCompleted];
         if(cb.status!=MTLCommandBufferStatusCompleted)return NSErrorReply(seq,cb.error,@"resident GPU error");
         resource.lastFrame=(uint32_t)frame;host.submissions++;
+        resource.displayPending=resource.managed;
         return @{@"seq":@(seq),@"ok":@YES,@"status":@4,@"frame":@(frame),@"gpu_us":@((cb.GPUEndTime-cb.GPUStartTime)*1e6),@"dispatches":@3};
     }
+    if([op isEqual:@"residentRetire"]) {
+        uint64_t frame;
+        if(!resource.managed||!resource.displayPending||!Number(r[@"frame"],&frame)||frame!=resource.lastFrame)return HostError(seq,EINVAL,@"managed retirement frame/state");
+        resource.displayPending=NO;
+        return @{@"seq":@(seq),@"ok":@YES,@"frame":@(frame)};
+    }
     if([op isEqual:@"residentVerify"]) {
-        if(resource.lastFrame!=33)return HostError(seq,EINVAL,@"resident batch incomplete");
-        const uint8_t *pixels=(const uint8_t *)resource.ownedMap+DVM_PRESENT_OFFSET;
+        if(resource.lastFrame!=33||resource.displayPending)return HostError(seq,EINVAL,@"resident batch incomplete");
+        const uint8_t *pixels=resource.pixels;
+        if(resource.managed)for(size_t i=DVM_PRESENT_BYTES;i<DVM_PRESENT_BUFFER_BYTES;i++)if(pixels[i]!=0xcd)return HostError(seq,EILSEQ,@"managed tail guard");
         unsigned bad=DVMVerifyPresented(pixels,resource.nonce,33);
         if(bad)return HostError(seq,EILSEQ,@"resident final pixels differ");
         return @{@"seq":@(seq),@"ok":@YES,@"verified":@YES,@"bad_pixels":@0,@"frame":@33};

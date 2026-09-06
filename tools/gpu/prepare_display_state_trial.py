@@ -22,7 +22,9 @@ qemu_root=Path(subprocess.check_output(['git','-C',str(a.qemu.resolve().parent),
                                       'rev-parse','--show-toplevel'],text=True).strip())
 sources={}
 for name in ('hw/arm/darwin_iomfb.c','hw/arm/darwin_iomfb_swap.c',
-             'include/hw/arm/darwin_iomfb_swap.h','tests/unit/test-darwin-iomfb-swap.c'):
+             'include/hw/arm/darwin_iomfb_swap.h','tests/unit/test-darwin-iomfb-swap.c',
+             'hw/arm/xnuboot_sptm.c','hw/arm/darwin_gpu_transport.c',
+             'include/xnu/darwin_gpu_transport.h'):
     data=(qemu_root/name).read_bytes()
     target=a.out/'qemu-source'/name;target.parent.mkdir(parents=True,exist_ok=True)
     target.write_bytes(data);sources[name]=hashlib.sha256(data).hexdigest()

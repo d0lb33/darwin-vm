@@ -6,6 +6,8 @@ mode=${2:-nvme}
 requested_mode=$mode
 shared_flags=(-UDVM_SHARED_SURFACE -UDVM_MANAGED_ADDRESS_CONTRACT)
 if [[ "$mode" == --mmio-present-managed-contract ]]; then mode=--mmio-present-contract; fi
+if [[ "$mode" == --mmio-present-pool-contract ]]; then mode=--mmio-present-contract; shared_flags=(-DDVM_MANAGED_ADDRESS_CONTRACT -DDVM_SERVICE_POOL_CONTRACT); fi
+if [[ "$mode" == --mmio-present-pool ]]; then mode=--mmio-present; shared_flags=(-DDVM_SHARED_SURFACE -DDVM_SERVICE_POOL_CONTRACT); fi
 if [[ "$mode" == --mmio-present-shared-probe ]]; then mode=--mmio-present; shared_flags=(-DDVM_SHARED_SURFACE); fi
 [[ "$mode" == nvme || "$mode" == --mmio || "$mode" == --mmio-binary || "$mode" == --mmio-blur || "$mode" == --mmio-present-contract || "$mode" == --mmio-present ]] || exit 2
 extra_flags=(-UDVM_DRIVER_MMIO)
@@ -76,4 +78,6 @@ xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$rep
 cp "$repo/tools/gpu/present_"* "$repo/tools/gpu/blur_"* "$repo/tools/gpu/driver_"* "$repo/tools/gpu/build_driver.sh" "$out/"
 
 cp "$repo/qemu-sptm/include/xnu/darwin_gpu_transport.h" "$out/"
+cp "$repo/tools/gpu/managed_host.h" "$out/"
+cp "$repo/tools/gpu/managed_guest.h" "$out/"
 printf "%s\n" "$requested_mode" > "$out/transport-mode.txt"

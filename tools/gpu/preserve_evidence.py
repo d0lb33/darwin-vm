@@ -7,7 +7,7 @@ from pathlib import Path
 import shutil
 import re
 
-ALLOWED={'.json','.jsonl','.log','.txt','.md','.py','.sh','.m','.c','.h','.tsv',
+ALLOWED={'.json','.jsonl','.log','.txt','.md','.py','.sh','.m','.c','.cpp','.h','.tsv',
          '.stdout','.stderr','.exit','.plist','.tbd','.ll','.png','.command',
          '.nm-u','.otool-l','.disass','.csv','.bgra','.inc','.s'}
 
@@ -33,6 +33,13 @@ def main():
             if a.mmio_frames:
                 if path.name=='shared-ram.bin' and path.stat().st_size==16*1024*1024:
                     with path.open('rb') as f:mmio=f.read(4)==b'1MVD'
+                elif path.name=='managed-pages.bin' and path.stat().st_size==32+759*8:
+                    # Fixed kernel registration record; never the DRAM backend.
+                    mmio=True
+                elif path.name=='managed-final-buffer.bin' and path.stat().st_size==759*16384:
+                    ledger=path.with_name('managed-verification.json')
+                    if ledger.exists():
+                        mmio=hashlib.sha256(path.read_bytes()).hexdigest()==json.loads(ledger.read_text()).get('resource_snapshot_sha256')
                 elif path.name=='output-ram.bin' and path.stat().st_size==16*1024*1024 and (path.parent/'plan.json').is_file():
                     # Final-only output of the resident host presentation probe.
                     with path.open('rb') as f:
