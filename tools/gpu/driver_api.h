@@ -7,3 +7,5 @@
 typedef NSDictionary * (^DVMMetalRPC)(NSDictionary *request, NSError **error);
 typedef id<MTLDevice> (*DVMCreateMetalDeviceFn)(DVMMetalRPC rpc);
 id<MTLDevice> DVMCreateMetalDevice(DVMMetalRPC rpc);
+// Opt-in raw payloads for the bounded DVB1 submission transport.
+id<MTLDevice> DVMCreateBinaryMetalDevice(DVMMetalRPC rpc);

@@ -3,9 +3,10 @@ set -euo pipefail
 repo=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:?new output directory}
 mode=${2:-nvme}
-[[ "$mode" == nvme || "$mode" == --mmio ]] || exit 2
+[[ "$mode" == nvme || "$mode" == --mmio || "$mode" == --mmio-binary ]] || exit 2
 extra_flags=(-UDVM_DRIVER_MMIO)
-if [[ "$mode" == --mmio ]]; then extra_flags=(-DDVM_DRIVER_MMIO); fi
+if [[ "$mode" == --mmio || "$mode" == --mmio-binary ]]; then extra_flags=(-DDVM_DRIVER_MMIO); fi
+if [[ "$mode" == --mmio-binary ]]; then extra_flags+=(-DDVM_DRIVER_BINARY); fi
 test ! -e "$out"
 mkdir -p "$out/DVMProxy.bundle"
 python3 "$repo/tools/gpu/make_guest_link_stubs.py" "$out/stubs"
@@ -40,7 +41,7 @@ extra['usr/lib/libobjc.tbd']+=sorted(s[1:] for s in symbols if s.startswith('_ob
 for rel,names in extra.items():
  f=p/'stubs'/rel;s=f.read_text();s=s.replace('symbols: [ ','symbols: [ '+''.join('"_'+n+'", ' for n in names));f.write_text(s)
 (p/'entitlements.plist').write_bytes(plistlib.dumps({'platform-application':True,'com.apple.AppleNVMeNamespaceDevice.allow':True,'com.apple.security.exception.iokit-user-client-class':['AppleNVMeNamespaceUC','IOSurfaceRootUserClient']}))
-if sys.argv[2]=='--mmio':
+if sys.argv[2]!='nvme':
  (p/'entitlements.plist').write_bytes(plistlib.dumps({'platform-application':True,'org.darwin-vm.transport':True,'com.apple.security.exception.iokit-user-client-class':['IOKitDiagnosticsClient','IOSurfaceRootUserClient']}))
 (p/'DVMProxy.bundle/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier='org.darwin-vm.metal-driver',CFBundleName='DVMProxy',CFBundleExecutable='DVMProxy',CFBundlePackageType='BNDL',CFBundleVersion='1')))
 PY

@@ -386,7 +386,13 @@ int main(int argc, char **argv) {
             fail("bundle-load");
         fprintf(stderr, "GPU_LOAD_DRIVER_STAGE bundle-loaded\n");
         void *handle = dlopen("/usr/local/libexec/DVMProxy.bundle/DVMProxy", RTLD_NOW | RTLD_LOCAL);
-        DVMCreateMetalDeviceFn create = handle ? dlsym(handle, "DVMCreateMetalDevice") : NULL;
+        DVMCreateMetalDeviceFn create = handle ? dlsym(handle,
+#ifdef DVM_DRIVER_BINARY
+            "DVMCreateBinaryMetalDevice"
+#else
+            "DVMCreateMetalDevice"
+#endif
+            ) : NULL;
         if (!create)
             fail("factory");
         @autoreleasepool {

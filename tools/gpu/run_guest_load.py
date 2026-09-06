@@ -151,6 +151,7 @@ def main():
         aux_peer=peer_class(out,a.driver_worker,a.library_cache,boot=driver_boot)
         if a.driver_mmio:
             shutil.copyfile(Path(__file__).with_name("driver_mmio_peer.py"),out/"driver_mmio_peer.py")
+            shutil.copyfile(Path(__file__).with_name("driver_binary.py"),out/"driver_binary.py")
             shutil.copyfile(a.driver_worker.parent/"driver_mmio_transport.inc",out/"driver_mmio_transport.inc")
         shutil.copyfile(Path(__file__).with_name('driver_peer.py'),out/'driver_peer.py')
         # Use the sources archived by the build, never later working-tree edits.

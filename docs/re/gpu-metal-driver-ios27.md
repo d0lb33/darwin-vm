@@ -617,3 +617,14 @@ tiny workload still does not benefit from offload. See the [shared-memory ledger
 for guarded boot patches, failures, runtime proof, checkpoint rejection and
 remaining production-driver dependencies. System software rendering stays the
 fallback; this is not global UI or Liquid Glass acceleration.
+
+## Binary submission follow-up (2026-09-06)
+
+[Binary submission evidence](gpu-binary-submission-ios27.md) records four fresh
+post-display ABBA boots. The same exact guest AIR workload now takes median
+3.55/3.73 ms with typed binary submission, versus JSON controls at 5.81/6.47 ms.
+Both binary medians improve 39–42% against the mean control median; every run
+verifies all eight workloads and retirement to zero. Native display/input
+readiness passes. The tiny CPU reference remains faster (about 0.5 ms), and
+first binary submissions still take 23–31 ms. Global rendering and GPU
+checkpoint state remain unproven. The boot transport/QEMU artifacts are unchanged.

@@ -18,6 +18,7 @@ static void reject(NSString *s) {
 @property(nonatomic, copy) DVMMetalRPC transport;
 @property(nonatomic, strong) dispatch_queue_t serial;
 @property(nonatomic) BOOL submissionInFlight;
+@property(nonatomic) BOOL binaryPayloads;
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err;
 - (void)retire:(NSNumber *)handle;
 @end
@@ -387,7 +388,7 @@ static void reject(NSString *s) {
             [uploads addObject:@{
                 @"op" : @"upload",
                 @"buffer" : b.handle,
-                @"data" : [b.shadow base64EncodedStringWithOptions:0]
+                @"data" : self.commandQueue.owner.binaryPayloads ? [b.shadow copy] : [b.shadow base64EncodedStringWithOptions:0]
             }];
         }
     for (id o in _resources)
@@ -396,7 +397,7 @@ static void reject(NSString *s) {
             [textures addObject:t];
             if (t.pendingUpload)
                 [uploads addObject:@{@"texture":t.handle, @"row":@([t row]),
-                    @"data":[t.pendingUpload base64EncodedStringWithOptions:0]}];
+                    @"data":self.commandQueue.owner.binaryPayloads ? t.pendingUpload : [t.pendingUpload base64EncodedStringWithOptions:0]}];
         }
     dispatch_async(_commandQueue.owner.serial, ^{
         @autoreleasepool {
@@ -414,8 +415,9 @@ static void reject(NSString *s) {
                     NSMutableArray *decoded = [NSMutableArray array];
                     for (DVMBuffer *b in buffers) {
                         id encoded = returned[b.handle.stringValue];
-                        NSData *d = [encoded isKindOfClass:NSString.class]
-                            ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil;
+                        NSData *d = self.commandQueue.owner.binaryPayloads
+                            ? ([encoded isKindOfClass:NSData.class] ? encoded : nil)
+                            : ([encoded isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil);
                         if (d.length != b.length) reject(@"buffer readback size");
                         [decoded addObject:d];
                     }
@@ -513,7 +515,7 @@ static void reject(NSString *s) {
     }
     for (NSNumber *i in _constants)
         [bytes
-            addObject:@{@"index" : i, @"data" : [_constants[i] base64EncodedStringWithOptions:0]}];
+            addObject:@{@"index" : i, @"data" : ((DVMDevice *)self.device).binaryPayloads ? _constants[i] : [_constants[i] base64EncodedStringWithOptions:0]}];
     for (NSNumber *i in _buffers) {
         DVMBuffer *b = _buffers[i][@"object"];
         [buffers
@@ -549,4 +551,9 @@ id<MTLDevice> DVMCreateMetalDevice(DVMMetalRPC rpc) {
     dispatch_queue_attr_t attr=dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,QOS_CLASS_USER_INTERACTIVE,0);
     d.serial = dispatch_queue_create("org.darwin-vm.metal.transport", attr);
     return d;
+}
+
+id<MTLDevice> DVMCreateBinaryMetalDevice(DVMMetalRPC rpc) {
+    DVMDevice *d=(DVMDevice *)DVMCreateMetalDevice(rpc);
+    d.binaryPayloads=YES;return d;
 }

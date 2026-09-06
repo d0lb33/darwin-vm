@@ -9,6 +9,7 @@ import statistics
 import struct
 import zlib
 from driver_peer import DriverPeer
+from driver_binary import REPLY, decode_reply
 
 def distribution(values):
     if not values:raise ValueError('missing timing samples')
@@ -34,7 +35,7 @@ def verify(path):
     raw=(path/'shared-ram.bin').read_bytes()
     session,seq,n,c=struct.unpack_from('<16sQII',raw,0x80)
     output=raw[0x800000:0x800000+n]
-    if len(raw)!=0x1000000 or not 0<n<=0x200000 or session!=raw[16:32] or seq!=peer.records[-1]['seq'] or zlib.crc32(output)!=c or json.loads(output)!=peer.records[-1]['reply']:
+    if len(raw)!=0x1000000 or not 0<n<=0x200000 or session!=raw[16:32] or seq!=peer.records[-1]['seq'] or zlib.crc32(output)!=c or (decode_reply(output) if struct.unpack_from("<I",output)[0]==REPLY else json.loads(output))!=peer.records[-1]['reply']:
         raise ValueError('final shared response does not match host record')
     if result.get('completion_source')=='shared-ram-audit':
         head,=struct.unpack_from('<Q',raw,0x180)

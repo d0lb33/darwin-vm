@@ -1,8 +1,9 @@
 // Persistent host-only Metal executor for the framed guest driver protocol.
-// Stdout carries only length-prefixed JSON replies; diagnostics never share it.
+// Stdout carries only length-prefixed protocol replies; diagnostics never share it.
 #import <CommonCrypto/CommonDigest.h>
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#include "driver_binary.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -395,11 +396,11 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         NSDictionary *u = inlineBytes[0], *tg = scratch[0];
         uint64_t index, n;
         if (![u isKindOfClass:NSDictionary.class] || !Number(u[@"index"], &index) || index != 0 ||
-            ![u[@"data"] isKindOfClass:NSString.class] || ![tg isKindOfClass:NSDictionary.class] ||
+            !DVMBPayload(u[@"data"]) || ![tg isKindOfClass:NSDictionary.class] ||
             !Number(tg[@"index"], &index) || index != 0 || !Number(tg[@"length"], &n) ||
             n != (average ? 1024 : 128))
             return HostError(seq, EINVAL, @"invalid uniform or scratch binding");
-        NSData *uniform = [[NSData alloc] initWithBase64EncodedString:u[@"data"] options:0];
+        NSData *uniform = DVMBPayload(u[@"data"]);
         const uint8_t expected[20] = {0, 0, 0, 0, 64, 0, 48, 0, 1, 0, 0, 0, 6, 0, 0, 0, 1, 0, 0, 0};
         if (uniform.length != 20 || memcmp(uniform.bytes, expected, 20))
             return HostError(seq, EINVAL, @"luma uniform does not match audited bounds");
@@ -446,8 +447,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         BOOL buffer = u[@"buffer"] != nil;
         DVMEntry *entry = Entry(host, u[buffer ? @"buffer" : @"texture"], buffer ? @"buffer" : @"texture");
         id encoded = u[@"data"];
-        NSData *data = [encoded isKindOfClass:NSString.class]
-            ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil;
+        NSData *data = DVMBPayload(encoded);
         uint64_t row = 0;
         if (!entry || (buffer && u[@"texture"]) || !data || data.length != entry.textureBytes ||
             [written containsObject:@(entry.handle)] ||
@@ -502,7 +502,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
     NSMutableDictionary *results = [NSMutableDictionary dictionary];
     for (DVMEntry *entry in reads) {
         NSData *data = [NSData dataWithBytes:[(id<MTLBuffer>)entry.object contents] length:entry.textureBytes];
-        results[@(entry.handle).stringValue] = [data base64EncodedStringWithOptions:0];
+        results[@(entry.handle).stringValue] = [r[@"_binary"] boolValue] ? data : [data base64EncodedStringWithOptions:0];
     }
     return @{
         @"buffers" : results,
@@ -571,10 +571,12 @@ int main(void) {
                 if (!ReadAll(data.mutableBytes, length))
                     return 3;
                 NSError *error = nil;
-                id object = [NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+                BOOL binary=DVMBMagic(data)==DVM_BIN_REQUEST;
+                id object = binary?DVMBDecodeRequest(data):[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
                 if (![object isKindOfClass:NSDictionary.class])
                     return 3;
                 NSDictionary *request = object;
+                if(!binary && request[@"_binary"])return 3;
                 uint64_t seq;
                 if (!Number(request[@"seq"], &seq) || !seq || seq <= host.lastSeq) {
                     if (Number(request[@"seq"], &seq))
@@ -582,8 +584,13 @@ int main(void) {
                     return 3;
                 }
                 host.lastSeq = seq;
-                if (!Reply(ProcessRequest(host, seq, request)))
-                    return 4;
+                NSDictionary *response=ProcessRequest(host,seq,request);
+                if(binary && [response[@"ok"] boolValue]) {
+                    NSData *encoded=DVMBEncodeReply(response);
+                    if(!encoded)return 4;
+                    uint32_t n=(uint32_t)encoded.length;
+                    if(!WriteAll(&n,4)||!WriteAll(encoded.bytes,encoded.length))return 4;
+                } else if(!Reply(response))return 4;
             }
         }
     }

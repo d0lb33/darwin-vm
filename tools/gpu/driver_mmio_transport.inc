@@ -1,6 +1,7 @@
 /* Deliberately one outstanding request. The kernel owns the two mappings;
  * publication uses barriers and completion is polled, not an interrupt. */
 #include "../../qemu-sptm/include/xnu/darwin_gpu_transport.h"
+#include "driver_binary.h"
 #include <signal.h>
 #include <sys/ucontext.h>
 static void mmioCrash(int signal, siginfo_t *info, void *context) {
@@ -65,7 +66,11 @@ int DVMReport(FILE *stream,const char *format,...) {
         double started=now();
         uint64_t seq=++_sequence;
         NSMutableDictionary *r=[request mutableCopy];r[@"seq"]=@(seq);
-        NSData *data=[NSJSONSerialization dataWithJSONObject:r options:0 error:error];
+        BOOL binary=NO;
+#ifdef DVM_DRIVER_BINARY
+        binary=[r[@"op"] isEqual:@"submit"];
+#endif
+        NSData *data=binary?DVMBEncodeRequest(r):[NSJSONSerialization dataWithJSONObject:r options:0 error:error];
         if (!data.length || data.length>DVM_GPU_MAX_BYTES) fail("mmio-request-size");
         uint32_t n=(uint32_t)data.length,c=crc(data.bytes,data.length);
         memcpy(_shared+DVM_GPU_REQUEST_DATA,data.bytes,n);
@@ -85,7 +90,8 @@ int DVMReport(FILE *stream,const char *format,...) {
         memcpy(&returned,h+16,8);memcpy(&n,h+24,4);memcpy(&c,h+28,4);
         if (memcmp(h,_identity.bytes,16)||memcmp(_shared+16,_identity.bytes,16)||returned!=seq||!n||n>DVM_GPU_MAX_BYTES||crc(_shared+DVM_GPU_REPLY_DATA,n)!=c)
             fail("mmio-reply-contract");
-        NSDictionary *reply=[NSJSONSerialization JSONObjectWithData:[NSData dataWithBytes:_shared+DVM_GPU_REPLY_DATA length:n] options:0 error:error];
+        NSData *returnedData=[NSData dataWithBytes:_shared+DVM_GPU_REPLY_DATA length:n];
+        NSDictionary *reply=DVMBMagic(returnedData)==DVM_BIN_REPLY?DVMBDecodeReply(returnedData):[NSJSONSerialization JSONObjectWithData:returnedData options:0 error:error];
         if (![reply isKindOfClass:NSDictionary.class]||[reply[@"seq"] unsignedLongLongValue]!=seq) fail("mmio-reply-json");
         fprintf(stderr,"GPU_LOAD_DRIVER_MMIO_RPC seq=%llu op=%s total_us=%.3f doorbell_us=%.3f polls=%llu\n",seq,[request[@"op"] UTF8String],(now()-started)*1e6,(completed-submitted)*1e6,polls);
         if (![reply[@"ok"] boolValue]) {
