@@ -217,6 +217,16 @@ on its own (110 `B0CM` reads in 300 s, BATT_RESTORE1 with
 either way; the "Charging" banner on charger attach is the notification's
 own visible effect.
 
+## Noise reduction (BATT_SMC7, BATT_SYS6)
+
+`zEPE`/`zETM`/`zETN`/`zEWi`/`zECm`/`zEAO` are the AppleSMC event-buffer
+log records; they are write-only sinks now (21 records accepted in a 240 s
+disk boot, none read back).  `AC-N`/`AP-N`/`AY-N` answer 0, which stops the
+three per-poll refusals; a nonzero count would make the driver enumerate
+44-byte `D<n>JQ` adapter records whose layout is unknown.  With them the
+steady-state refusals are `CHPS` and `YBk0` (AppleChargerData, per poll)
+and a one-time `AC-W` (6 requests), all with unknown semantics.
+
 ## Still unsupported
 
 - Keys the pack enumerates and we do not model (`b??0`, `BL??`, `BR??`,
