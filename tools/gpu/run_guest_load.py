@@ -152,6 +152,9 @@ def main():
         if a.driver_mmio:
             shutil.copyfile(Path(__file__).with_name("driver_mmio_peer.py"),out/"driver_mmio_peer.py")
             shutil.copyfile(Path(__file__).with_name("driver_binary.py"),out/"driver_binary.py")
+            shutil.copyfile(Path(__file__).with_name("blur_peer.py"),out/"blur_peer.py")
+            for item in a.driver_worker.parent.glob("blur_*"):
+                if item.suffix in (".h",".m",".inc"):shutil.copyfile(item,out/item.name)
             shutil.copyfile(a.driver_worker.parent/"driver_mmio_transport.inc",out/"driver_mmio_transport.inc")
         shutil.copyfile(Path(__file__).with_name('driver_peer.py'),out/'driver_peer.py')
         # Use the sources archived by the build, never later working-tree edits.
@@ -255,7 +258,7 @@ def main():
                         driver_last_progress=time.monotonic()
                         if 'GPU_LOAD_DRIVER_READY' in line:driver_ready_seen=True
                         if 'GPU_LOAD_ERROR' in line:raise RuntimeError('shared-RAM guest failure: '+line)
-                        if 'GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0' in line:
+                        if line in ('GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0'):
                             audit_complete=True;aux_complete=True
                             report['driver_complete_seconds']=time.monotonic()-started
                             report['completion_source']='shared-ram-audit'

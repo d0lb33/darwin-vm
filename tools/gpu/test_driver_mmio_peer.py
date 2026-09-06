@@ -61,8 +61,10 @@ class MMIOPeerTests(unittest.TestCase):
         struct.pack_into('<Q',self.peer.ram,0x180,2)
         with self.assertRaisesRegex(ValueError,'audit CRC'):self.peer.audit()
     def test_audit_head_bounds(self):
-        struct.pack_into('<Q',self.peer.ram,0x180,65)
-        with self.assertRaisesRegex(ValueError,'head bounds'):self.peer.audit()
+        for limit in (64,120):
+            self.peer.audit_limit=limit
+            struct.pack_into('<Q',self.peer.ram,0x180,limit+1)
+            with self.assertRaisesRegex(ValueError,'head bounds'):self.peer.audit()
     def test_duplicate_never_reexecutes(self):
         packet=self.request();self.wire.sendall(packet);self.peer.pump();self.wire.recv(16)
         self.wire.sendall(packet)

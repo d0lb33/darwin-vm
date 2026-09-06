@@ -71,17 +71,22 @@ static void memoryBudget(void) {
     }
     fprintf(stderr, "GPU_LOAD_DRIVER_MEMORY before_active=%d before_inactive=%d\n", limits.active,
             limits.inactive);
-    if (limits.active != 64 || limits.inactive != 64) {
-        limits = (Limits){64, 1, 64, 1};
+#ifdef DVM_DRIVER_BLUR
+    const int memoryMB=256;
+#else
+    const int memoryMB=64;
+#endif
+    if (limits.active != memoryMB || limits.inactive != memoryMB) {
+        limits = (Limits){memoryMB, 1, memoryMB, 1};
         if (control(7, getpid(), 0, &limits, sizeof(limits))) {
             fprintf(stderr, "GPU_LOAD_ERROR memory-set errno=%d\n", errno);
             exit(1);
         }
     }
-    if (control(8, getpid(), 0, &limits, sizeof(limits)) || limits.active != 64 ||
-        limits.inactive != 64)
+    if (control(8, getpid(), 0, &limits, sizeof(limits)) || limits.active != memoryMB ||
+        limits.inactive != memoryMB)
         fail("memory-limit-readback");
-    fprintf(stderr, "GPU_LOAD_DRIVER_MEMORY verified_active=64 verified_inactive=64\n");
+    fprintf(stderr, "GPU_LOAD_DRIVER_MEMORY verified_active=%d verified_inactive=%d\n",memoryMB,memoryMB);
 }
 #ifdef DVM_DRIVER_MMIO
 #include "driver_mmio_transport.inc"
@@ -238,6 +243,9 @@ static NSData *library(void) {
     __typeof__(&name) p_##name = dlsym(lib, #name);                                                \
     if (!p_##name)                                                                                 \
     fail("symbol-" #name)
+#ifdef DVM_DRIVER_BLUR
+#include "blur_workload.inc"
+#endif
 int main(int argc, char **argv) {
     @autoreleasepool {
         setvbuf(stderr, NULL, _IONBF, 0);
@@ -402,7 +410,11 @@ int main(int argc, char **argv) {
             if (![device conformsToProtocol:@protocol(MTLDevice)])
                 fail("device-protocol");
             fprintf(stderr, "GPU_LOAD_DRIVER_STAGE device-created\n");
+            #ifdef DVM_DRIVER_BLUR
+            DVMRunBlur(device,air);
+#else
             DVMRunLuma(device, air, 8);
+#endif
         }
         // Retire queues run asynchronously; a bounded stats check also detects leaks.
         until = now() + 5;
@@ -413,12 +425,23 @@ int main(int argc, char **argv) {
                 break;
             usleep(10000);
         } while (now() < until);
-        if (!stats || [stats[@"submissions"] unsignedIntegerValue] != 8 ||
+        if (!stats || [stats[@"submissions"] unsignedIntegerValue] !=
+#ifdef DVM_DRIVER_BLUR
+            952
+#else
+            8
+#endif
+            ||
             [stats[@"live"][@"objects"] unsignedIntegerValue] != 0)
             fail("resource-retirement");
         fprintf(
             stderr,
-            "GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0\n");
+            #ifdef DVM_DRIVER_BLUR
+            "GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0\n"
+#else
+            "GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0\n"
+#endif
+        );
         activityEnd();
         return 0;
     }

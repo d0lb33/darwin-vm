@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "driver_binary.h"
+#include "blur_wire.h"
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -192,7 +193,7 @@ static NSDictionary *Pipeline(DVMHost *host, uint64_t seq, NSDictionary *request
     NSString *name = request[@"function"];
     if (!library || ![name isKindOfClass:NSString.class] || !name.length)
         return HostError(seq, EINVAL, @"unknown library or invalid function");
-    if (![@[ @"compute_average_luma", @"compute_sum_luma" ] containsObject:name])
+    if (![@[ @"compute_average_luma", @"compute_sum_luma", @"compute_simd_blur_5" ] containsObject:name])
         return HostError(seq, ENOTSUP, @"kernel execution contract has not been audited");
     id<MTLFunction> function = [(id<MTLLibrary>)library.object newFunctionWithName:name];
     if (!function || function.functionType != MTLFunctionTypeKernel)
@@ -365,6 +366,8 @@ static NSDictionary *Buffer(DVMHost *host, uint64_t seq, NSDictionary *r) {
     memset(b.contents, 0, n);
     return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(e.handle)};
 }
+
+#include "blur_host_submit.inc"
 
 // Safety envelope derived from the exact AIR, not inferred from reflection's
 // minimum element size. General arbitrary dispatch is intentionally not exposed.
@@ -571,8 +574,9 @@ int main(void) {
                 if (!ReadAll(data.mutableBytes, length))
                     return 3;
                 NSError *error = nil;
+                BOOL blur=DVMBMagic(data)==DVM_BLUR_REQUEST;
                 BOOL binary=DVMBMagic(data)==DVM_BIN_REQUEST;
-                id object = binary?DVMBDecodeRequest(data):[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
+                id object = blur?DVMBlurDecode(data):binary?DVMBDecodeRequest(data):[NSJSONSerialization JSONObjectWithData:data options:0 error:&error];
                 if (![object isKindOfClass:NSDictionary.class])
                     return 3;
                 NSDictionary *request = object;
@@ -584,9 +588,9 @@ int main(void) {
                     return 3;
                 }
                 host.lastSeq = seq;
-                NSDictionary *response=ProcessRequest(host,seq,request);
-                if(binary && [response[@"ok"] boolValue]) {
-                    NSData *encoded=DVMBEncodeReply(response);
+                NSDictionary *response=blur?BlurSubmit(host,seq,request):ProcessRequest(host,seq,request);
+                if((binary||blur) && [response[@"ok"] boolValue]) {
+                    NSData *encoded=blur?DVMBlurReplyEncode(response):DVMBEncodeReply(response);
                     if(!encoded)return 4;
                     uint32_t n=(uint32_t)encoded.length;
                     if(!WriteAll(&n,4)||!WriteAll(encoded.bytes,encoded.length))return 4;

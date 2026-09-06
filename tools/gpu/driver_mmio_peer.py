@@ -16,6 +16,7 @@ import zlib
 from driver_peer import DriverPeer, MAX
 from surface_peer import AIR_SHA
 from driver_binary import REQUEST, REPLY, decode_request, decode_reply
+import blur_peer
 
 RAM_SIZE=0x1000000
 MAGIC=0x44564d31
@@ -26,6 +27,8 @@ class MMIOPeer(DriverPeer):
         self.ready_since=None;self.ready_identity=None;self.ready_acks=0
         self.released=False;self.released_at=None;self.buffer=b'';self.rx=b'';self.sock=None
         self.library=Path(library);self.worker=Path(worker);self.boot=boot;self.audit_seen=0
+        mode=self.worker.parent/"transport-mode.txt"
+        self.audit_limit=120 if mode.exists() and mode.read_text().strip()=="--mmio-blur" else 64
         raw=self.library.read_bytes()
         if len(raw)!=2705796 or hashlib.sha256(raw).hexdigest()!=AIR_SHA:raise ValueError('exact AIR cache mismatch')
         self.fd=os.open(self.out/'shared-ram.bin',os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
@@ -71,21 +74,26 @@ class MMIOPeer(DriverPeer):
         if self.ram[0x40:0x60]!=expected or self.ram[16:32]!=self.header:raise ValueError('MMIO request header/session')
         raw=self.ram[0x10000:0x10000+n]
         if zlib.crc32(raw)!=checksum:raise ValueError('MMIO request CRC')
+        blur=struct.unpack_from("<I",raw)[0]==blur_peer.REQUEST
         binary=struct.unpack_from("<I",raw)[0]==REQUEST
-        request=dict(seq=struct.unpack_from("<Q",raw,8)[0],op="submit") if binary else json.loads(raw)
+        request=dict(seq=struct.unpack_from("<Q",raw,8)[0],op="blurSubmit" if blur else "submit") if binary or blur else json.loads(raw)
         if not isinstance(request,dict) or request.get('seq')!=seq:raise ValueError('MMIO request inner sequence')
         started=time.monotonic_ns();self.proc.stdin.write(struct.pack('<I',n)+raw);self.proc.stdin.flush()
         length,=struct.unpack('<I',self.read(4))
         if not 0<length<=MAX:raise ValueError('host reply length')
-        output=self.read(length);reply=decode_reply(output) if struct.unpack_from("<I",output)[0]==REPLY else json.loads(output)
+        output=self.read(length);reply=blur_peer.reply(output) if struct.unpack_from("<I",output)[0]==blur_peer.REPLY else decode_reply(output) if struct.unpack_from("<I",output)[0]==REPLY else json.loads(output)
         if not isinstance(reply,dict) or reply.get('seq')!=seq:raise ValueError('host reply sequence')
         self.ram[0x800000:0x800000+length]=output
         self.ram[0x80:0xa0]=self.header+struct.pack('<QII',seq,length,zlib.crc32(output))
         self.sock.sendall(struct.pack('<QII',seq,0,0))
         service_us=(time.monotonic_ns()-started)/1000
         self.seen.add(seq)
+        if blur:
+            request=blur_peer.request(raw)
+            if not hasattr(self,"blur_evidence"):self.blur_evidence=blur_peer.BlurEvidence(self.out)
+            if reply.get("ok"):self.blur_evidence.add(request,reply,raw,output)
         if binary:request=decode_request(raw)  # Evidence conversion follows completion publication.
-        record=dict(wire_encoding="binary-v1" if binary else "json",seq=seq,op=request.get('op'),request_bytes=n,reply_bytes=length,
+        record=dict(wire_encoding="blur-v1" if blur else "binary-v1" if binary else "json",seq=seq,op=request.get('op'),request_bytes=n,reply_bytes=length,
             host_service_us=service_us,
             request={k:v for k,v in request.items() if k!='data'},reply=reply)
         if binary:
@@ -97,7 +105,7 @@ class MMIOPeer(DriverPeer):
         if self.sock is None:return []
         if self.ram[16:32]!=self.header:raise ValueError('audit session changed')
         head,=struct.unpack_from('<Q',self.ram,0x180)
-        if not self.audit_seen<=head<=64:raise ValueError('audit head bounds')
+        if not self.audit_seen<=head<=getattr(self,'audit_limit',64):raise ValueError('audit head bounds')
         lines=[]
         while self.audit_seen<head:
             expected=self.audit_seen+1;offset=0x1000+self.audit_seen*512
@@ -110,6 +118,9 @@ class MMIOPeer(DriverPeer):
             self.audit_seen=seq;lines.append(line)
             with (self.out/'driver-audit.jsonl').open('a') as f:f.write(json.dumps(dict(seq=seq,line=line))+'\n')
         return lines
+    def verify(self,events):
+        if hasattr(self,"blur_evidence"):return blur_peer.verify(self.out,events,self.records)
+        return super().verify(events)
     def close(self):
         if self.sock:self.sock.close()
         self.ram.close()

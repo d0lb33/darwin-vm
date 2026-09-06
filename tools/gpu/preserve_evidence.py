@@ -9,14 +9,14 @@ import re
 
 ALLOWED={'.json','.jsonl','.log','.txt','.md','.py','.sh','.m','.c','.h','.tsv',
          '.stdout','.stderr','.exit','.plist','.tbd','.ll','.png','.command',
-         '.nm-u','.otool-l','.disass','.csv','.bgra','.inc'}
+         '.nm-u','.otool-l','.disass','.csv','.bgra','.inc','.s'}
 
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--reference-streams',action='store_true',help='include captured LIBREF streams (skip full-library uploads)')
-    p.add_argument('--mmio-frames',action='store_true',help='include owned 16 MiB transport RAM and fixed binary luma frames, never full guest RAM')
+    p.add_argument('--mmio-frames',action='store_true',help='include owned 16 MiB transport RAM and bounded luma/blur frames, never full guest RAM')
     p.add_argument('sources',type=Path,nargs='+')
     a=p.parse_args()
     a.output.mkdir(exist_ok=False)
@@ -36,6 +36,14 @@ def main():
                 elif re.fullmatch(r'binary-(request|reply)-[0-9]+\.bin',path.name):
                     data=path.read_bytes()
                     mmio=(len(data)==28672 and data[:4]==b'DVB1') or (len(data)==272 and data[:4]==b'DVR1')
+                elif re.fullmatch(r'blur-(request|reply)-[0-9]+x[0-9]+\.bin',path.name) and path.stat().st_size<2*1024*1024:
+                    from blur_peer import request,reply
+                    data=path.read_bytes()
+                    try:
+                        (request if path.name.startswith('blur-request') else reply)(data)
+                        mmio=True
+                    except ValueError:
+                        pass
             if stream:
                 request=path.with_name('guest-requests.bin').read_bytes()
                 if not request.startswith(b'LIBREF ') and request:

@@ -628,3 +628,13 @@ verifies all eight workloads and retirement to zero. Native display/input
 readiness passes. The tiny CPU reference remains faster (about 0.5 ms), and
 first binary submissions still take 23–31 ms. Global rendering and GPU
 checkpoint state remain unproven. The boot transport/QEMU artifacts are unchanged.
+
+## Exact-guest blur comparison (2026-09-06)
+
+[Blur feasibility evidence](gpu-blur-feasibility-ios27.md) now compares a two-pass
+QuartzCore blur against native FP16 guest CPU work through an owned IOSurface.
+Two complete post-display sweeps verify every pixel and retirement. The current
+path wins at 256² and larger, but takes 1.40–1.47 s for screen-sized content.
+Host-resident whole-image processing without readback takes about 1 ms. Reusable
+image backing and output delivery are the next bounded dependency; full Liquid
+Glass, global plugin integration and GPU checkpoint state remain untested.

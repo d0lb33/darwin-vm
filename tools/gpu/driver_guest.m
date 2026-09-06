@@ -54,6 +54,7 @@ static void reject(NSString *s) {
 @end
 @interface DVMTexture : DVMObject <MTLTexture>
 @property(nonatomic, strong) NSData *pendingUpload;
+@property(nonatomic, strong) NSData *completedShadow;
 @property(nonatomic) NSUInteger width;
 @property(nonatomic) NSUInteger height;
 @property(nonatomic) MTLPixelFormat pixelFormat;
@@ -73,6 +74,7 @@ static void reject(NSString *s) {
 @property(nonatomic, strong) NSMutableDictionary *buffers;
 @property(nonatomic, strong) NSMutableDictionary *scratch;
 @property(nonatomic) BOOL ended;
+@property(nonatomic, strong) NSArray *imageblock;
 @property(atomic, copy) NSString *label;
 @end
 @interface DVMCommand : NSObject <MTLCommandBuffer>
@@ -290,8 +292,11 @@ static void reject(NSString *s) {
                [self row]);
     if (self.owner.submissionInFlight) reject(@"texture upload while GPU work is in flight");
     self.pendingUpload = d;
+    self.completedShadow=nil;
 }
 - (NSData *)read {
+    if(self.owner.submissionInFlight)reject(@"texture read while GPU work is in flight");
+    if(self.completedShadow)return self.completedShadow;
     NSError *e = nil;
     if (self.pendingUpload) {
         if (![self.owner call:@{@"op":@"upload", @"texture":self.handle,
@@ -403,9 +408,13 @@ static void reject(NSString *s) {
         @autoreleasepool {
             @try {
                 NSError *e = nil;
-                NSDictionary *r = self.commandQueue.owner.transport(
-                    @{@"op":@"submit", @"commands":self.commands,
-                      @"uploads":uploads, @"readbacks":readbacks}, &e);
+                BOOL blur=self.commands[0][@"imageblock"]!=nil;
+                DVMTexture *output=nil;
+                if(blur)for(DVMTexture *t in textures)if([t.handle isEqual:[self.commands.lastObject[@"textures"] lastObject]])output=t;
+                if(blur && (!output||!self.commandQueue.owner.binaryPayloads))reject(@"blur requires binary transport and output");
+                NSMutableDictionary *request=[@{@"op":blur?@"blurSubmit":@"submit",@"commands":self.commands,@"uploads":uploads,@"readbacks":readbacks} mutableCopy];
+                if(blur){request[@"w"]=@(output.width);request[@"h"]=@(output.height);}
+                NSDictionary *r=self.commandQueue.owner.transport(request,&e);
                 if (!r || [r[@"status"] integerValue] != MTLCommandBufferStatusCompleted)
                     self.error = e ?: error(@"GPU did not complete");
                 else {
@@ -420,6 +429,11 @@ static void reject(NSString *s) {
                             : ([encoded isKindOfClass:NSString.class] ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil);
                         if (d.length != b.length) reject(@"buffer readback size");
                         [decoded addObject:d];
+                    }
+                    if(blur){
+                        NSData *pixels=r[@"texture"];
+                        if(![pixels isKindOfClass:NSData.class]||pixels.length!=[output row]*output.height||![r[@"output"] isEqual:output.handle]||[r[@"w"] unsignedIntegerValue]!=output.width||[r[@"h"] unsignedIntegerValue]!=output.height)reject(@"blur texture reply");
+                        output.completedShadow=pixels;
                     }
                     // Validate all readbacks before publishing any CPU shadow.
                     for (NSUInteger i = 0; i < buffers.count; i++) {
@@ -492,6 +506,9 @@ static void reject(NSString *s) {
     _buffers[@(i)] = @{@"object" : b, @"offset" : @(offset)};
     [_constants removeObjectForKey:@(i)];
 }
+- (void)setImageblockWidth:(NSUInteger)w height:(NSUInteger)h {
+    [self check];if(w!=32||h!=32)reject(@"only audited 32x32 imageblock supported");_imageblock=@[@(w),@(h)];
+}
 - (void)setThreadgroupMemoryLength:(NSUInteger)n atIndex:(NSUInteger)i {
     [self check];
     if (i > 7 || !n || n > 16384 || n % 16)
@@ -525,7 +542,7 @@ static void reject(NSString *s) {
     for (NSNumber *i in _scratch)
         [scratch addObject:@{@"index" : i, @"length" : _scratch[i]}];
     [_command.resources addObject:_pipeline];
-    [_command.commands addObject:@{
+    NSMutableDictionary *encoded=[@{
         @"pipeline" : _pipeline.handle,
         @"textures" : textures,
         @"bytes" : bytes,
@@ -533,7 +550,9 @@ static void reject(NSString *s) {
         @"threadgroupMemory" : scratch,
         @"groups" : @[ @(g.width), @(g.height), @(g.depth) ],
         @"threads" : @[ @(t.width), @(t.height), @(t.depth) ]
-    }];
+    } mutableCopy];
+    if(_imageblock)encoded[@"imageblock"]=_imageblock;
+    [_command.commands addObject:encoded];
 }
 - (void)endEncoding {
     [self check];

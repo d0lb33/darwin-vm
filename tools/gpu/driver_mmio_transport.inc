@@ -2,6 +2,13 @@
  * publication uses barriers and completion is polled, not an interrupt. */
 #include "../../qemu-sptm/include/xnu/darwin_gpu_transport.h"
 #include "driver_binary.h"
+#include "blur_wire.h"
+#ifdef DVM_DRIVER_BLUR
+static double blurRPCus,blurDoorbellus;
+#define DVM_AUDIT_SLOTS 120
+#else
+#define DVM_AUDIT_SLOTS 64
+#endif
 #include <signal.h>
 #include <sys/ucontext.h>
 static void mmioCrash(int signal, siginfo_t *info, void *context) {
@@ -32,7 +39,7 @@ int DVMReport(FILE *stream,const char *format,...) {
         if(n<=0||n>=(int)sizeof(text))_exit(121);
         @synchronized(mmioReportLock) {
             uint64_t seq=++mmioReportSequence;
-            if(seq>64)_exit(122);
+            if(seq>DVM_AUDIT_SLOTS)_exit(122);
             uint8_t *slot=mmioReportRAM+0x1000+(seq-1)*512;
             memcpy(slot+16,text,(unsigned)n);
             uint32_t length=(uint32_t)n,c=crc(text,length);
@@ -70,7 +77,8 @@ int DVMReport(FILE *stream,const char *format,...) {
 #ifdef DVM_DRIVER_BINARY
         binary=[r[@"op"] isEqual:@"submit"];
 #endif
-        NSData *data=binary?DVMBEncodeRequest(r):[NSJSONSerialization dataWithJSONObject:r options:0 error:error];
+        BOOL blur=[r[@"op"] isEqual:@"blurSubmit"];
+        NSData *data=blur?DVMBlurEncode(r):binary?DVMBEncodeRequest(r):[NSJSONSerialization dataWithJSONObject:r options:0 error:error];
         if (!data.length || data.length>DVM_GPU_MAX_BYTES) fail("mmio-request-size");
         uint32_t n=(uint32_t)data.length,c=crc(data.bytes,data.length);
         memcpy(_shared+DVM_GPU_REQUEST_DATA,data.bytes,n);
@@ -91,9 +99,13 @@ int DVMReport(FILE *stream,const char *format,...) {
         if (memcmp(h,_identity.bytes,16)||memcmp(_shared+16,_identity.bytes,16)||returned!=seq||!n||n>DVM_GPU_MAX_BYTES||crc(_shared+DVM_GPU_REPLY_DATA,n)!=c)
             fail("mmio-reply-contract");
         NSData *returnedData=[NSData dataWithBytes:_shared+DVM_GPU_REPLY_DATA length:n];
-        NSDictionary *reply=DVMBMagic(returnedData)==DVM_BIN_REPLY?DVMBDecodeReply(returnedData):[NSJSONSerialization JSONObjectWithData:returnedData options:0 error:error];
+        NSDictionary *reply=DVMBMagic(returnedData)==DVM_BLUR_REPLY?DVMBlurReplyDecode(returnedData):DVMBMagic(returnedData)==DVM_BIN_REPLY?DVMBDecodeReply(returnedData):[NSJSONSerialization JSONObjectWithData:returnedData options:0 error:error];
         if (![reply isKindOfClass:NSDictionary.class]||[reply[@"seq"] unsignedLongLongValue]!=seq) fail("mmio-reply-json");
+#ifdef DVM_DRIVER_BLUR
+        (void)polls;blurRPCus+=(now()-started)*1e6;blurDoorbellus+=(completed-submitted)*1e6;
+#else
         fprintf(stderr,"GPU_LOAD_DRIVER_MMIO_RPC seq=%llu op=%s total_us=%.3f doorbell_us=%.3f polls=%llu\n",seq,[request[@"op"] UTF8String],(now()-started)*1e6,(completed-submitted)*1e6,polls);
+#endif
         if (![reply[@"ok"] boolValue]) {
             if (error) *error=[NSError errorWithDomain:reply[@"domain"] code:[reply[@"code"] integerValue] userInfo:@{NSLocalizedDescriptionKey:reply[@"description"]}];
             return nil;

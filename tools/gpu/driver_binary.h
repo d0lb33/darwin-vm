@@ -1,3 +1,4 @@
+#pragma once
 /* Experimental little-endian binary ABI for the already audited luma envelope.
  * Not a general command language. Persistent resource handles identify objects;
  * frame-relative slots carry snapshots, owned by the host until completion.
