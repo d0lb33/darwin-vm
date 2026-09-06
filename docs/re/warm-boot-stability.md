@@ -1,5 +1,13 @@
 # Warm disk boot and application stability — 2026-09-05
 
+## Input transport replaced (2026-09-05, later)
+
+The relay/Recap bridge is superseded by the DVMI2 transport
+(`DARWIN_INPUT_UART=1`, `tools/input/dvm_hid.c`); see
+[native-input.md](native-input.md) "Current transport" for the fresh-boot,
+restore and stall measurements. The Settings launch failure on fresh boots
+described there is the current application-stability blocker.
+
 ## Latest follow-up: percentage, clock, and chronod
 
 The older narrative below is chronological evidence, not the current verdict.

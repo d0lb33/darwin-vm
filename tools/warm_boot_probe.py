@@ -66,6 +66,9 @@ def main():
     model_env = {k: v for k, v in manifest['qemu_env'].items()
                  if k.startswith(('DARWIN_', 'GXFSTAT_'))}
     model_env['DARWIN_TOUCH_EVENTS'] = str(out / 'events.jsonl')
+    if model_env.get('DARWIN_INPUT_UART', '0') != '0':
+        # Native transport: QEMU keeps its own per-run counters/readiness here.
+        model_env['DARWIN_INPUT_STATUS'] = str(out / 'input-status.json')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DARWIN_', 'GXFSTAT_', 'DVM_'))}
     env.update(model_env)
     atomic_json(out / 'launch.json', dict(format='darwin-vm-qemu-launch-v1', argv=command, env=model_env))
@@ -74,7 +77,7 @@ def main():
     counts = collections.Counter(presentations=0, completions=0, panics=0)
     seen = set()
     patterns = ['Early boot complete', 'AP DRIVER START', 'SpringBoard',
-                'backboardd', 'DVM_INPUT_READY', 'panic(cpu',
+                'backboardd', 'DVM_INPUT_READY', 'DVMI2R R', 'panic(cpu',
                 'rebooting due to critical process crashes', 'rejected unsupported']
     if args.stop_on and args.stop_on not in patterns:
         patterns.append(args.stop_on)

@@ -9,6 +9,14 @@ Settings crash evidence, and remaining stability gates, read
 `docs/re/warm-boot-stability.md`. A rendered-RAM restore is not evidence of
 an independent disk boot.
 
+For explicit native/patched image construction, use
+`tools/rootfs/rebuild_persistent_parent.sh --profile native|patched` and read
+`tools/rootfs/PROFILES.md`. Native adds no Apple-userspace patches or runtime
+helpers; patched stages the reviewed compatibility fixes. Neither profile
+marks Setup complete. Both profiles use the native SPMI/PMU RTC with
+`DARWIN_RTC_PV=0`; patched retains the separate software clock-rendering fix.
+The legacy positional rebuild remains storage-only.
+
 Use saved RAM/device checkpoints for diagnosis: reproducing Settings crashes,
 inspecting services, testing input, and trying debugger hypotheses. Reserve
 fresh disk boots for validating persistent fixes, startup ordering, initial

@@ -133,6 +133,12 @@ EMULATED_FEATURES = {
   # rtbuddy-v2, so AppleSEPManager drives it instead of RTBuddy; SEP speaks its
   # own protocol above the mailbox, not RTKit, and we do not emulate that.
   'sep': ['arm-io/sep', 'arm-io/dart-sep'],
+  # SPMI controller (AppleSPMIController, "aapl,spmi") and the Dialog PMU on
+  # it ("pmu,spmi"), whose AppleDialogSPMIPMURTC publishes the real IORTC
+  # calendar provider. darwin_spmi.c / darwin_pmu.c model the T8140 Gen3
+  # queue registers and the 32,768 Hz upcounter; see
+  # docs/re/native-rtc-spmi.md. fixup_spmi() trims the other SPMI children.
+  'spmi': ['arm-io/nub-spmi0'],
 }
 KEEP_COMPAT_PATHS = set()
 EPHEMERAL_DATA_BLOCKS = None
@@ -182,6 +188,24 @@ def drop_exclave_routes(d):
     for nub in c.children:
       if 'routes' in nub.props:
         del nub.props['routes']
+
+def fixup_spmi(d):
+  # -enable spmi keeps "compatible" on /arm-io/nub-spmi0 and all of its
+  # children. Only the PMU ("pmu,spmi" -> AppleDialogSPMIPMU, the IORTC
+  # provider) is modelled; the other child on this tree is "btm,phone"
+  # (AppleBTM, baseband telemetry), which would issue SPMI traffic to a slave
+  # that does not exist. Strip everything but the PMU so it never binds.
+  if 'arm-io/nub-spmi0' not in KEEP_COMPAT_PATHS or 'nub-spmi0' not in d['arm-io']:
+    return
+  spmi = d['arm-io']['nub-spmi0']
+  for c in spmi.children:
+    compat = c.props.get('compatible')
+    if compat is None:
+      continue
+    if isinstance(compat, str):
+      compat = compat.encode('utf8')
+    if not compat.startswith(b'pmu,spmi'):
+      del c.props['compatible']
 
 def fixup_darts(d):
   # SPTM bootstraps every DART whose node still has a compatible, and expects
@@ -645,11 +669,17 @@ def fixup(d, nvram_file):
   # checks for an "rtc" node in the dtree root by calling IODTMatchNubWithKeys.
   # If it finds the rtc nub, it calls IOService::publishResource to publish a
   # fake RTC, allowing us to skip the 30 second timeout in IOKitInitializeTime.
-  d.props['no-rtc'] = "<NULL>"
-  rtc_node = ADTNode()
-  rtc_node.props['name'] = 'rtc'
-  rtc_node.props['__placeholder_val'] = "<NULL>"
-  d.children.append(rtc_node)
+  #
+  # With -enable spmi the native AppleDialogSPMIPMURTC (AppleARMRTC::start,
+  # 0xfffffff0085db0e8) publishes the real IORTC, so the placeholder and the
+  # no-rtc flag are left out; a second, fake IORTC would only mask a failure
+  # of the native path.
+  if 'arm-io/nub-spmi0' not in KEEP_COMPAT_PATHS:
+    d.props['no-rtc'] = "<NULL>"
+    rtc_node = ADTNode()
+    rtc_node.props['name'] = 'rtc'
+    rtc_node.props['__placeholder_val'] = "<NULL>"
+    d.children.append(rtc_node)
 
   # This fixes panic(cpu 0 caller 0xfffffff008b8e7b8): "AMFI: No PMGR?\n" @ConfigurationSettings.cpp:388
   d['defaults'].props['vmm-present'] = "u32:1"
@@ -687,6 +717,7 @@ def fixup(d, nvram_file):
     ctrr.props['write-disable-reg-value'] = "u32:1"
 
   del_compat(d)
+  fixup_spmi(d)
   drop_exclave_routes(d)
   fixup_darts(d)
   fixup_iops(d)
