@@ -106,12 +106,25 @@ superseded.
 
 ## What is still open
 
-- The definitive stall (HVF_KC_LONG1, 600 s) is right after
-  `AppleOLYHAL::start ... bailing` (wlan), before the SMC/RTBuddy
-  coprocessor and the ignition sequence that follow it in TCG. The ASC
-  mailbox model receives zero traffic, so a driver is blocked before it
-  ever pokes the coprocessor. This is a correctness bug, not slowness:
-  it hangs identically with interrupts disabled and with counter scaling.
+- ROOT CAUSE of the post-mount stall was a DEVICE-TREE CONFIG BUG, not the
+  bridge. `NATIVE_DRAM_LOW1.dtree` was built with no `-enable` flags, so
+  `dt_fixup.py`'s `del_compat` stripped `compatible` from every node except
+  `aic`/`uart`. With `aapl,spmi` gone from `nub-spmi0`, `darwin_spmi_create`
+  returned NULL, the SPMI/PMU model was never created, and
+  `AppleDialogSPMIPMU` polled the unmodelled controller (PA 0x385200000,
+  read as 0 by `darwin-unimp`) forever. Fixed by booting a tree that keeps
+  the SPMI compatible: `native_dram_tree.py --input firmware/dtree
+  --base 0x800000000` (firmware/dtree is already dt_fixup-patched and keeps
+  it). With it (`HVF_KC_SPMI1/2`): the SPMI model is created, the FIRST
+  native AIC interrupt is delivered, and the boot runs `Primary PMU
+  detected`, `AppleARMRTC started`, the RTC tick, `CoreAnalyticsHub`, and
+  reaches `RTBuddy(SMC): start`. The proper fix is to rebuild the native
+  tree from the raw IPSW DeviceTree with `-enable spmi` (plus smc/sep) and
+  rebase; `firmware/dtree` is already patched so `dt_fixup` refuses it.
+- Next stall: the SMC coprocessor RTKit handshake over the ASC mailbox.
+  The guest writes the power-on doorbell (`asc(SMC) 0x08114 <- 0x20001`)
+  then waits; the model must send HELLO and raise its AIC interrupt as it
+  does under TCG. Same coprocessor-bringup class as SPMI.
 - Reaching the restore shell natively and then `Early boot complete` on
   the system volume. The blocker is a stall in IOKit driver start-up, not
   interrupt delivery: `HVF_KC_BOOT33` with `DARWIN_AIC_DEBUG=1` shows the
