@@ -3,6 +3,11 @@
 #include <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <pthread/qos.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <spawn.h>
+#include <sched.h>
 #include <time.h>
 #include <unistd.h>
 int DVMRunLuma(id<MTLDevice>, NSData *, unsigned);
@@ -24,6 +29,25 @@ static uint32_t crc(const void *data, size_t n) {
 static void fail(const char *s) {
     fprintf(stderr, "GPU_LOAD_ERROR driver=%s\n", s);
     exit(1);
+}
+static void (*activityEnd)(void);
+static void activityBegin(void) {
+    // Explicitly account for work outside XPC message delivery. In particular,
+    // the supervisor is working while it waits for its child, not idle.
+    typedef struct { int32_t pid, priority; uint64_t userData; int32_t limit; uint32_t state; } Entry;
+    int (*control)(uint32_t,int32_t,uint32_t,void *,size_t) = dlsym(RTLD_DEFAULT,"memorystatus_control");
+    void (*begin)(void) = dlsym(RTLD_DEFAULT,"xpc_transaction_begin");
+    activityEnd = dlsym(RTLD_DEFAULT,"xpc_transaction_end");
+    Entry before = {0}, after = {0};
+    if (!control || !begin || !activityEnd ||
+        control(1,getpid(),0,&before,sizeof(before)) != sizeof(before) || before.pid != getpid())
+        fail("activity-query");
+    begin();
+    if (control(1,getpid(),0,&after,sizeof(after)) != sizeof(after) || after.pid != getpid())
+        fail("activity-readback");
+    fprintf(stderr,"GPU_LOAD_DRIVER_ACTIVITY before_priority=%d before_state=%x after_priority=%d after_state=%x\n",
+            before.priority,before.state,after.priority,after.state);
+    if ((after.state & 8) && !(after.state & 0x20)) fail("activity-not-dirty");
 }
 static void memoryBudget(void) {
     // XNU kern_memorystatus.h: commands 7/8, 16-byte properties structure.
@@ -209,11 +233,46 @@ static NSData *library(void) {
     __typeof__(&name) p_##name = dlsym(lib, #name);                                                \
     if (!p_##name)                                                                                 \
     fail("symbol-" #name)
-int main(void) {
+int main(int argc, char **argv) {
     @autoreleasepool {
         setvbuf(stderr, NULL, _IONBF, 0);
         fprintf(stderr, "GPU_LOAD_DRIVER_START version=1 pid=%d\n", getpid());
+        // Match the existing native input helper's interactive workload policy.
+        int priorityResult=setpriority(PRIO_PROCESS,0,-20);
+        int priorityError=priorityResult?errno:0;
+        int qosResult=pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE,0);
+        fprintf(stderr,"GPU_LOAD_DRIVER_SCHED nice_result=%d nice_errno=%d qos_result=%d\n",priorityResult,priorityError,qosResult);
+        if(priorityResult||qosResult)fail("interactive-scheduling");
         memoryBudget();
+        activityBegin();
+        if (argc == 1) {
+            // A launchd exit is otherwise silent on this guest. Keep an explicit
+            // parent so SIGKILL and normal worker exit have observable evidence.
+            int (*spawn)(pid_t *, const char *, const posix_spawn_file_actions_t *,
+                         const posix_spawnattr_t *, char *const[], char *const[]) =
+                dlsym(RTLD_DEFAULT, "posix_spawn");
+            if (!spawn) fail("spawn-symbol");
+            pid_t child = 0;
+            char *childArgs[] = {argv[0], "--worker", NULL};
+            char *childEnv[] = {NULL};
+            int rc = spawn(&child, argv[0], NULL, NULL, childArgs, childEnv);
+            if (rc) {
+                fprintf(stderr, "GPU_LOAD_ERROR spawn=%d\n", rc);
+                return 1;
+            }
+            fprintf(stderr, "GPU_LOAD_DRIVER_CHILD pid=%d\n", child);
+            int status = 0;
+            pid_t waited;
+            do { waited = waitpid(child, &status, 0); } while (waited < 0 && errno == EINTR);
+            fprintf(stderr, "GPU_LOAD_DRIVER_CHILD_EXIT pid=%d waited=%d status=%x exit=%d signal=%d\n",
+                    child, waited, status, WIFEXITED(status) ? WEXITSTATUS(status) : -1,
+                    WIFSIGNALED(status) ? WTERMSIG(status) : 0);
+            if (waited != child || !WIFEXITED(status) || WEXITSTATUS(status))
+                fail("worker-exit");
+            activityEnd();
+            return 0;
+        }
+        if (argc != 2 || strcmp(argv[1], "--worker")) fail("arguments");
         fprintf(stderr, "GPU_LOAD_DRIVER_STAGE iokit\n");
         void *lib =
             dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_LOCAL);
@@ -281,14 +340,22 @@ int main(void) {
         fprintf(stderr, "GPU_LOAD_DRIVER_WAIT_READY\n");
         until = now() + 420;
         uint32_t ready = 0;
+        unsigned poll = 0;
         do {
+            ++poll;
+            BOOL trace = poll <= 8 || !(poll % 1024);
+            if (trace) fprintf(stderr, "GPU_LOAD_DRIVER_POLL n=%u phase=read-enter t=%.6f\n", poll, now());
             [ns io:0 bytes:page length:Page offset:0];
             if (memcmp(page, ns.identity.bytes, 64) || memcmp(page + 64, digest, 32))
                 fail("session-changed");
             memcpy(&ready, page + 96, 4);
+            if (trace || ready) fprintf(stderr, "GPU_LOAD_DRIVER_POLL n=%u phase=read-return ready=%u t=%.6f\n", poll, ready, now());
             if (ready == 1)
                 break;
-            usleep(250000);
+            // The complete stalled snapshot locates this thread in sched_yield,
+            // after a successful read. Let namespace I/O pace this diagnostic
+            // wait without adding another voluntary scheduler wait. A production
+            // transport still needs event-driven notification instead of polling.
         } while (now() < until);
         if (ready != 1)
             fail("display-readiness-deadline");
@@ -335,6 +402,7 @@ int main(void) {
         fprintf(
             stderr,
             "GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0\n");
+        activityEnd();
         return 0;
     }
 }

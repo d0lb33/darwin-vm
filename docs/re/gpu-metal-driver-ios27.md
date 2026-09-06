@@ -6,6 +6,12 @@ public Metal selectors and structures. It is **not yet a system-discovered
 Metal driver**, and SpringBoard, QuartzCore and Liquid Glass do not use it.
 The retained software UI renderer is still the normal display path.
 
+Latest result: native SMC and original powerd are integrated on the retained
+lineage. BUILD18's batched compute path passed two consecutive fresh-disk boots
+with launchd activation after boot (SMC_LATE1/LATE2), eight verified submissions
+each. End-to-end medians were 11.452 and 11.535 ms. Early-boot polling remains
+unreliable; global driver discovery and Liquid Glass acceleration are unfinished.
+
 ## Baseline and isolation
 
 Project main `0d8da5c` and QEMU main `8b46eb6` were the starting points.
@@ -312,3 +318,212 @@ Durable records (including failed runs):
 `/Users/jdolbe1/dvm-artifacts/research/gpu-metal-driver-ios27-20260906/`.
 The archive index records each source path and SHA-256; disks, RAM, binaries
 and Apple shader libraries remain excluded.
+
+## Retained-lineage SMC migration and readiness isolation
+
+`METAL_DRIVER_SMC_INSTALL1` ran the existing native-battery guarded installer
+on a fresh child of `METAL_DRIVER_INSTALL5`. It verified the guarded powerd
+and BUILD12 launchd cache, restored original powerd
+(`31254642770ac63ce22a55a5717246cf2289297f478f7ab753d15b6f88436268`),
+and removed only the virtual publisher job/files. `finalize_driver_smc.py`
+verified the original parent chain, all pinned inputs, successful install
+marker, sealed child and exact launchd-job delta. The resulting top child
+hash is `4a0b85577bf3ab39500db100e7a601c8c047a0318ce6fc35362c66e1ace71058`.
+The native SMC/SPMI system tree from the durable default is extended only
+with NS6; original SPTM/TXM are hash-equal to the retained baseline.
+
+`METAL_DRIVER_SMC_RUN1` used unchanged BUILD12 guest binaries. Native IOPS
+reported an internal battery, Current Capacity 80, Max Capacity 100,
+Is Charging 1, Is Present 1 and AC Power (serial lines 752–790). The captured
+lockscreen is legible with the green charging icon; native input pings continue.
+The host released readiness at peer elapsed 120.165 s. No guest READY followed,
+so the new explicit 30-second acknowledgement deadline stopped the run.
+SMC alone did not resolve this observed startup failure.
+
+BUILD13 adds a posix_spawn supervisor with waitpid exit/signal reporting,
+interactive scheduling matching tools/input/dvm_hid.c, and readiness read/sleep
+traces. Both scheduling calls returned zero in parent PID68 and child PID115
+in `METAL_DRIVER_SMC_RUN2`. Both verified a 64 MiB live limit; the spawned
+child initially had 3376 MiB, unlike the launchd parent's 6 MiB.
+All 43 readiness reads returned successfully. The last marker at host 25.196 s
+was `POLL n=43 phase=sleep-enter t=23.029463`; no sleep-return or child-exit
+marker followed while native input pings continued. The run was interrupted
+for this explicit no-progress condition (diagnostic-stop.json), not counted
+as a GPU or latency pass. This narrows the observed boundary to sleep or task
+scheduling/lifetime; it does not prove the kernel timer is defective.
+
+BUILD14 keeps the supervisor and scheduling but replaces the readiness-loop
+usleep with sched_yield after each synchronous namespace read. Read traces
+are sampled after the first eight iterations to bound logging overhead.
+This is a diagnostic wait policy with potentially material CPU cost, not an
+accepted production idle strategy. Transport completion polling and the Metal
+completion callback contract remain unchanged. `prepare_driver_update.py`
+stages driver-only updates, checks every old binary and cache preimage before
+any writes, and requires the old battery publisher to be absent.
+
+Reproduction inputs and logs are under `/tmp/dvm/METAL_DRIVER_SMC_BASE1/`.
+Build/install mapping: BUILD13 → STAGE8 → INSTALL6 → SMC_RUN2;
+BUILD14 → STAGE9 → INSTALL7 → SMC_RUN3. Both builds passed strict imports,
+signatures and all 11 driver host tests; the 79 project regressions passed.
+
+SMC_RUN3 / BUILD14 **passed** eight two-pass submissions with no debugger, RAM
+restore or diagnostic pauses. It verified every guest intermediate/final value,
+zero host resources and supervisor `exit=0 signal=0`. Work including upload,
+encoding, completion and readback was 39,093–73,299 µs; the CPU reference was
+520–1,148 µs. This tiny reduction is slower through the driver. The unchanged
+SMC_RUN4 repeat stopped progressing after the 2,048-read sample and failed
+the 30-second host-readiness acknowledgement deadline. Therefore removing
+usleep is **not a repeatable startup fix**, nor proof of a timer defect.
+
+BUILD15 batches dirty texture uploads, buffer snapshots, encoded commands and
+requested buffer readbacks into one submission RPC. The host validates every
+transfer and dispatch before mutating storage or committing GPU work; malformed
+second commands/uploads/readbacks leave the first upload unapplied. Returned
+CPU shadows are published only after all readback entries validate. One in-flight
+command buffer remains the supported limit. Standalone texture reads flush a
+pending CPU upload first. Real host execution and negative atomicity tests pass.
+
+BUILD16 / INSTALL8 / SMC_RUN5 added live memory-priority queries and an explicit
+priority-80 control. Parent PID68 moved from priority10/state0x98 to 80/0x98;
+child PID115 moved from 180/0x80 to 80/0x80. The helper again stopped after
+the 2,048-read sample and failed readiness; no GPU timing was produced. CPU
+scheduling settings, memory-band priority and activity tracking are separate
+contracts. The control did not establish a cure.
+
+BUILD17 removes the priority override and holds an explicit XPC transaction
+for each process's work. SMC_RUN6 observed the parent change from priority10,
+state0x98 to priority40, state0xb8, including the dirty/activity flag. The child
+retained priority180/state0x80. The activity contract worked, but the readiness
+loop again stopped after the 2,048-read sample. This too failed readiness and
+did not execute the new batched GPU path in the guest.
+
+Source contracts: [Apple xpc_transaction_begin](https://developer.apple.com/documentation/xpc/xpc_transaction_begin%28%29),
+[XNU memorystatus definitions](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/kern_memorystatus.h),
+and [one-PID priority queries](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_memorystatus.c).
+Runtime flags above are observed; attributing the stall to idle exit, jetsam,
+a blocked I/O call or kernel scheduling remains unproven.
+
+`--driver-failure-snapshot` now captures all 12 GiB under one pause on failure
+and inspects both driver processes plus control processes before teardown.
+Its diagnostic-only readiness progress bound is 35 seconds, allowing sampled
+read traces but stopping a stalled loop before the normal display deadline.
+No guest memory, registers or call state are modified.
+
+
+## Native-SMC failure snapshots and batched driver status
+
+BUILD17 / SMC_DIAG1 captured both live helper processes in a complete paused
+12 GiB image. The worker's saved user PC resolves by an exact 64-byte shared
+cache match (slide 0x16de0000) to `libsystem_kernel:_swtch_pri+8`; its caller is
+`libsystem_pthread:_cthread_yield+36`, and the helper return site follows
+`_sched_yield`. This establishes the saved call boundary, not a defective timer
+or dead worker. BUILD18 removed that explicit yield. SMC_RUN7 still failed
+before GPU readiness, so this was not a fix.
+
+SMC_DIAG2 keeps BUILD18 and adds only a bounded QEMU ANS trace (limit 65,536;
+default remains eight). It records 64,926 occurrences each of submit, backend
+entry/return, DMA, CQE, IRQ and queue-head acknowledgement; the trace limit was
+not exhausted. The last request (CID38) returned zero, DMA/CQE writes succeeded,
+and the guest moved its completion head from seven to eight. This excludes an
+unpublished completion for that recorded request, not every possible transport
+bug.
+
+The paused CPU0 registers identify the worker's actual kernel stack:
+SP `0xffffffe9c1bb7300`, FP `0xffffffe9c1bb7330`, PC `0xfffffff02abec81c`.
+Walking from that live FP yields 17 return addresses through the namespace
+memory-descriptor preparation path and `_Xio_connect_method`. With the project
+kernel slide 0x20000000, the live instruction is a load in a time/accounting
+sequence called from memory-pressure accounting, not an ANS wait instruction.
+The worker's raw scheduler state is 4 and wait_event is zero. One CPU sample
+cannot establish a persistent spin, scheduler starvation or deadlock. The
+namespace user call had not returned to the helper's sampled logging boundary.
+
+`analyze_driver_failure.py` reproduces the live frame walk and shared-cache
+slide offline from the frozen image. It also recovers the actual proc names:
+the first stack-capture version accidentally used a stack filename as the
+next process's report label. The raw proc confirms PID68 is the supervisor;
+PID115 is the worker. The collector variable reuse is fixed. Original reports
+are retained, with corrections in the derived analysis, not rewritten.
+
+BUILD18's batched protocol passed all 11 real-host/negative driver tests, but
+these failed early-launch runs did **not** execute it in the guest. They are
+not latency measurements. SMC_RUN3 remains the successful unbatched native-SMC
+run; its 39–73 ms tiny workload was slower than its 0.52–1.15 ms CPU reference.
+
+A final isolated startup control, STAGE13 / INSTALL11, changes only the driver
+job to RunAtLoad=false, StartInterval=180, LaunchOnlyOnce=true. Guest binaries
+remain BUILD18. The host still requires native display plus stable fresh HID
+acknowledgements, and has a separate bounded activation deadline. This removes
+the long early-boot polling interval from the experiment; it is not an approved
+production activation mechanism or a relaxation of the GPU output oracle.
+
+Reproduction for this control:
+
+```sh
+python3 tools/gpu/prepare_driver_update.py --before-build /tmp/dvm/METAL_DRIVER_BUILD18 --build /tmp/dvm/METAL_DRIVER_BUILD18 --cache /tmp/dvm/METAL_DRIVER_SMC_INSTALL1/payload/nb-launchd-after --system-tc /tmp/dvm/METAL_DRIVER_STAGE12/system.tc --out /tmp/dvm/METAL_DRIVER_STAGE13 --start-interval 180
+python3 tools/gpu/run_guest_install.py --manifest /tmp/dvm/METAL_DRIVER_INSTALL10/warm-manifest.json --stage /tmp/dvm/METAL_DRIVER_STAGE13 --tag METAL_DRIVER_INSTALL11
+python3 tools/gpu/run_guest_load.py /tmp/dvm/METAL_DRIVER_INSTALL11/warm-manifest.json --tag METAL_DRIVER_SMC_LATE1 --seconds 300 --driver-worker /tmp/dvm/METAL_DRIVER_BUILD18/driver_host --library-cache /tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib --aux-poll-ms 1 --driver-late-launch
+python3 tools/gpu/analyze_driver_failure.py /tmp/dvm/METAL_DRIVER_SMC_DIAG2 --cache-dir /Users/jdolbe1/dvm-artifacts/extract/dyld
+```
+
+Artifacts under `/tmp/dvm/METAL_DRIVER_SMC_BASE1` include exact build/install
+logs; each trial records launch.json, result.json, serial, worker and device
+logs. Full RAM remains in each diagnostic run's failure-snapshot/ram directory.
+All installers verify the complete parent chain again after shutting down their
+owned VM. Native SMC, original powerd, SPTM/TXM, input job and software renderer
+remain on the retained migrated lineage.
+
+
+SMC_LATE1 **passed** with BUILD18: native readiness at 109.601 s, worker READY
+at 203.015 s, eight exact guest-output checks and clean supervisor exit by
+203.482 s. The first poll read ready=1. There was no RAM restore, debugger or
+pause during execution. The final screenshot was inspected: the software
+lockscreen remains legible with the native charging icon. This screenshot is
+not a GPU-rendered lockscreen.
+
+Batched work including upload/encoding/completion/readback was
+9.282–27.278 ms
+(median 11.451 ms), with a CPU-reference
+median of 0.543 ms. All eight
+GPU-path timings were slower than the tiny CPU reference. Seven fit 16.667 ms;
+this is not a UI-frame or scrolling result. Launch timing differs from the
+unbatched comparison, so the difference is not a controlled batching speedup.
+The current path uses 21 RPCs including creation/retirement, of which eight are
+batched submissions; persistent host resources retire to zero.
+
+
+The next implementation dependency is a render-target/encoder path through this
+same guest frontend, with explicit IOSurface ownership and completion handling.
+Global Metal discovery and the private interfaces exercised by QuartzCore are
+still unresolved; this implementation does not make the lockscreen or Liquid
+Glass use the host GPU. The disk-backed polling transport, CPU shadows and
+single in-flight buffer are experimental limits. A shared-memory command queue
+with completion notification, resource lifetime rules and reset handling remains
+necessary to evaluate sustained UI workloads. Existing NS6 checkpoint blocking
+remains in force; none of these cold-boot successes establishes migration of
+live host Metal objects. The software display stays available.
+
+
+SMC_LATE2, the unchanged BUILD18 / INSTALL11 repeat, **passed** with eight
+verified submissions and zero live host resources, finishing at 200.162 s.
+End-to-end work was 8.613–28.870 ms, median 11.535 ms; CPU-reference median
+was 0.523 ms. Across both late-launch trials all 16 outputs and resource
+retirements passed; 14/16 tiny-work timings fit 16.667 ms, and all 16 were slower
+than their CPU reference. Two successes establish this bounded configuration,
+not arbitrary-start reliability or a near-native UI performance claim.
+
+Final checks: 79 project regression tests and all 11 driver tests passed;
+Python compilation, shell syntax and git diff checks passed. QEMU trace change
+is commit `eb8b65b` atop the native-SMC QEMU merge. It does not change device
+completion behavior. The successful late trials used the rebuilt immutable
+native-SMC binary without the longer diagnostic trace; exact binary hashes
+are recorded in final-binary-provenance.json.
+
+Durable evidence for this phase:
+`/Users/jdolbe1/dvm-artifacts/research/gpu-metal-driver-native-smc-20260906/`.
+The archive preserves successful and failed trial records, source snapshots,
+installation provenance and measurements with SHA-256. Full RAM/disks, Apple
+libraries and executables remain outside the archive; the large DIAG2 ANS log
+is represented by its full SHA-256, exact stage counts and final trace records
+in failure-analysis.json. Both owned late-test VMs were shut down. The original
+migrated baseline and unrelated VMs were not modified.

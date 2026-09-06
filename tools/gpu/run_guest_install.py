@@ -89,6 +89,9 @@ def main():
     verify_backing_chain(m['disk']['backing_chain'])
     derived = {key:m[key] for key in ('qemu_argv','qemu_inputs','qemu_env')}
     derived.update(format='darwin-vm-warm-disk-v1', created_unix=time.time(), source_manifest=str(a.manifest.resolve()))
+    for key in ('battery_source', 'driver_smc_migration'):
+        if key in m:
+            derived[key] = m[key]
     if (a.stage/'provenance.json').exists():
         derived['guest_installation']=json.loads((a.stage/'provenance.json').read_text())
     derived['disk'] = dict(path=str(disk.resolve()),

@@ -67,6 +67,18 @@ class HostTests(unittest.TestCase):
         for bad in variants:
             self.assertFalse(self.rpc('submit',commands=[first,bad])['ok'])
             self.assertEqual(self.rpc('stats')['submissions'],0)
+        poison=base64.b64encode(bytes([0xa5])*96).decode()
+        upload=dict(buffer=partial,data=poison)
+        for commands,uploads,readbacks in (
+            ([first,variants[0]],[upload],[result]),
+            ([first,second],[upload,dict(buffer=result,data=poison)],[result]),
+            ([first,second],[upload],[999999]),
+            ([first,second],[upload,upload],[result]),
+            ([first,second],[upload],[result,result]),
+        ):
+            self.assertFalse(self.rpc('submit',commands=commands,uploads=uploads,readbacks=readbacks)['ok'])
+            self.assertEqual(self.rpc('stats')['submissions'],0)
+            self.assertEqual(base64.b64decode(self.rpc('read',buffer=partial)['data']),bytes(96))
     def test_oversized_frame(self):
         self.p.stdin.write(struct.pack('<I',2*1024*1024+1));self.p.stdin.flush()
         self.assertEqual(self.p.wait(timeout=5),3)
@@ -83,7 +95,7 @@ class DriverTests(unittest.TestCase):
     def test_failure_and_ownership_contract(self):
         result=subprocess.run([str(BUILD/'driver_contract_test')],capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)
-        self.assertIn('no_false_submit=1 retirement=1',result.stderr)
+        self.assertIn('no_false_success=1 retirement=1',result.stderr)
     def test_public_api_two_pass_execution(self):
         forward_r,forward_w=os.pipe();back_r,back_w=os.pipe()
         out=BUILD/'driver-host-test';out.mkdir(exist_ok=True)

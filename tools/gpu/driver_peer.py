@@ -29,7 +29,7 @@ class DriverPeer:
     def __init__(self,out,worker,library):
         self.out=Path(out);self.started=time.monotonic();self.records=[];self.seen=set()
         self.header=(b'DVM-METAL-DRIVER-v1\0'+os.urandom(32)).ljust(64,b'\0')
-        self.last_packet=None;self.ready_since=None;self.ready_identity=None;self.ready_acks=0;self.released=False;self.buffer=b''
+        self.last_packet=None;self.ready_since=None;self.ready_identity=None;self.ready_acks=0;self.released=False;self.released_at=None;self.buffer=b''
         self.library=Path(library);self.worker=Path(worker)
         raw=self.library.read_bytes()
         if len(raw)!=2705796 or hashlib.sha256(raw).hexdigest()!=AIR_SHA:raise ValueError('exact AIR cache mismatch')
@@ -58,7 +58,7 @@ class DriverPeer:
             if self.ready_since is None or identity!=self.ready_identity:
                 self.ready_since=time.monotonic();self.ready_identity=identity;self.ready_acks=status.get('acked',0)
             if time.monotonic()-self.ready_since>=10 and status.get('acked',0)>self.ready_acks:
-                os.pwrite(self.fd,struct.pack('<I',1),96);self.released=True
+                os.pwrite(self.fd,struct.pack('<I',1),96);self.released=True;self.released_at=time.monotonic()
                 (self.out/'driver-readiness.json').write_text(json.dumps(dict(elapsed=time.monotonic()-self.started,presents=presents,input_status=status,stable_seconds=10,fresh_ack=True,scope='native-presentation-and-helper-ready-not-home-or-gesture'),indent=2)+'\n')
         else:self.ready_since=None
     def pump(self):
@@ -102,6 +102,13 @@ class DriverPeer:
         runs=[e['line'] for e in events if 'GPU_LOAD_DRIVER_RUN ' in e['line']]
         submits=[r for r in self.records if r['op']=='submit']
         reads=[r for r in self.records if r['op']=='read' and 'buffer' in r['request'] and len(base64.b64decode(r['reply'].get('data','')))==16]
+        if submits and all('buffers' in r['reply'] and r['request'].get('readbacks') for r in submits):
+            reads=[]
+            for submit in submits:
+                candidates=[data for data in submit['reply']['buffers'].values()
+                    if len(base64.b64decode(data,validate=True))==16]
+                if len(candidates)!=1:raise ValueError('missing unique final batched buffer')
+                reads.append(dict(reply=dict(data=candidates[0])))
         if len(runs)!=8 or len(submits)!=8 or len(reads)!=8:raise ValueError('missing eight two-pass guest results')
         for i,(row,submit,read) in enumerate(zip(runs,submits,reads),1):
             expected=','.join(f'{n:08x}' for n in struct.unpack('<4I',base64.b64decode(read['reply']['data'])))

@@ -23,6 +23,7 @@ extra={
  'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['OBJC_CLASS_$_NSBundle','OBJC_CLASS_$_NSMutableDictionary','OBJC_CLASS_$_NSArray','OBJC_CLASS_$_NSConstantDictionary'],
  'usr/lib/libSystem.tbd':['__memset_chk','bzero','clock_gettime','usleep','getpid','setvbuf','posix_memalign','arc4random','free','mach_task_self_',
  'dispatch_queue_create','dispatch_sync','dispatch_async','dispatch_get_global_queue','dispatch_group_create','dispatch_group_enter','dispatch_group_leave','dispatch_group_wait',
+ 'sched_yield','dispatch_queue_attr_make_with_qos_class','pthread_set_qos_class_self_np','setpriority',
  'dispatch_semaphore_create','dispatch_semaphore_signal','dispatch_semaphore_wait','dispatch_time','_NSConcreteStackBlock','_Block_object_assign','_Block_object_dispose','fwrite'],
  'usr/lib/libobjc.tbd':['objc_retainBlock','objc_sync_enter','objc_sync_exit'],
 }

@@ -432,6 +432,45 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
             @"texture" : texture ?: NSNull.null
         }];
     }
+    // Validate every transfer and dispatch before changing resources or committing.
+    NSArray *uploads = r[@"uploads"] ?: @[], *readbacks = r[@"readbacks"] ?: @[];
+    if (![uploads isKindOfClass:NSArray.class] || uploads.count > kMaxObjects ||
+        ![readbacks isKindOfClass:NSArray.class] || readbacks.count > kMaxObjects)
+        return HostError(seq, EINVAL, @"invalid batch transfers");
+    NSMutableArray *transfers = [NSMutableArray array], *reads = [NSMutableArray array];
+    NSMutableSet *written = [NSMutableSet set], *readHandles = [NSMutableSet set];
+    NSUInteger totalRead = 0;
+    for (id raw in uploads) {
+        if (![raw isKindOfClass:NSDictionary.class]) return HostError(seq, EINVAL, @"invalid batch upload");
+        NSDictionary *u = raw;
+        BOOL buffer = u[@"buffer"] != nil;
+        DVMEntry *entry = Entry(host, u[buffer ? @"buffer" : @"texture"], buffer ? @"buffer" : @"texture");
+        id encoded = u[@"data"];
+        NSData *data = [encoded isKindOfClass:NSString.class]
+            ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil;
+        uint64_t row = 0;
+        if (!entry || (buffer && u[@"texture"]) || !data || data.length != entry.textureBytes ||
+            [written containsObject:@(entry.handle)] ||
+            (!buffer && (!Number(u[@"row"], &row) || row != entry.row)))
+            return HostError(seq, EINVAL, @"invalid or duplicate batch upload");
+        [written addObject:@(entry.handle)];
+        [transfers addObject:@{@"entry":entry, @"data":data}];
+    }
+    for (id handle in readbacks) {
+        DVMEntry *entry = Entry(host, handle, @"buffer");
+        if (!entry || [readHandles containsObject:handle] || entry.textureBytes > 1024*1024-totalRead)
+            return HostError(seq, EINVAL, @"invalid, duplicate or oversized batch readback");
+        totalRead += entry.textureBytes;
+        [readHandles addObject:handle]; [reads addObject:entry];
+    }
+    for (NSDictionary *transfer in transfers) {
+        DVMEntry *entry = transfer[@"entry"]; NSData *data = transfer[@"data"];
+        if ([entry.kind isEqual:@"buffer"])
+            memcpy([(id<MTLBuffer>)entry.object contents], data.bytes, data.length);
+        else
+            [(id<MTLTexture>)entry.object replaceRegion:MTLRegionMake2D(0,0,entry.width,entry.height)
+                mipmapLevel:0 withBytes:data.bytes bytesPerRow:entry.row];
+    }
     id<MTLCommandBuffer> cb = [host.queue commandBuffer];
     for (NSDictionary *v in validated) {
         DVMEntry *p = v[@"pipeline"];
@@ -460,7 +499,13 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
             (unsigned long long)seq, (unsigned long)items.count, (unsigned long)cb.status,
             (unsigned long long)us);
     fflush(stderr);
+    NSMutableDictionary *results = [NSMutableDictionary dictionary];
+    for (DVMEntry *entry in reads) {
+        NSData *data = [NSData dataWithBytes:[(id<MTLBuffer>)entry.object contents] length:entry.textureBytes];
+        results[@(entry.handle).stringValue] = [data base64EncodedStringWithOptions:0];
+    }
     return @{
+        @"buffers" : results,
         @"seq" : @(seq),
         @"ok" : @YES,
         @"status" : @(cb.status),

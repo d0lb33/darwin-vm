@@ -10,7 +10,7 @@ static void check(BOOL b, const char *why) {
 }
 int main(void) {
     @autoreleasepool {
-        __block unsigned handle = 0, submits = 0, releases = 0;
+        __block unsigned handle = 0, attempts = 0, releases = 0;
         dispatch_semaphore_t uploading = dispatch_semaphore_create(0),
                              resume = dispatch_semaphore_create(0);
         NSObject *lock = [NSObject new];
@@ -28,16 +28,13 @@ int main(void) {
                     };
                 if ([op isEqual:@"buffer"])
                     return @{@"handle" : @(++handle)};
-                if ([op isEqual:@"upload"]) {
+                if ([op isEqual:@"submit"]) {
+                    attempts++;
                     dispatch_semaphore_signal(uploading);
                     check(!dispatch_semaphore_wait(
                               resume, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)),
                           "resume upload");
                     return nil; // Even a transport omitting NSError must fail closed.
-                }
-                if ([op isEqual:@"submit"]) {
-                    submits++;
-                    return @{@"status" : @4};
                 }
                 if ([op isEqual:@"release"]) {
                     releases++;
@@ -120,7 +117,7 @@ int main(void) {
         [cb waitUntilCompleted];
         check(failed, "upload failure reaches completion");
         @synchronized(lock) {
-            check(!submits, "no submit after upload failure");
+            check(attempts == 1, "one failed atomic submit, no retry");
         }
         // Any ordinary synchronous device RPC drains retirements queued earlier.
         @autoreleasepool {
@@ -132,7 +129,7 @@ int main(void) {
             check(releases >= 3, "encoded resources retired after completion");
         }
         fprintf(stderr,
-                "DRIVER_CONTRACT_PASS ownership=1 async_error=1 no_false_submit=1 retirement=1\n");
+                "DRIVER_CONTRACT_PASS ownership=1 async_error=1 no_false_success=1 retirement=1\n");
         return 0;
     }
 }

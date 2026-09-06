@@ -52,6 +52,7 @@ static void reject(NSString *s) {
 @property(nonatomic) NSUInteger maxTotalThreadsPerThreadgroup;
 @end
 @interface DVMTexture : DVMObject <MTLTexture>
+@property(nonatomic, strong) NSData *pendingUpload;
 @property(nonatomic) NSUInteger width;
 @property(nonatomic) NSUInteger height;
 @property(nonatomic) MTLPixelFormat pixelFormat;
@@ -286,18 +287,17 @@ static void reject(NSString *s) {
     for (NSUInteger y = 0; y < _height; y++)
         memcpy((uint8_t *)d.mutableBytes + y * [self row], (const uint8_t *)p + y * row,
                [self row]);
-    NSError *e = nil;
-    if (![self.owner call:@{
-            @"op" : @"upload",
-            @"texture" : self.handle,
-            @"row" : @([self row]),
-            @"data" : [d base64EncodedStringWithOptions:0]
-        }
-                    error:&e])
-        reject(e.description);
+    if (self.owner.submissionInFlight) reject(@"texture upload while GPU work is in flight");
+    self.pendingUpload = d;
 }
 - (NSData *)read {
     NSError *e = nil;
+    if (self.pendingUpload) {
+        if (![self.owner call:@{@"op":@"upload", @"texture":self.handle,
+              @"row":@([self row]), @"data":[self.pendingUpload base64EncodedStringWithOptions:0]} error:&e])
+            reject(e.description ?: @"texture upload failed");
+        self.pendingUpload = nil;
+    }
     NSDictionary *r = [self.owner call:@{@"op" : @"read", @"texture" : self.handle} error:&e];
     NSData *d = r ? [[NSData alloc] initWithBase64EncodedString:r[@"data"] options:0] : nil;
     if (!d || d.length != [self row] * _height || [r[@"row"] unsignedIntegerValue] != [self row])
@@ -377,42 +377,54 @@ static void reject(NSString *s) {
     }
     // Encoding is finished; arrays cannot be mutated after commit. Resources
     // remain strongly owned until completion even if the caller releases them.
-    NSMutableArray *uploads = [NSMutableArray array], *buffers = [NSMutableArray array];
+    NSMutableArray *uploads = [NSMutableArray array], *buffers = [NSMutableArray array],
+                   *textures = [NSMutableArray array], *readbacks = [NSMutableArray array];
     for (id o in _resources)
         if ([o isKindOfClass:DVMBuffer.class] && ![buffers containsObject:o]) {
             DVMBuffer *b = o;
             [buffers addObject:b];
+            [readbacks addObject:b.handle];
             [uploads addObject:@{
                 @"op" : @"upload",
                 @"buffer" : b.handle,
                 @"data" : [b.shadow base64EncodedStringWithOptions:0]
             }];
         }
+    for (id o in _resources)
+        if ([o isKindOfClass:DVMTexture.class] && ![textures containsObject:o]) {
+            DVMTexture *t = o;
+            [textures addObject:t];
+            if (t.pendingUpload)
+                [uploads addObject:@{@"texture":t.handle, @"row":@([t row]),
+                    @"data":[t.pendingUpload base64EncodedStringWithOptions:0]}];
+        }
     dispatch_async(_commandQueue.owner.serial, ^{
         @autoreleasepool {
             @try {
                 NSError *e = nil;
-                for (NSDictionary *upload in uploads)
-                    if (!self.commandQueue.owner.transport(upload, &e)) {
-                        e = e ?: error(@"buffer upload failed");
-                        break;
-                    }
-                NSDictionary *r = e ? nil
-                                    : self.commandQueue.owner.transport(
-                                          @{@"op" : @"submit", @"commands" : self.commands}, &e);
+                NSDictionary *r = self.commandQueue.owner.transport(
+                    @{@"op":@"submit", @"commands":self.commands,
+                      @"uploads":uploads, @"readbacks":readbacks}, &e);
                 if (!r || [r[@"status"] integerValue] != MTLCommandBufferStatusCompleted)
                     self.error = e ?: error(@"GPU did not complete");
                 else {
+                    NSDictionary *returned = r[@"buffers"];
+                    if (![returned isKindOfClass:NSDictionary.class] || returned.count != buffers.count)
+                        reject(@"bad batched readback table");
+                    NSMutableArray *decoded = [NSMutableArray array];
                     for (DVMBuffer *b in buffers) {
-                        NSDictionary *read = self.commandQueue.owner.transport(
-                            @{@"op" : @"read", @"buffer" : b.handle}, &e);
-                        NSData *d = read ? [[NSData alloc] initWithBase64EncodedString:read[@"data"]
-                                                                               options:0]
-                                         : nil;
-                        if (d.length != b.length)
-                            reject(e.description ?: @"buffer readback size");
+                        id encoded = returned[b.handle.stringValue];
+                        NSData *d = [encoded isKindOfClass:NSString.class]
+                            ? [[NSData alloc] initWithBase64EncodedString:encoded options:0] : nil;
+                        if (d.length != b.length) reject(@"buffer readback size");
+                        [decoded addObject:d];
+                    }
+                    // Validate all readbacks before publishing any CPU shadow.
+                    for (NSUInteger i = 0; i < buffers.count; i++) {
+                        DVMBuffer *b = buffers[i]; NSData *d = decoded[i];
                         memcpy(b.contents, d.bytes, d.length);
                     }
+                    for (DVMTexture *t in textures) t.pendingUpload = nil;
                 }
             } @catch (NSException *e) {
                 self.error = error(e.reason);
@@ -430,7 +442,7 @@ static void reject(NSString *s) {
             }
             dispatch_group_leave(self.completion);
             for (MTLCommandBufferHandler h in handlers)
-                dispatch_async(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^{
+                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
                     h(self);
                 });
         }
@@ -534,6 +546,7 @@ id<MTLDevice> DVMCreateMetalDevice(DVMMetalRPC rpc) {
         return nil;
     DVMDevice *d = [DVMDevice new];
     d.transport = rpc;
-    d.serial = dispatch_queue_create("org.darwin-vm.metal.transport", DISPATCH_QUEUE_SERIAL);
+    dispatch_queue_attr_t attr=dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,QOS_CLASS_USER_INTERACTIVE,0);
+    d.serial = dispatch_queue_create("org.darwin-vm.metal.transport", attr);
     return d;
 }

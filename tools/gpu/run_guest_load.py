@@ -56,9 +56,15 @@ def main():
     p.add_argument('--library-cache',type=Path)
     p.add_argument('--faults',action='store_true',help='reliable mode: inject one corrupt response and drop two ACKs')
     p.add_argument('--surface-worker',type=Path,help='real Metal peer for the guest IOSurface demo')
+    p.add_argument('--driver-failure-snapshot',action='store_true',help='capture complete RAM only after an owned driver failure')
     p.add_argument('--driver-worker',type=Path,help='process-local Metal driver peer; requires display/HID readiness')
+    p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.driver_late_launch and (not a.driver_worker or a.seconds != 300):
+        p.error('late launch requires driver worker and --seconds 300')
+    if a.driver_failure_snapshot and not a.driver_worker:
+        p.error('failure snapshot requires driver worker')
     if a.driver_worker:
         if not a.library_cache or a.worker or a.surface_worker or a.aux_probe or a.aux_latency or a.aux_header_only or a.aux_post_boot or a.keep_paused or a.surface_observe_display:
             p.error('driver requires library cache and automatic teardown, no other workload')
@@ -95,6 +101,8 @@ def main():
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40 or not 1 <= a.seconds <= 1200:
         p.error('invalid tag or seconds (1..1200)')
     m = json.loads(a.manifest.read_text())
+    if a.driver_late_launch and m.get('guest_installation', {}).get('start_interval') != 180:
+        p.error('late launch requires a manifest recording the staged 180-second driver interval')
     if a.aux_post_boot or a.aux_header_only:
         if not a.expected_manifest_sha256 or sha256(a.manifest)!=a.expected_manifest_sha256:
             raise ValueError('post-boot experiment manifest differs from explicit baseline pin')
@@ -175,7 +183,13 @@ def main():
     proc, wire, bridge = None, None, None
     started, reason = time.monotonic(), 'deadline'
     header_progress=started
+    driver_child_seen=False
+    driver_child_exited=False
+    driver_poll_seen=False
+    driver_ready_seen=False
+    driver_last_progress=started
     report.update(host_runner_monotonic_origin=started, aux_latency=a.aux_latency,
+        driver_late_launch=a.driver_late_launch,
         aux_post_boot=a.aux_post_boot,
         global_deadline_seconds=a.seconds,
         aux_poll_ms=a.aux_poll_ms, aux_peer_monotonic_origin=aux_peer.started if aux_peer else None)
@@ -202,6 +216,14 @@ def main():
         surface_present_baseline=0
         with (out/'wire.log').open('wb') as log:
             while time.monotonic()-started < a.seconds and proc.poll() is None:
+                if a.driver_failure_snapshot and driver_poll_seen and not driver_ready_seen and time.monotonic()-driver_last_progress>35:
+                    raise TimeoutError('driver readiness loop stopped progressing for 35 seconds')
+                if a.driver_worker and aux_peer.released_at is not None:
+                    activation_deadline = max(aux_peer.released_at, started+240) if a.driver_late_launch else aux_peer.released_at
+                    if not driver_ready_seen and time.monotonic()-activation_deadline>30:
+                        raise TimeoutError('driver did not acknowledge host readiness within 30 seconds')
+                    if driver_ready_seen and time.monotonic()-driver_last_progress>60:
+                        raise TimeoutError('driver made no guest-stage or RPC progress for 60 seconds')
                 if a.aux_header_only and time.monotonic()-header_progress>=30:
                     raise TimeoutError('initial header probe made no guest-stage progress for30seconds')
                 if ready:
@@ -220,7 +242,10 @@ def main():
                         reason='guest load probe completed'
                         break
                 if aux_peer:
+                    old_count=len(aux_peer.seen)
                     aux_peer.pump()
+                    if a.driver_worker and len(aux_peer.seen)>old_count:
+                        driver_last_progress=time.monotonic()
                     if a.aux_latency and aux_peer.seen and len(aux_peer.seen)<64 and \
                             time.monotonic_ns()-aux_peer.last_response_ns > 10_000_000_000:
                         raise TimeoutError('latency batch made no host-visible progress for 10 seconds')
@@ -250,6 +275,18 @@ def main():
                         ack=re.search(r'DVMI2A (\d+) (\d+) Q R ',line)
                         if ack and int(ack[1])==surface_ack_baseline['epoch'] and int(ack[2])>=surface_ack_baseline['next_seq']:
                             surface_ack_evidence=dict(epoch=int(ack[1]),sequence=int(ack[2]),seconds=time.monotonic()-started)
+                    if a.driver_worker and 'GPU_LOAD_DRIVER_CHILD pid=' in line:
+                        driver_child_seen=True
+                    if a.driver_worker and 'GPU_LOAD_DRIVER_CHILD_EXIT ' in line:
+                        driver_child_exited=' exit=0 signal=0' in line
+                        if aux_complete and driver_child_exited:
+                            reason='guest load probe completed'
+                    if a.driver_worker and 'GPU_LOAD_DRIVER_POLL ' in line:
+                        driver_poll_seen=True
+                    if a.driver_worker and 'GPU_LOAD_DRIVER_' in line:
+                        driver_last_progress=time.monotonic()
+                        if 'GPU_LOAD_DRIVER_READY' in line:
+                            driver_ready_seen=True
                     if a.aux_header_only and 'GPU_LOAD_' in line and 'GPU_LOAD_AUX_ALIVE' not in line:
                         header_progress=time.monotonic()
                     if ready:ready.feed(line,wire,time.monotonic()-started)
@@ -285,7 +322,8 @@ def main():
                             except (OSError,ValueError):
                                 surface_ack_baseline=None
                         elif not a.aux_wait_input or input_ack:
-                            reason = 'guest load probe completed'
+                            if not a.driver_worker or not driver_child_seen or driver_child_exited:
+                                reason = 'guest load probe completed'
                     elif 'GPU_LOAD_ERROR' in line or 'GPU_BUNDLE_ERROR' in line or 'panic(cpu' in line:
                         reason = 'guest reported failure'
                     elif bridge and bridge.finished and 'DVM_INPUT_START' in line:
@@ -364,7 +402,11 @@ def main():
                 (out/'status.txt').write_text(h.command('info status')+'\n')
                 (out/'registers.txt').write_text(h.command('info registers')+'\n')
                 h.command(f'screendump {out}/final.png -f png')
-        except (OSError, RuntimeError, TimeoutError) as error:
+                if a.driver_failure_snapshot and not report.get('passed'):
+                    with (out/'failure-snapshot.log').open('w') as snapshot_log:
+                        capture=subprocess.run([sys.executable,str(Path(__file__).with_name('snapshot_driver_failure.py')),str(out)],stdout=snapshot_log,stderr=subprocess.STDOUT,timeout=180)
+                    report['failure_snapshot_returncode']=capture.returncode
+        except (OSError, RuntimeError, TimeoutError, subprocess.TimeoutExpired) as error:
             # Teardown can race a terminating QEMU. Preserve the workload
             # verdict and this separate collection failure; still reap ours.
             report['teardown_error'] = f'{type(error).__name__}: {error}'
