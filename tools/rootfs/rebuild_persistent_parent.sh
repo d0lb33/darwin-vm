@@ -26,6 +26,9 @@
 # /tmp/dvm/data-seed/persistent-parent.qcow2.
 set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+if [[ "${1:-}" == --* ]]; then
+    exec python3 "$REPO/tools/rootfs/bootstrap_profile.py" "$@"
+fi
 RUN="${1:-/tmp/dvm/data-seed/rebuild}"
 BASE_DMG="${BASE_DMG:-$HOME/dvm-artifacts/build/rootfs_cx_dual_roles.dmg}"
 START_AT="${START_AT:-format}"
@@ -33,10 +36,14 @@ WORK="$RUN/work"
 RAMDISK="$RUN/ramdisk-data-seed.dmg"
 HELPER=/libexec/dvm_data_seed_helper
 B="$REPO/tools/rootfs/bootstrap_data_volume.sh"
-QIMG="$REPO/qemu-sptm/build/qemu-img"
+QIMG="${QEMU_IMG:-$REPO/qemu-sptm/build/qemu-img}"
+DTREE_RAW="${DTREE_RAW:-/tmp/dvm/dtree_raw}"
+TAG_PREFIX="${TAG_PREFIX:-REBUILD}"
+[[ "$TAG_PREFIX" =~ ^[A-Za-z0-9_-]{1,40}$ ]] || { echo 'invalid TAG_PREFIX' >&2; exit 2; }
+export DTREE_RAW
 mkdir -p "$RUN" "$WORK" /tmp/dvm/probe
 [[ -f "$BASE_DMG" ]] || { echo "missing base image $BASE_DMG" >&2; exit 1; }
-[[ -f /tmp/dvm/dtree_raw ]] || ipsw img4 im4p extract --output /tmp/dvm/dtree_raw \
+[[ -f "$DTREE_RAW" ]] || ipsw img4 im4p extract --output "$DTREE_RAW" \
     "$REPO/ipsw_db/24A5430a__iPhone17,3/DeviceTree.d47ap.im4p" >/dev/null
 
 STAGES=(format ramdisk-helper copy-data manifest layout marker normal1 normal2)
@@ -66,7 +73,7 @@ do_format() {
         OUT="$prepared" WORK="$WORK" "$B" exclave || return 1
         "$QIMG" create -f qcow2 -F raw -b "$prepared" "$RUN/fresh-format.qcow2" >/dev/null || return 1
     fi
-    OUT="$BASE_DMG" OVL="$RUN/fresh-format.qcow2" WORK="$WORK" "$B" format
+    FORMAT_TAG="${TAG_PREFIX}_FMT" OUT="$BASE_DMG" OVL="$RUN/fresh-format.qcow2" WORK="$WORK" "$B" format
 }
 do_ramdisk_helper() {
     [[ -e "$RAMDISK" ]] && { echo "  reusing $RAMDISK"; return 0; }
@@ -82,13 +89,19 @@ do_normal() {  # do_normal PARENT CHILD TAG SECS
 
 stage format         do_format
 stage ramdisk-helper do_ramdisk_helper
-stage copy-data      do_restore_stage copy-data "$RUN/fresh-format.qcow2" "$RUN/copy.qcow2"     REBUILD_COPY1
-stage manifest       do_restore_stage manifest  "$RUN/copy.qcow2"         "$RUN/manifest.qcow2" REBUILD_MANIFEST1
-stage layout         do_restore_stage layout    "$RUN/manifest.qcow2"     "$RUN/layout.qcow2"   REBUILD_LAYOUT1
-stage marker         do_restore_stage marker    "$RUN/layout.qcow2"       "$RUN/marker.qcow2"   REBUILD_MARKER1
-stage normal1        do_normal "$RUN/marker.qcow2" "$RUN/boot1.qcow2" REBUILD_BOOT1 "${BOOT1_SECS:-300}"
-stage normal2        do_normal "$RUN/boot1.qcow2"  "$RUN/boot2.qcow2" REBUILD_BOOT2 "${BOOT2_SECS:-150}"
+stage copy-data      do_restore_stage copy-data "$RUN/fresh-format.qcow2" "$RUN/copy.qcow2"     "${TAG_PREFIX}_COPY1"
+stage manifest       do_restore_stage manifest  "$RUN/copy.qcow2"         "$RUN/manifest.qcow2" "${TAG_PREFIX}_MANIFEST1"
+stage layout         do_restore_stage layout    "$RUN/manifest.qcow2"     "$RUN/layout.qcow2"   "${TAG_PREFIX}_LAYOUT1"
+stage marker         do_restore_stage marker    "$RUN/layout.qcow2"       "$RUN/marker.qcow2"   "${TAG_PREFIX}_MARKER1"
+if [[ "${SEED_ONLY:-0}" == 1 ]]; then
+    echo "DONE seeded=$RUN/marker.qcow2; normal-boot validation deferred to profile runner"
+    exit 0
+fi
+stage normal1        do_normal "$RUN/marker.qcow2" "$RUN/boot1.qcow2" "${TAG_PREFIX}_BOOT1" "${BOOT1_SECS:-300}"
+stage normal2        do_normal "$RUN/boot1.qcow2"  "$RUN/boot2.qcow2" "${TAG_PREFIX}_BOOT2" "${BOOT2_SECS:-150}"
 
-ln -sf "$RUN/boot2.qcow2" /tmp/dvm/data-seed/persistent-parent.qcow2
-echo "DONE parent=$RUN/boot2.qcow2 (linked as /tmp/dvm/data-seed/persistent-parent.qcow2) $(date +%T)"
+if [[ "${UPDATE_PARENT_LINK:-1}" == 1 ]]; then
+    ln -sf "$RUN/boot2.qcow2" /tmp/dvm/data-seed/persistent-parent.qcow2
+fi
+echo "DONE parent=$RUN/boot2.qcow2 $(date +%T)"
 "$QIMG" info --backing-chain "$RUN/boot2.qcow2" | grep -E '^image|disk size'

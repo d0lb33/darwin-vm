@@ -133,6 +133,12 @@ EMULATED_FEATURES = {
   # rtbuddy-v2, so AppleSEPManager drives it instead of RTBuddy; SEP speaks its
   # own protocol above the mailbox, not RTKit, and we do not emulate that.
   'sep': ['arm-io/sep', 'arm-io/dart-sep'],
+  # SPMI controller (AppleSPMIController, "aapl,spmi") and the Dialog PMU on
+  # it ("pmu,spmi"), whose AppleDialogSPMIPMURTC publishes the real IORTC
+  # calendar provider. darwin_spmi.c / darwin_pmu.c model the T8140 Gen3
+  # queue registers and the 32,768 Hz upcounter; see
+  # docs/re/native-rtc-spmi.md. fixup_spmi() trims the other SPMI children.
+  'spmi': ['arm-io/nub-spmi0'],
 }
 KEEP_COMPAT_PATHS = set()
 EPHEMERAL_DATA_BLOCKS = None
@@ -160,6 +166,16 @@ def del_compat(d, path=''):
     if not any(x in compat for x in SUPPORTED_DRIVERS):
       del d.props['compatible']
 
+  # IOMobileFramebuffer counts display-subsystem nodes independently of
+  # driver matching (iOS 27, 0x22a395fcc; increment at 0x22a3961ac). Leaving
+  # dispext0's type after disabling its driver makes userspace expect two
+  # framebuffers while only disp0 registers. Preserve the node and MMIO map.
+  # WARM_SINGLE_DISPLAY1 verifies expected/current counts of 1/1 in both
+  # backboardd and SpringBoard; this fixes enumeration, not every startup wait.
+  if (rel == 'arm-io/dispext0' and 'compatible' not in d.props
+      and d.props.get('device_type') == 'ext-display-subsystem'):
+    del d.props['device_type']
+
 def drop_exclave_routes(d):
   # An IOP nub's "routes" property points at a secure-rtbuddy-proxy node, i.e.
   # the exclave (secure world) side of that coprocessor's mailbox. We don't
@@ -172,6 +188,24 @@ def drop_exclave_routes(d):
     for nub in c.children:
       if 'routes' in nub.props:
         del nub.props['routes']
+
+def fixup_spmi(d):
+  # -enable spmi keeps "compatible" on /arm-io/nub-spmi0 and all of its
+  # children. Only the PMU ("pmu,spmi" -> AppleDialogSPMIPMU, the IORTC
+  # provider) is modelled; the other child on this tree is "btm,phone"
+  # (AppleBTM, baseband telemetry), which would issue SPMI traffic to a slave
+  # that does not exist. Strip everything but the PMU so it never binds.
+  if 'arm-io/nub-spmi0' not in KEEP_COMPAT_PATHS or 'nub-spmi0' not in d['arm-io']:
+    return
+  spmi = d['arm-io']['nub-spmi0']
+  for c in spmi.children:
+    compat = c.props.get('compatible')
+    if compat is None:
+      continue
+    if isinstance(compat, str):
+      compat = compat.encode('utf8')
+    if not compat.startswith(b'pmu,spmi'):
+      del c.props['compatible']
 
 def fixup_darts(d):
   # SPTM bootstraps every DART whose node still has a compatible, and expects
@@ -635,11 +669,17 @@ def fixup(d, nvram_file):
   # checks for an "rtc" node in the dtree root by calling IODTMatchNubWithKeys.
   # If it finds the rtc nub, it calls IOService::publishResource to publish a
   # fake RTC, allowing us to skip the 30 second timeout in IOKitInitializeTime.
-  d.props['no-rtc'] = "<NULL>"
-  rtc_node = ADTNode()
-  rtc_node.props['name'] = 'rtc'
-  rtc_node.props['__placeholder_val'] = "<NULL>"
-  d.children.append(rtc_node)
+  #
+  # With -enable spmi the native AppleDialogSPMIPMURTC (AppleARMRTC::start,
+  # 0xfffffff0085db0e8) publishes the real IORTC, so the placeholder and the
+  # no-rtc flag are left out; a second, fake IORTC would only mask a failure
+  # of the native path.
+  if 'arm-io/nub-spmi0' not in KEEP_COMPAT_PATHS:
+    d.props['no-rtc'] = "<NULL>"
+    rtc_node = ADTNode()
+    rtc_node.props['name'] = 'rtc'
+    rtc_node.props['__placeholder_val'] = "<NULL>"
+    d.children.append(rtc_node)
 
   # This fixes panic(cpu 0 caller 0xfffffff008b8e7b8): "AMFI: No PMGR?\n" @ConfigurationSettings.cpp:388
   d['defaults'].props['vmm-present'] = "u32:1"
@@ -677,6 +717,7 @@ def fixup(d, nvram_file):
     ctrr.props['write-disable-reg-value'] = "u32:1"
 
   del_compat(d)
+  fixup_spmi(d)
   drop_exclave_routes(d)
   fixup_darts(d)
   fixup_iops(d)
@@ -742,6 +783,16 @@ def encode_node(d):
     outv += encode_node(c)
   return outv
 
+def fixup_development_activation(d):
+  # Explicit development-VM identity. XNU PE_init_platform reads debug-enabled
+  # into PE_i_can_has_debugger(), then commpage DEV_FIRM. In 24A5430a,
+  # os_variant_allows_internal_security_policies (0x22ffbb324) gates
+  # mobileactivationd's allow-hactivation input (0x1002ebaf8..0x1002ebbd0).
+  # Keep native opt-outs intact. See docs/re/setup-activation-contract.md.
+  d['chosen'].props['debug-enabled'] = 'u32:1'
+  d['product'].props['allow-hactivation'] = 'u32:1'
+
+
 def main():
   p = argparse.ArgumentParser(prog='dt_fixup')
   p.add_argument('dtree', type=argparse.FileType('rb', 0))
@@ -752,6 +803,9 @@ def main():
   p.add_argument('-skip-keybag', dest='skip_keybag', action='store_true',
                  help='set /product boot-ios-diagnostics so keybagd --init exits instead of '
                       'blocking forever on a SEP that is not there. A skip, not a fix.')
+  p.add_argument('-development-activation', action='store_true',
+                 help='present development boot firmware and allow native local '
+                      'hactivation; enables internal security policies in the VM')
   p.add_argument('-ephemeral-data', dest='ephemeral_data', nargs='?', const='8388608', default=None,
                  metavar='BLOCKS',
                  help='promote the ephemeral-recovery fstab so /private/var is a writable tmpfs '
@@ -778,6 +832,8 @@ def main():
   dt_root = ADTNode()
   decode_node(args.dtree.read(),dt_root)
   fixup(dt_root, nvram_file=args.nvram)
+  if args.development_activation:
+    fixup_development_activation(dt_root)
   args.out.write(encode_node(dt_root))
 
 if __name__=="__main__":

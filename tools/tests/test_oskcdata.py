@@ -20,6 +20,24 @@ def item(kind, payload=b"", flags=0):
 
 
 class OSKcdataTests(unittest.TestCase):
+    def test_trap_address_and_process_start_time_survive_padded_items(self):
+        # Measured Preferences corpse: SIGTRAP/EXC_BREAKPOINT packed into
+        # EXC_CRASH's code, with the trapping PC carried as the subcode.
+        blob = b"".join((
+            item(0xDEADF157),
+            item(0x80E, struct.pack("<QQ", 0x5600001, 0x1db183ea0)),
+            item(0x80B, struct.pack("<QQ", 2462, 400249)),
+            item(0x838, struct.pack("<I", 10) + bytes(12)),
+            item(0xF19158ED),
+        ))
+        with tempfile.NamedTemporaryFile() as f:
+            f.write(blob)
+            f.flush()
+            out = io.StringIO()
+            OSKCDATA.render(f.name, 0, "CRASHINFO", out)
+        self.assertIn("code=0x5600001 subcode=0x1db183ea0", out.getvalue())
+        self.assertIn("2462.400249", out.getvalue())
+
     def test_walk_uses_xnu_buffer_end_not_ffffffff(self):
         # KCDATA_TYPE_BUFFER_END is 0xf19158ed in osfmk/kern/kcdata.h.  Bytes
         # after it must not be considered part of this OS_REASON buffer.

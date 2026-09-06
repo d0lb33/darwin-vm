@@ -15,11 +15,32 @@ from pathlib import Path
 from checkpoint_common import (
     HMP, SAFE_TAG, atomic_json, parse_migration_status, parse_pc, pid_alive,
     restore_argv, sha256, serial_hex_clock_bounds, sptm_panic_message,
-    verify_backing_chain, wait_for_path,
+    verify_backing_chain, wait_for_path, selected_cpu_index,
 )
 
 
 BOOT_PATTERNS = ("Darwin Kernel Version", "Darwin Bootstrapper Version", "launchd[1]")
+
+
+def parse_model_env_overrides(values: list[str]) -> dict[str, str]:
+    result = {}
+    for item in values:
+        key, separator, value = item.partition("=")
+        if not separator or not re.fullmatch(r"(?:DARWIN_|GXFSTAT_)[A-Za-z0-9_]+", key):
+            raise ValueError("--model-env requires a DARWIN_/GXFSTAT_ KEY=VALUE")
+        result[key] = value
+    return result
+
+
+def checkpoint_source_cpu(manifest: dict) -> int:
+    index = manifest.get("source_cpu_index")
+    if index is None:
+        # Earlier v1 captures preserved this choice in the CPU inventory.
+        inventory = manifest.get("inventory", {}).get("cpus")
+        index = selected_cpu_index(Path(inventory).read_text()) if inventory else 0
+    if type(index) is not int or index < 0:
+        raise RuntimeError("invalid source CPU index")
+    return index
 
 
 def activate_paused_disks(qmp_path: Path) -> None:
@@ -70,7 +91,16 @@ def main() -> int:
     parser.add_argument("--qemu", type=Path,
                         help="explicit compatible QEMU override for development replay; "
                              "records both binary hashes, never changes the checkpoint")
+    parser.add_argument("--model-env", action="append", default=[], metavar="KEY=VALUE",
+                        help="explicit model-only environment override for development replay")
+    parser.add_argument("--display", choices=("none", "cocoa", "cocoa,zoom-to-fit=on",
+                                              "cocoa,zoom-to-fit=on,show-cursor=on", "sdl"),
+                        help="override only the host display backend on restore")
     args = parser.parse_args()
+    try:
+        model_env_overrides = parse_model_env_overrides(args.model_env)
+    except ValueError as error:
+        parser.error(str(error))
     if not SAFE_TAG.fullmatch(args.tag):
         parser.error("--tag must use 1-64 letters, digits, dots, underscores or dashes")
     if args.observe_seconds < 0:
@@ -81,6 +111,7 @@ def main() -> int:
     manifest = json.loads(args.manifest.read_text())
     if manifest.get("format") != "darwin-vm-external-checkpoint-v1":
         raise RuntimeError("unsupported checkpoint manifest format")
+    source_cpu_index = checkpoint_source_cpu(manifest)
     state = Path(manifest["vmstate"]["path"])
     source_disk = Path(manifest["disk"]["path"])
     if sha256(state) != manifest["vmstate"]["sha256"]:
@@ -129,6 +160,12 @@ def main() -> int:
         state, args.gdb_port,
     )
     argv[0] = str(qemu)
+    if args.display is not None:
+        # Host presentation only; preserve every guest machine/CPU argument.
+        if "-display" in argv:
+            argv[argv.index("-display") + 1] = args.display
+        else:
+            argv += ["-display", args.display]
     if args.leave_paused:
         argv += ["-qmp", f"unix:{qmp},server=on,wait=off"]
     env = {
@@ -136,6 +173,14 @@ def main() -> int:
         if not key.startswith("DARWIN_") and not key.startswith("GXFSTAT_")
     }
     env.update(manifest.get("qemu_env", {}))
+    env.update(model_env_overrides)
+    # A restored VM can itself become a checkpoint source. Record the same
+    # exact launch schema used by fresh boots, without unrelated host env.
+    atomic_json(out / "launch.json", {
+        "format": "darwin-vm-qemu-launch-v1", "argv": argv,
+        "env": {key: value for key, value in env.items()
+                if key.startswith(("DARWIN_", "GXFSTAT_"))},
+    })
     started = time.monotonic()
     stderr_file = stderr.open("wb")
     proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL,
@@ -162,6 +207,9 @@ def main() -> int:
                     f"paused state: {status}\n{migration}"
                 )
             time.sleep(0.2)
+        hmp.command(f"cpu {source_cpu_index}")
+        if selected_cpu_index(hmp.command("info cpus")) != source_cpu_index:
+            raise RuntimeError("restored VM does not have the source witness CPU")
         registers = hmp.command("info registers")
         restored_pc = parse_pc(registers)
         (out / "pre-resume-registers.txt").write_text(registers + "\n")
@@ -265,6 +313,10 @@ def main() -> int:
             "uart": str(uart),
             "disk_child": str(disk),
             "source_pc": manifest["source_pc"],
+            "source_cpu_index": source_cpu_index,
+            "model_env_overrides": model_env_overrides,
+            "qemu_env": {key: value for key, value in env.items()
+                         if key.startswith(("DARWIN_", "GXFSTAT_"))},
             "restored_pc": restored_pc,
             "pc_after_observation": after_pc,
             "pc_match_witness": restored_pc == manifest["source_pc"],

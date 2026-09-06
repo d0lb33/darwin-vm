@@ -14,12 +14,37 @@ sys.path.insert(0, str(TOOLS))
 
 from checkpoint_common import (  # noqa: E402
     parse_migration_status, process_argv_env, qcow2_backing_chain, restore_argv,
-    sptm_panic_message, serial_hex_clock_bounds, verify_backing_chain,
+    sptm_panic_message, serial_hex_clock_bounds, verify_backing_chain, selected_cpu_index,
 )
-from restore_checkpoint import activate_paused_disks  # noqa: E402
+from restore_checkpoint import (activate_paused_disks, checkpoint_source_cpu,
+                                parse_model_env_overrides)  # noqa: E402
 
 
 class CheckpointCommandTests(unittest.TestCase):
+    def test_model_override_cannot_change_host_loader_environment(self):
+        self.assertEqual(parse_model_env_overrides([
+            "DARWIN_DCP_IOMFB_COMPLETE=1", "GXFSTAT_OUTPUT=", "DARWIN_TEST=a=b"
+        ]), {"DARWIN_DCP_IOMFB_COMPLETE": "1", "GXFSTAT_OUTPUT": "", "DARWIN_TEST": "a=b"})
+        for item in ("PATH=/tmp", "DYLD_INSERT_LIBRARIES=/tmp/x", "DARWIN_TEST", "DARWIN_=1"):
+            with self.assertRaises(ValueError):
+                parse_model_env_overrides([item])
+
+    def test_checkpoint_preserves_nonzero_witness_cpu(self):
+        cpus = "  CPU #0: thread_id=42\n* CPU #3: thread_id=42\n"
+        self.assertEqual(selected_cpu_index(cpus), 3)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cpus.txt"
+            path.write_text(cpus)
+            self.assertEqual(checkpoint_source_cpu({"inventory": {"cpus": str(path)}}), 3)
+        self.assertEqual(checkpoint_source_cpu({"source_cpu_index": 2}), 2)
+        self.assertEqual(checkpoint_source_cpu({}), 0)
+        for bad in (-1, "3", True):
+            with self.assertRaises(RuntimeError):
+                checkpoint_source_cpu({"source_cpu_index": bad})
+        for bad in ("CPU #0: thread_id=42", "* CPU #0:\n* CPU #1:"):
+            with self.assertRaises(RuntimeError):
+                selected_cpu_index(bad)
+
     def test_paused_activation_handles_events_without_resuming_cpu(self):
         stream = mock.MagicMock()
         stream.readline.side_effect = [
@@ -120,6 +145,20 @@ class CheckpointCommandTests(unittest.TestCase):
         self.assertNotIn("/tmp/source.pid", result)
         self.assertNotIn("unix:/tmp/source.qmp,server=on,wait=off", result)
         self.assertEqual(result.count("-S"), 1)
+
+    def test_restore_native_input_uart_preserves_unrelated_socket(self):
+        unrelated = "socket,id=probe_uart,path=/tmp/other.sock,logfile=/tmp/other.log"
+        source = ["qemu", "-serial", "chardev:input_uart",
+                  "-chardev", unrelated,
+                  "-chardev", "socket,id=input_uart,path=/tmp/old.sock,server=on,wait=off,logfile=/tmp/old.log",
+                  "-drive", "if=none,id=ans,file=/images/source.qcow2"]
+        result = restore_argv(
+            source, Path("/images/source.qcow2"), Path("/restore/disk.qcow2"),
+            Path("/restore/monitor"), Path("/restore/serial.log"),
+            Path("/restore/uart"), Path("/checkpoint/state"), None)
+        self.assertIn(unrelated, result)
+        self.assertIn("chardev:input_uart", result)
+        self.assertIn("socket,id=input_uart,server=on,wait=off,path=/restore/uart,logfile=/restore/serial.log", result)
 
     @unittest.skipUnless(sys.platform == "darwin", "kern.procargs2 is macOS-only")
     def test_process_argv_is_not_split_on_spaces(self):

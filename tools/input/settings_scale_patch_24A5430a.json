@@ -1,0 +1,11 @@
+{
+  "cache_name": "dyld_shared_cache_arm64e.21",
+  "purpose": "24A5430a SwiftUI ISImageDescriptor bitmap scale lower bound: measured Preferences 28x28 scale 0 becomes 1; preserves valid integer 1..3; VM-specific fallback, not full sanitizedScale semantics.",
+  "edits": [
+    {
+      "offset": "0x3de3d94",
+      "before": "e00315aa7ad9f894021ca04e",
+      "after": "a00e40fd01106e1e0268611e"
+    }
+  ]
+}
