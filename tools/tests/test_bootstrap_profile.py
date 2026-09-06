@@ -63,6 +63,22 @@ class BootstrapProfileTests(unittest.TestCase):
         self.assertEqual(patched['cpus'], 6)
         self.assertNotIn('DARWIN_RTC_PV', bp.DISPLAY_ENV)
 
+    def test_patched_native_battery_keeps_accommodations_but_not_battery_workarounds(self):
+        hybrid = bp.profile_config('patched-native-battery')
+        patched = bp.profile_config('patched')
+        self.assertEqual(hybrid['cpus'], 6)
+        self.assertEqual(hybrid['kernel_adapters'], ['smp-pv'])
+        self.assertEqual(hybrid['env'], patched['env'])
+        self.assertEqual(hybrid['runtime_helpers'], ['input'])
+        self.assertNotIn('powerd-null-guard', hybrid['userspace_patches'])
+        self.assertEqual(set(patched['userspace_patches']) - set(hybrid['userspace_patches']),
+                         {'powerd-null-guard'})
+        self.assertEqual(hybrid['battery_source'], 'emulated-smc')
+        self.assertEqual(patched['battery_source'], 'virtual-publisher')
+        self.assertEqual(bp.profile_config('native')['battery_source'], 'emulated-smc')
+        with self.assertRaises(ValueError):
+            bp.profile_config('patched-native')
+
     def test_diagnostic_environment_and_resume_cannot_leak(self):
         with patch.dict(os.environ, {'DARWIN_RTC_PV': '1', 'DVM_QEMU_WRAPPER': 'debugger',
                                     'START_AT': 'normal2', 'SEED_ONLY': '1'}):
@@ -140,7 +156,7 @@ class BootstrapProfileTests(unittest.TestCase):
         result = subprocess.run(['bash', str(ROOT / 'tools/rootfs/rebuild_persistent_parent.sh'), '--help'],
                                 capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('--profile {native,patched}', result.stdout)
+        self.assertIn('--profile {native,patched,patched-native-battery}', result.stdout)
 
     def test_panic_invalidates_otherwise_valid_storage_boot(self):
         serial = '\n'.join(['BSD root: disk1s1', 'Early boot complete',

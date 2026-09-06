@@ -381,7 +381,20 @@ def fixup_iops(d):
       # Without this, /arm-io/ans/iop-ans-nub never starts: the ASC logs zero
       # messages and AppleANS2NVMeController parks forever in
       # waitForMatchingService("ANS2Endpoint1", -1). Measured, tags A9DBG/A9FW.
-      if 'rtbuddy' not in compat or nub.props.get('region-base') not in (None, 'u64:0x0'):
+      if 'rtbuddy' not in compat:
+        continue
+      if nub.props.get('region-base') not in (None, 'u64:0x0'):
+        # A real region (SMC: 0x30de00000). Leave the address alone, but the
+        # coprocessor still needs the pre-loaded / no-firmware-service pair:
+        # with "pre-loaded = 0" RTBuddy(SMC) started and then waited for a
+        # firmware service that this kernelcache cannot allocate
+        # ("Couldn't alloc class AFKFirmwareService"), so the SMC mailbox
+        # never saw a HELLO in any boot (probe BATT_SMC1, stderr: no asc(SMC)
+        # traffic after creation). Only done for SMC when its model is
+        # enabled; darwin_smc.c backs that real region with RAM.
+        if c.props.get('name') == 'smc' and 'arm-io/smc' in KEEP_COMPAT_PATHS:
+          nub.props['pre-loaded'] = "u32:1"
+          nub.props['no-firmware-service'] = "<NULL>"
         continue
       nub.props['pre-loaded'] = "u32:1"
       nub.props['region-base'] = f"u64:{IOP_REGION_BASE + slot * IOP_REGION_STRIDE:#x}"
