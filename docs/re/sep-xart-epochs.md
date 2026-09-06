@@ -1,3 +1,9 @@
+> Correction (2026-09-06): opcode 0x15 generates an AP nonce; it is not
+> an epoch read. The eight-byte reply size below remains correct. See
+> [xART AP nonce slots](xart-ap-nonce-slots.md) for the native call chain,
+> boot-manifest binding, and opt-in stateful replacement. Epoch operations
+> 0x16 and 0x17 are separate and retain their existing evidence.
+
 # xART: the epoch requests and the reply frame AppleSEPXART expects
 
 Source: iOS 27.0 beta 8 (24A5430a), iPhone17,3 / t8140,

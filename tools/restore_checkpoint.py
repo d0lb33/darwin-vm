@@ -78,6 +78,21 @@ def activate_paused_disks(qmp_path: Path) -> None:
                     break
 
 
+def override_display(argv: list[str], display: str) -> list[str]:
+    """Replace every host display option; a later duplicate overrides the first."""
+    result = []
+    index = 0
+    while index < len(argv):
+        if argv[index] == "-display":
+            if index + 1 >= len(argv):
+                raise ValueError("-display has no value")
+            index += 2
+        else:
+            result.append(argv[index])
+            index += 1
+    return result + ["-display", display]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=Path)
@@ -88,6 +103,10 @@ def main() -> int:
                         help="load and verify the exact checkpoint PC without executing; "
                              "attach debugger probes before resuming")
     parser.add_argument("--out", type=Path)
+    parser.add_argument("--plugin", action="append", default=[],
+                        help="explicit diagnostic TCG plugin specification; recorded in launch argv")
+    parser.add_argument("--no-plugins", action="store_true",
+                        help="remove checkpoint source's host diagnostic plugins")
     parser.add_argument("--qemu", type=Path,
                         help="explicit compatible QEMU override for development replay; "
                              "records both binary hashes, never changes the checkpoint")
@@ -160,12 +179,23 @@ def main() -> int:
         state, args.gdb_port,
     )
     argv[0] = str(qemu)
+    if args.plugin and args.no_plugins:
+        parser.error("--plugin and --no-plugins are mutually exclusive")
+    if args.plugin or args.no_plugins:
+        index = 0
+        while index < len(argv):
+            if argv[index] == "-plugin":
+                del argv[index:index + 2]
+            else:
+                index += 1
+    for specification in args.plugin:
+        plugin_path = Path(specification.partition(',')[0]).resolve()
+        if not plugin_path.is_file():
+            raise RuntimeError(f"TCG plugin does not exist: {plugin_path}")
+        argv += ["-plugin", specification]
     if args.display is not None:
         # Host presentation only; preserve every guest machine/CPU argument.
-        if "-display" in argv:
-            argv[argv.index("-display") + 1] = args.display
-        else:
-            argv += ["-display", args.display]
+        argv = override_display(argv, args.display)
     if args.leave_paused:
         argv += ["-qmp", f"unix:{qmp},server=on,wait=off"]
     env = {

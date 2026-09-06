@@ -16,11 +16,17 @@ from checkpoint_common import (  # noqa: E402
     parse_migration_status, process_argv_env, qcow2_backing_chain, restore_argv,
     sptm_panic_message, serial_hex_clock_bounds, verify_backing_chain, selected_cpu_index,
 )
-from restore_checkpoint import (activate_paused_disks, checkpoint_source_cpu,
+from restore_checkpoint import (activate_paused_disks, checkpoint_source_cpu, override_display,
                                 parse_model_env_overrides)  # noqa: E402
 
 
 class CheckpointCommandTests(unittest.TestCase):
+    def test_headless_override_removes_later_cocoa_option(self):
+        argv = ["qemu", "-display", "none", "-smp", "6", "-display", "cocoa"]
+        self.assertEqual(override_display(argv, "none"),
+                         ["qemu", "-smp", "6", "-display", "none"])
+        self.assertEqual(argv[-1], "cocoa")
+
     def test_model_override_cannot_change_host_loader_environment(self):
         self.assertEqual(parse_model_env_overrides([
             "DARWIN_DCP_IOMFB_COMPLETE=1", "GXFSTAT_OUTPUT=", "DARWIN_TEST=a=b"
