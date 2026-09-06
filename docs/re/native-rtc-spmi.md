@@ -202,9 +202,49 @@ and lands on the poll.  `darwin_ans.c` now keeps that word as storage
 (`sart-power-reg-offset` from the tree; vmstate subsection so older
 snapshots still load).
 
-### RTC_NATIVE_SYS4 (same, with the power word modelled)
+### RTC_NATIVE_SYS4 (same, with the power word modelled): pass
 
-Filled in below.
+`tools/warm_boot_probe.py /tmp/dvm/RTC_NATIVE1/warm-manifest4.json --tag
+RTC_NATIVE_SYS4 --seconds 600 --keep-paused`; no debugger, fresh child,
+`-smp 6`, `DISPLAY_SMP6.bootkc` (SMP patch only), `DARWIN_RTC_PV=0`.
+
+| milestone | value |
+| --- | --- |
+| `AppleARMRTC publishing service` | serial line 257 |
+| SART power gate word | `<- 0x0` then `<- 0x1` (stderr 304, 306), poll satisfied |
+| `Early boot complete` | 11.006 s |
+| launchd first line | `2026-09-05 23:52:07` UTC, host 23:52 UTC |
+| `BSD root`, `GetNVRAMSize`, `AllocateNodes` | present (serial 316-346) |
+| presentations / panics at 600 s | 171 / 0 (first at about 500 s) |
+| `final.png` | lock screen, `Sat Sep 5`, `5:02` (Pacific; host 00:02 UTC Sep 6) |
+
+The large clock text comes from the persisted software-clock patch already
+on this disk (`lockscreen-poster-time.md`); the date and time it shows are
+the native RTC's.
+
+### Snapshot round trip
+
+`tools/create_checkpoint.py` on the paused SYS4 produced
+`/tmp/dvm/checkpoints/RTC_NATIVE_LOCKSCREEN1/manifest.json` (vmstate
+3,123,701,160 bytes, migration 6.1 s) with the darwin-spmi and darwin-pmu
+sections included.  `tools/restore_checkpoint.py ... --tag
+RTC_NATIVE_RESTORE_CK1 --display none` loaded it into a new QEMU
+(`migration completed`, exact PC), and after `cont` the guest ran:
+user-space PCs on two CPUs and 210 `iomfb: presented` lines in 20 s, zero
+panics.  The restore tool's serial-based witnesses stay false because a
+lock screen writes nothing to the console.  This checkpoint is the
+diagnostic baseline for RTC work; the older PV-RTC checkpoints cannot be
+used with `-enable spmi`.
+
+### RTC_NATIVE_CONTROL1 (unchanged PV configuration on this binary)
+
+Same parent, `CLOCK_SOFTWARE_PATCH1` manifest with only the QEMU binary
+replaced (PV register, `DISPLAY_SMP6.rtc-ns.bootkc`, old tree): `Early
+boot complete` 10.792 s, launchd `2026-09-05 23:53:42` UTC, zero panics,
+zero presentations in its 240 s window (earlier fresh boots of this
+lineage presented first at 117-204 s or not within 300 s, so the window is
+inconclusive for display).  The ANS changes did not trigger: no SET_TIME
+tunnel and no SART power-gate write appear without a native IORTC.
 
 ## Limitations and deferred items
 
