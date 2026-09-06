@@ -42,7 +42,10 @@ static void DVMDisplayContract(void) {
         rc=begin(fb,&swap);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN frame=%u op=begin rc=0x%x swap=%u surface=%u\n",frame,rc,swap,IOSurfaceGetID(surface));if(rc)fail("present-begin");
         rc=layer(fb,0,surface,rect,rect,0);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN frame=%u op=layer rc=0x%x\n",frame,rc);if(rc)fail("present-layer");
         rc=end(fb);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN frame=%u op=end rc=0x%x\n",frame,rc);if(rc)fail("present-end");
-        rc=wait(fb,swap,0,2.0);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN frame=%u op=wait rc=0x%x\n",frame,rc);if(rc)fail("present-wait");
+        // 24A5430a IOMobileFramebufferWaitSurface at 0x22a3bf7c4 uses
+        // mode 1. Kernel a0bbf34-f54 distinguishes queued retirement from
+        // mode 0, which may wait while this remains the current image.
+        rc=wait(fb,swap,1,2.0);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN frame=%u op=wait rc=0x%x mode=1\n",frame,rc);if(rc)fail("present-wait");
     }
     rc=power(fb,0);fprintf(stderr,"GPU_LOAD_PRESENT_RETURN op=power-off rc=0x%x\n",rc);if(rc)fail("present-power-off");
     // Keep the final surface alive until the short-lived diagnostic exits.

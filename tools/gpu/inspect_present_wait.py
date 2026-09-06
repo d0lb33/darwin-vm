@@ -17,6 +17,7 @@ p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--bootkc',type=Path,required=True)
 p.add_argument('--out',type=Path,required=True)
 p.add_argument('--capstone',default='/opt/homebrew/lib/libcapstone.dylib')
+p.add_argument('--include-h17p',action='store_true',help='also disassemble the concrete H17P driver to trace observer registration')
 a=p.parse_args();data=a.bootkc.read_bytes()
 if hashlib.sha256(data).hexdigest()!=SHA:raise ValueError('unexpected BootKC; rederive addresses')
 table=0xfffffff00829a308
@@ -36,6 +37,13 @@ ranges=[('cache-allocation',0xfffffff00a0b917c,0xfffffff00a0b91b0),
         ('wait-dispatch',0xfffffff00a0bbd6c,0xfffffff00a0bbe44),
         ('gated-preflight',0xfffffff00a0c6fcc,0xfffffff00a0c715c),
         ('status-observer',0xfffffff00a0bc734,0xfffffff00a0bc79c)]
+if a.include_h17p:
+    ranges += [('shared-region',0xfffffff00a0cf5b8,0xfffffff00a0cf708),
+               ('region-accessor',0xfffffff00a0ce3ac,0xfffffff00a0ce3e4),
+               ('link-region-binding',0xfffffff00a0d46c4,0xfffffff00a0d47b8),
+               ('region-client-accessor',0xfffffff00a0d4bc0,0xfffffff00a0d4c48),
+               ('wait-current-vs-retired',0xfffffff00a0bbef8,0xfffffff00a0bbf70)]
+if a.include_h17p:ranges.append(('h17p',0xfffffff0091792c0,0xfffffff00919e9c4))
 a.out.mkdir(exist_ok=False);records=[]
 for name,lo,hi in ranges:
     block=data[lo-BASE:hi-BASE];insns=c.POINTER(Insn)()

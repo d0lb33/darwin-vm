@@ -36,7 +36,9 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
         uint32_t swap=UINT32_MAX;rc=begin(fb,&swap);if(rc)fail("present-begin");
         rc=layer(fb,0,surface,rect,rect,0);if(rc)fail("present-layer");
         rc=end(fb);if(rc){fprintf(stderr,"GPU_LOAD_ERROR frame=%u swap-end=0x%x\n",frame,rc);fail("present-end");}
-        rc=wait(fb,swap,0,2.0);if(rc){fprintf(stderr,"GPU_LOAD_ERROR frame=%u swap-wait=0x%x\n",frame,rc);fail("present-wait");}
+        // Match the guest's WaitSurface (0x22a3bf7c4): mode 1 waits for
+        // pending surface work; mode 0 additionally tracks the current image.
+        rc=wait(fb,swap,1,2.0);if(rc){fprintf(stderr,"GPU_LOAD_ERROR frame=%u swap-wait=0x%x\n",frame,rc);fail("present-wait");}
         double t3=now();samples[frame-1]=(struct Sample){[reply[@"gpu_us"] doubleValue],(t1-t0)*1e6,(t2-t1)*1e6,(t3-t2)*1e6,(t3-t0)*1e6,swap};
         if(frame%8==0)fprintf(stderr,"GPU_LOAD_PRESENT_PROGRESS frame=%u\n",frame);
     }}

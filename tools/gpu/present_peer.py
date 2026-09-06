@@ -1,10 +1,29 @@
 """Acceptance ledger: guest completion, identified normal scanouts, final pixels."""
-import hashlib,json,re,struct,zlib
+import hashlib,json,re,struct,time,zlib
 from pathlib import Path
 WIDTH,HEIGHT,ROW=1179,2556,4864
 BYTES=ROW*HEIGHT
 
 def fields(line):return dict(re.findall(r'(\w+)=([^ ]+)',line))
+def observe_native_recovery(out,offset,started):
+    with (Path(out)/'stderr.log').open('rb') as f:
+        f.seek(offset);data=f.read()
+    first=data.find(b'iomfb: presented ')
+    if b'iomfb: gpu-present frame=' in data:raise ValueError('GPU frame appeared after completed batch')
+    if first<0 or b'D594 nested completed, status 0x0' not in data[first:]:return None
+    return dict(verified=True,after_batch=True,log_offset=offset,host_started_ns=started,
+        host_observed_ns=time.monotonic_ns(),scope='new normal scanout and native completion appended after the batch recovery gate',evidence=data[first:].decode(errors='replace'))
+def verify_recovery(out):
+    out=Path(out)
+    before=json.loads((out/'present-recovery-baseline.json').read_text())
+    after=json.loads((out/'driver-display.json').read_text())
+    status=after['input_status']
+    if not after.get('fresh_ack') or after.get('stable_seconds')!=10 or status.get('guest_state')!='R' or after.get('presents',0)<=before.get('presents',0) or status.get('acked',0)<=before.get('acked',0):
+        raise ValueError('no fresh native presentation/input recovery after batch')
+    witness=json.loads((out/'post-batch-native.json').read_text())
+    if not witness.get('verified') or not witness.get('after_batch') or not observe_native_recovery(out,witness['log_offset'],witness['host_started_ns']):
+        raise ValueError('post-batch native scanout/completion witness missing')
+    return after
 def verify(out,events,records):
     out=Path(out);lines=[e['line'] for e in events if e.get('source')=='shared-ram-audit']
     raw=(out/'shared-ram.bin').read_bytes();head,=struct.unpack_from('<Q',raw,0x180)
@@ -31,6 +50,7 @@ def verify(out,events,records):
     ready=json.loads((out/'driver-readiness.json').read_text());status=json.loads((out/'input-status.json').read_text())
     if not ready.get('fresh_ack') or ready.get('stable_seconds')!=10 or status.get('guest_state')!='R' or status.get('acked',0)<=ready['input_status']['acked']:raise ValueError('native readiness/recovery')
     if 'GPU_LOAD_PRESENT_POWER_RESET request=0 rc=0x0' not in lines:raise ValueError('display power reset request failed')
+    verify_recovery(out)
     return dict(scope='resident-blur-GPU-conversion-normal-DCP-presentation',frames=33,dispatches=99,verification_reads_in_batch=0,frames_metadata=frames,scanouts=[dict(frame=int(a),swap=int(b),dva=c,host_ns=int(d)) for a,b,c,d in witnesses])
 
 def verify_final(out,events):

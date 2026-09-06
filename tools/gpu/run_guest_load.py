@@ -264,6 +264,7 @@ def main():
         probe_ready_since=None
         probe_ready_identity=None
         probe_ready_acks=0
+        present_recovery_baseline=None
         with (out/'wire.log').open('wb') as log:
             while time.monotonic()-started < a.seconds and proc.poll() is None:
                 if a.driver_mmio:
@@ -277,7 +278,23 @@ def main():
                             audit_complete=True;aux_complete=True
                             report['driver_complete_seconds']=time.monotonic()-started
                             report['completion_source']='shared-ram-audit'
-                    if audit_complete and not driver_boot:
+                    if audit_complete and a.driver_present:
+                        if present_recovery_baseline is None:
+                            present_recovery_baseline=json.loads((out/'input-status.json').read_text())
+                            present_recovery_baseline['log_offset']=(out/'stderr.log').stat().st_size
+                            present_recovery_baseline['host_started_ns']=time.monotonic_ns()
+                            aux_peer.ready_since=None
+                            atomic_json(out/'present-recovery-baseline.json',present_recovery_baseline)
+                        observation=aux_peer.observe_display()
+                        if observation and observation['presents']>present_recovery_baseline.get('presents',0) and observation['input_status'].get('acked',0)>present_recovery_baseline.get('acked',0):
+                            import present_peer
+                            witness=present_peer.observe_native_recovery(out,present_recovery_baseline['log_offset'],present_recovery_baseline['host_started_ns'])
+                            if witness:
+                                atomic_json(out/'post-batch-native.json',witness)
+                                report['native_observation']=observation
+                                atomic_json(out/'driver-display.json',observation)
+                                reason='guest load probe completed';break
+                    if audit_complete and not driver_boot and not a.driver_present:
                         reason='guest load probe completed';break
                 if a.probe_observe_display and aux_complete:
                     try:status=json.loads((out/'input-status.json').read_text())
@@ -302,7 +319,7 @@ def main():
                         raise TimeoutError('driver did not acknowledge host readiness within activation deadline')
                     if driver_ready_seen and not aux_complete and time.monotonic()-driver_last_progress>60:
                         raise TimeoutError('driver made no guest-stage or RPC progress for 60 seconds')
-                if driver_boot and aux_complete and (driver_child_exited or audit_complete):
+                if driver_boot and not a.driver_present and aux_complete and (driver_child_exited or audit_complete):
                     observation=aux_peer.observe_display()
                     if observation:
                         report['native_observation']=observation

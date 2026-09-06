@@ -1,5 +1,6 @@
 """Final display evidence must not accept a hash of the wrong or missing frame."""
 import hashlib
+import json
 from pathlib import Path
 import struct
 import tempfile
@@ -34,5 +35,27 @@ class FinalDisplayEvidence(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'scanout export'):p.verify_final(self.out,self.events)
         self.events[0]['line']=self.events[0]['line'].replace('frame=33','frame=32')
         with self.assertRaisesRegex(ValueError,'final pixel oracle'):p.verify_final(self.out,self.events)
+
+    def test_recovery_requires_new_display_and_ack_after_batch(self):
+        before=dict(presents=100,acked=25)
+        after=dict(presents=101,fresh_ack=True,stable_seconds=10,input_status=dict(guest_state='R',acked=26))
+        (self.out/'present-recovery-baseline.json').write_text(json.dumps(before))
+        (self.out/'stderr.log').write_text('iomfb: presented 1179x2556\nswap id 0 D594 nested completed, status 0x0\n')
+        (self.out/'post-batch-native.json').write_text(json.dumps(dict(verified=True,after_batch=True,log_offset=0,host_started_ns=1)))
+        target=self.out/'driver-display.json'
+        target.write_text(json.dumps(after));p.verify_recovery(self.out)
+        after['presents']=100;target.write_text(json.dumps(after))
+        with self.assertRaisesRegex(ValueError,'after batch'):p.verify_recovery(self.out)
+        after['presents']=101;after['input_status']['acked']=25;target.write_text(json.dumps(after))
+        with self.assertRaisesRegex(ValueError,'after batch'):p.verify_recovery(self.out)
+
+    def test_recovery_does_not_accept_old_frames_or_uncompleted_scanout(self):
+        log=self.out/'stderr.log';log.write_text('iomfb: presented old\nD594 nested completed, status 0x0\n')
+        offset=log.stat().st_size
+        self.assertIsNone(p.observe_native_recovery(self.out,offset,1))
+        with log.open('a') as f:f.write('iomfb: presented new\n')
+        self.assertIsNone(p.observe_native_recovery(self.out,offset,1))
+        with log.open('a') as f:f.write('D594 nested completed, status 0x0\n')
+        self.assertTrue(p.observe_native_recovery(self.out,offset,1)['verified'])
 
 if __name__=='__main__':unittest.main()
