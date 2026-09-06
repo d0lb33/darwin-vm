@@ -49,9 +49,12 @@
 #include <pthread/qos.h>
 #include <sys/time.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
-#define VERSION 12
+#define VERSION 13
+#define RECOVERY_ATTEMPTS 3
+#define RECOVERY_TIMEOUT_SECONDS 20
 
 typedef const void *CFRef;
 typedef void *Ref;
@@ -68,6 +71,7 @@ static Ref (*client_create)(CFRef, int, CFRef);
 static void (*client_set_matching)(Ref, CFRef);
 static void (*client_set_queue)(Ref, dispatch_queue_t);
 static void (*client_activate)(Ref);
+static void (*client_cancel)(Ref);
 static Ref (*vsc_create)(Ref, CFRef, void *, void *, void *);
 static int (*vsc_dispatch)(Ref, Ref);
 static CFRef (*svc_registry_id)(Ref);
@@ -92,6 +96,8 @@ static pthread_cond_t op_cond = PTHREAD_COND_INITIALIZER;
 static volatile char state = 'I';   /* I initialising, R ready, L lost */
 static volatile bool need_recovery;  /* services must be re-created */
 static unsigned recoveries;
+static bool recovery_in_progress;
+static unsigned recovery_generation;
 static uint32_t epoch;
 static bool validate_only;
 
@@ -136,22 +142,28 @@ static void *make_dict(const void **keys, const void **values, long n) {
 static void cb_notify(void *target, void *ctx, Ref svc, uint32_t type, CFRef prop) {
     struct vservice *v = target;
     (void)ctx; (void)svc; (void)prop;
-    say("DVM_HID_NOTIFY service=%s type=%u\n", v->name, type);
     /* HID.framework forwards only types 3..5 (thunk 0x2678a747c: sub #3,
      * cmp #2).  NATIVE_HID_FRESH1 observed 0, 2, 4 in that order while the
      * service was being created and then opened by backboardd, so 4 is
      * kIOHIDVirtualServiceOpenedByEventSystem; 3 and 5 are the unscheduled /
      * reset notifications that HID.framework reports as Terminated. */
+    pthread_mutex_lock(&lock);
+    /* Releasing a replaced client can generate its terminal notification on
+     * the same serial queue.  It must not tear down the new client. */
+    if (svc != v->service) {
+        pthread_mutex_unlock(&lock);
+        say("DVM_HID_NOTIFY_STALE service=%s type=%u\n", v->name, type);
+        return;
+    }
     if (type == 3 || type == 5) {
         state = 'L';
         announce();
-        pthread_mutex_lock(&lock);
         need_recovery = true;
         pthread_cond_signal(&op_cond);
-        pthread_mutex_unlock(&lock);
-    } else if (type == 4) {
-        say("DVM_HID_OPENED service=%s\n", v->name);
     }
+    pthread_mutex_unlock(&lock);
+    say("DVM_HID_NOTIFY service=%s type=%u\n", v->name, type);
+    if (type == 4) say("DVM_HID_OPENED service=%s\n", v->name);
 }
 static bool cb_set_property(void *target, void *ctx, Ref svc, CFRef key, CFRef value) {
     (void)target; (void)ctx; (void)svc; (void)key; (void)value;
@@ -210,6 +222,32 @@ static bool create_service(struct vservice *v, dispatch_queue_t queue) {
     return true;
 }
 
+/* Apple IOHIDFamily's HIDVirtualEventService.m calls
+ * IOHIDEventSystemClientCancel in -cancel (line 197), and its two Create
+ * results are ARC-bridged as owning CF references (line 177; the client
+ * wrapper releases its Create result in HIDEventSystemClient.m:51-55).
+ * Follow that lifecycle here.  Clear the published pointers before cancel:
+ * a terminal callback caused by teardown is stale, not a request to recover
+ * the replacement service. */
+static void destroy_service(struct vservice *v) {
+    Ref service, client;
+    pthread_mutex_lock(&lock);
+    service = v->service;
+    client = v->client;
+    v->service = NULL;
+    v->client = NULL;
+    v->registry_id = 0;
+    pthread_mutex_unlock(&lock);
+    if (client) client_cancel(client);
+    if (service) cf_release(service);
+    if (client) cf_release(client);
+}
+
+static void destroy_services(void) {
+    destroy_service(&touch_service);
+    destroy_service(&button_service);
+}
+
 static bool initialize_hid(void) {
     void *cf = dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_NOW | RTLD_GLOBAL);
     void *iokit = dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_NOW | RTLD_GLOBAL);
@@ -227,6 +265,7 @@ static bool initialize_hid(void) {
     S(client_set_matching, iokit, "IOHIDEventSystemClientSetMatching");
     S(client_set_queue, iokit, "IOHIDEventSystemClientSetDispatchQueue");
     S(client_activate, iokit, "IOHIDEventSystemClientActivate");
+    S(client_cancel, iokit, "IOHIDEventSystemClientCancel");
     S(vsc_create, iokit, "IOHIDVirtualServiceClientCreateWithCallbacks");
     S(vsc_dispatch, iokit, "IOHIDVirtualServiceClientDispatchEvent");
     S(svc_registry_id, iokit, "IOHIDServiceClientGetRegistryID");
@@ -290,6 +329,12 @@ static void *hid_thread(void *unused) {
     state = ok ? 'R' : 'L';
     announce();
     pthread_mutex_unlock(&lock);
+    if (!ok) {
+        /* A process which stays L forever is never restarted by launchd.
+         * Let KeepAlive retry after its throttle instead. */
+        say("DVM_HID_INIT restart\n");
+        _exit(75);
+    }
     return NULL;
 }
 
@@ -306,9 +351,13 @@ static void *hid_thread(void *unused) {
  */
 static bool held;
 static double held_x, held_y;
+static bool touch_down, touch_release_pending;
+static double touch_x, touch_y;
+static unsigned button_down;
 static uint64_t gesture_base_mach;
 static long long gesture_base_host_ms;
 static mach_timebase_info_data_t timebase;
+static unsigned op_generation;
 
 static uint64_t timeline_timestamp(long long host_ms) {
     uint64_t now = mach_absolute_time();
@@ -319,7 +368,16 @@ static uint64_t timeline_timestamp(long long host_ms) {
     return ts < now ? ts : now;   /* never post an event from the future */
 }
 
-struct op { uint32_t epoch, seq; char kind; double x, y; bool down, edge; unsigned usage; uint64_t ts; int notches; };
+struct op {
+    uint32_t epoch, seq;
+    unsigned generation;
+    char kind;
+    double x, y;
+    bool down, edge, report;
+    unsigned usage;
+    uint64_t ts;
+    int notches;
+};
 #define OP_QUEUE 32
 static struct op ops[OP_QUEUE];
 static unsigned op_head, op_len;
@@ -378,40 +436,91 @@ static bool scroll_gesture(double x, double y, int notches) {
 }
 
 /* Reader side: queue one HID operation; false when the worker is too far behind. */
-static bool queue_op(const struct record *r, char kind, double x, double y, bool down, bool edge, unsigned usage) {
+static bool queue_op(const struct record *r, char kind, double x, double y,
+                     bool down, bool edge, unsigned usage, bool report) {
     if (op_len >= OP_QUEUE) return false;
     struct op *o = &ops[(op_head + op_len) % OP_QUEUE];
-    *o = (struct op){r->epoch, r->seq, kind, x, y, down, edge, usage, timeline_timestamp(r->host_ms), r->c};
+    *o = (struct op){r->epoch, r->seq, op_generation, kind, x, y, down, edge,
+                     report, usage, timeline_timestamp(r->host_ms), r->c};
     op_len++;
     pthread_cond_signal(&op_cond);
     return true;
 }
 static bool release_contact(const struct record *r) {
-    if (!held) return true;
+    if (!held && !touch_down) return true;
+    double x = touch_down ? touch_x : held_x;
+    double y = touch_down ? touch_y : held_y;
     held = false;
-    return queue_op(r, 'T', held_x, held_y, false, true, 0);
+    bool queued = queue_op(r, 'T', x, y, false, true, 0, false);
+    if (queued) touch_release_pending = true;
+    return queued;
 }
+static unsigned button_bit(unsigned usage) {
+    return usage == 0x40 ? 1u : usage == 0x30 ? 2u : 0;
+}
+static bool release_buttons(const struct record *r) {
+    bool ok = true;
+    static const unsigned usages[] = {0x40, 0x30};
+    for (unsigned i = 0; i < sizeof(usages) / sizeof(usages[0]); i++) {
+        unsigned bit = button_bit(usages[i]);
+        if (!(button_down & bit)) continue;
+        if (queue_op(r, 'B', 0, 0, false, true, usages[i], false)) {
+            button_down &= ~bit;
+        } else {
+            ok = false;
+        }
+    }
+    return ok;
+}
+
+/* Re-creation can itself block while the event system is being replaced.  A
+ * helper process is disposable (launchd has KeepAlive), whereas an unbounded
+ * dispatch worker leaves the host permanently at I. */
+static void *recovery_watchdog(void *argument) {
+    unsigned generation = (unsigned)(uintptr_t)argument;
+    sleep(RECOVERY_TIMEOUT_SECONDS);
+    pthread_mutex_lock(&lock);
+    bool expired = recovery_in_progress && generation == recovery_generation;
+    pthread_mutex_unlock(&lock);
+    if (expired) {
+        say("DVM_HID_RECOVER timeout=%us generation=%u restart\n",
+            RECOVERY_TIMEOUT_SECONDS, generation);
+        _exit(75);
+    }
+    return NULL;
+}
+
 /* NATIVE_HID_RESTORE1/2: about a minute after a snapshot restore every
  * IOHIDVirtualServiceClientDispatchEvent started returning false while the
- * UI stayed live, so the event system had dropped our services.  Rebuild
- * them with fresh clients instead of staying dead; the reader answers
- * pings with state I meanwhile and QEMU drops input until R returns. */
+ * UI stayed live, so the event system had dropped our services.  Replacement
+ * services own fresh client references.  If that cannot complete promptly,
+ * exit for launchd instead of pinning this helper in I forever. */
 static void recover_services(void) {
     pthread_mutex_lock(&lock);
     state = 'I';
     announce();
     recoveries++;
+    recovery_in_progress = true;
+    unsigned generation = ++recovery_generation;
     say("DVM_HID_RECOVER begin count=%u\n", recoveries);
     pthread_mutex_unlock(&lock);
-    for (unsigned attempt = 1;; attempt++) {
+    pthread_t watchdog;
+    if (pthread_create(&watchdog, NULL, recovery_watchdog, (void *)(uintptr_t)generation)) {
+        say("DVM_HID_RECOVER watchdog-create restart\n");
+        _exit(75);
+    }
+    pthread_detach(watchdog);
+    destroy_services();
+    for (unsigned attempt = 1; attempt <= RECOVERY_ATTEMPTS; attempt++) {
         dispatch_queue_t queue = dispatch_queue_create("dvm-hid.services", DISPATCH_QUEUE_SERIAL);
-        touch_service.client = touch_service.service = NULL;
-        button_service.client = button_service.service = NULL;
         bool ok = create_service(&touch_service, queue) && create_service(&button_service, queue);
         pthread_mutex_lock(&lock);
         if (ok) {
             need_recovery = false;
             held = false;
+            touch_down = touch_release_pending = false;
+            button_down = 0;
+            recovery_in_progress = false;
             state = 'R';
             announce();
             say("DVM_HID_RECOVER done attempt=%u\n", attempt);
@@ -419,9 +528,12 @@ static void recover_services(void) {
             return;
         }
         pthread_mutex_unlock(&lock);
+        destroy_services();
         say("DVM_HID_RECOVER retry attempt=%u\n", attempt);
-        sleep(2);
+        if (attempt != RECOVERY_ATTEMPTS) sleep(2);
     }
+    say("DVM_HID_RECOVER failed attempts=%u restart\n", RECOVERY_ATTEMPTS);
+    _exit(75);
 }
 
 static void *dispatch_thread(void *unused) {
@@ -450,12 +562,34 @@ static void *dispatch_thread(void *unused) {
         uint64_t t0 = now_us();
         bool ok = o.kind == 'B' ? post_button_at(o.ts, o.usage, o.down)
                 : o.kind == 'W' ? scroll_gesture(o.x, o.y, o.notches)
-                                : post_touch_at(o.ts, o.x, o.y, o.down, o.edge);
-        say("DVMI2D %u %u %c %llu\n", o.epoch, o.seq, ok ? 'S' : 'F',
-            (unsigned long long)(now_us() - t0));
+                : o.kind == 'T' ? post_touch_at(o.ts, o.x, o.y, o.down, o.edge)
+                                : false;
+        uint64_t elapsed = now_us() - t0;
         pthread_mutex_lock(&lock);
+        /* A cancel or an epoch transition may have cleared the operation
+         * while it was already executing.  Balance any edge it did submit,
+         * but do not emit a second completion for the later record. */
+        if (ok && o.generation != op_generation) {
+            struct record cleanup = {.epoch = epoch};
+            if (o.kind == 'T' && o.down && !touch_release_pending)
+                queue_op(&cleanup, 'T', o.x, o.y, false, true, 0, false);
+            if (o.kind == 'B' && o.down)
+                queue_op(&cleanup, 'B', 0, 0, false, true, o.usage, false);
+        } else if (ok && o.kind == 'T') {
+            touch_down = o.down;
+            touch_x = o.x;
+            touch_y = o.y;
+            if (!o.down) touch_release_pending = false;
+        } else if (ok && o.kind == 'B' && button_bit(o.usage)) {
+            if (o.down) button_down |= button_bit(o.usage);
+            else button_down &= ~button_bit(o.usage);
+        }
         failures = ok ? 0 : failures + 1;
         if (failures >= 2) need_recovery = true;
+        pthread_mutex_unlock(&lock);
+        if (o.report) say("DVMI2D %u %u %c %llu\n", o.epoch, o.seq, ok ? 'S' : 'F',
+                          (unsigned long long)elapsed);
+        pthread_mutex_lock(&lock);
     }
 }
 
@@ -479,26 +613,51 @@ static bool parse(const char *line, struct record *r) {
 static char handle(const struct record *r) {
     if (validate_only) return 'Q';
     if (r->epoch != epoch) {
-        /* Host state was reset (restore, helper restart, overflow): whatever
-         * finger we still hold belongs to a gesture nobody can finish. */
-        if (state == 'R') release_contact(r);
-        held = false;
+        /* UART records already in flight from an old host epoch must never
+         * turn a later reset into a stale press.  QEMU epochs only increase
+         * during one helper lifetime (wrap is not a practical concern). */
+        if (epoch && r->epoch < epoch) return 'E';
+        /* Host state was reset (restore, helper restart, overflow).  Drop
+         * unsubmitted edges, then balance any edge already executing. */
+        op_generation++;
+        op_head = op_len = 0;
+        if (state == 'R') {
+            release_contact(r);
+            release_buttons(r);
+        } else {
+            held = false;
+            touch_down = touch_release_pending = false;
+            button_down = 0;
+        }
         epoch = r->epoch;
     }
     switch (r->kind) {
     case 'P': return 'Q';
     case 'C':
-        if (state != 'R') { held = false; return 'Q'; }
-        return release_contact(r) ? 'Q' : 'F';
+        if (state != 'R') {
+            held = false;
+            touch_down = touch_release_pending = false;
+            button_down = 0;
+            return 'Q';
+        }
+        /* C is host-side flow control, not an HID operation.  Its internal
+         * releases deliberately have no DVMI2D record for the C sequence. */
+        op_generation++;
+        op_head = op_len = 0;
+        return release_contact(r) && release_buttons(r) ? 'Q' : 'F';
     case 'B':
         if (state != 'R') return 'N';
         gesture_base_mach = mach_absolute_time();
         gesture_base_host_ms = r->host_ms;
-        return queue_op(r, 'B', 0, 0, r->b, true, r->a) ? 'Q' : 'F';
+        return queue_op(r, 'B', 0, 0, r->b, true, r->a, true) ? 'Q' : 'F';
     case 'W':
         if (state != 'R') return 'N';
-        if (held) return 'Q';               /* a real drag owns the finger */
-        return queue_op(r, 'W', r->a / 32767.0, r->b / 32767.0, false, false, 0) ? 'Q' : 'F';
+        /* The host must retain its dispatch window until every accepted W
+         * completes.  Report an ignored wheel as F through the worker rather
+         * than acknowledging it forever with no DVMI2D. */
+        if (held) return queue_op(r, 'X', 0, 0, false, false, 0, true) ? 'Q' : 'F';
+        return queue_op(r, 'W', r->a / 32767.0, r->b / 32767.0,
+                        false, false, 0, true) ? 'Q' : 'F';
     default: break;
     }
     if (state != 'R') { held = false; return 'N'; }
@@ -508,12 +667,14 @@ static char handle(const struct record *r) {
         gesture_base_mach = mach_absolute_time();
         gesture_base_host_ms = r->host_ms;
         held = true; held_x = x; held_y = y;
-        return queue_op(r, 'T', x, y, true, true, 0) ? 'Q' : 'F';
+        return queue_op(r, 'T', x, y, true, true, 0, true) ? 'Q' : 'F';
     }
-    if (!held) return 'Q';                  /* motion or release without a contact */
+    if (!held) {                             /* orphan records still complete */
+        return queue_op(r, 'X', 0, 0, false, false, 0, true) ? 'Q' : 'F';
+    }
     held_x = x; held_y = y;
     if (r->kind == 'U') held = false;
-    return queue_op(r, 'T', x, y, r->kind == 'M', r->kind == 'U', 0) ? 'Q' : 'F';
+    return queue_op(r, 'T', x, y, r->kind == 'M', r->kind == 'U', 0, true) ? 'Q' : 'F';
 }
 
 static void reader(void) {
@@ -537,25 +698,65 @@ static void reader(void) {
         pthread_mutex_lock(&lock);
         char code = handle(&r);
         char s = state;
-        pthread_mutex_unlock(&lock);
+        /* The worker cannot publish DVMI2D until this mutex is released, so
+         * the host always sees Q before the completion it authorises. */
         say("DVMI2A %u %u %c %c %llu %lld\n", r.epoch, r.seq, code, s,
             (unsigned long long)(now_us() - t0), delivery_ms);
+        pthread_mutex_unlock(&lock);
     }
     pthread_mutex_lock(&lock);
-    if (state == 'R') { struct record eof = {.epoch = epoch}; release_contact(&eof); }
+    if (state == 'R') {
+        struct record eof = {.epoch = epoch};
+        op_generation++;
+        op_head = op_len = 0;
+        release_contact(&eof);
+        release_buttons(&eof);
+    }
     pthread_mutex_unlock(&lock);
     say("DVM_HID_EOF error=%d errno=%d\n", ferror(stdin), errno);
 }
 
 /* The first helper instance died silently in three of five fresh boots
- * (no EOF, no error line, no corpse).  Log the terminating signal, then
- * let the default action run so launchd's KeepAlive restarts us. */
+ * (no EOF, no error line, no corpse).  This handler uses only async-signal-
+ * safe operations.  The old snprintf/signal/raise sequence could deadlock in
+ * an allocator crash, which is exactly when this evidence matters most. */
 static void on_signal(int number) {
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "DVM_HID_SIGNAL %d\n", number);
-    if (n > 0) write(STDERR_FILENO, buf, n);
-    signal(number, SIG_DFL);
-    raise(number);
+    static const char term[] = "DVM_HID_SIGNAL TERM\n";
+    static const char intr[] = "DVM_HID_SIGNAL INT\n";
+    static const char hup[] = "DVM_HID_SIGNAL HUP\n";
+    static const char segv[] = "DVM_HID_SIGNAL SEGV\n";
+    static const char bus[] = "DVM_HID_SIGNAL BUS\n";
+    static const char abrt[] = "DVM_HID_SIGNAL ABRT\n";
+    static const char ill[] = "DVM_HID_SIGNAL ILL\n";
+    static const char pipe[] = "DVM_HID_SIGNAL PIPE\n";
+    const char *message = NULL;
+    size_t length = 0;
+#define SIGNAL_MESSAGE(sig, text) case sig: message = text; length = sizeof(text) - 1; break
+    switch (number) {
+    SIGNAL_MESSAGE(SIGTERM, term);
+    SIGNAL_MESSAGE(SIGINT, intr);
+    SIGNAL_MESSAGE(SIGHUP, hup);
+    SIGNAL_MESSAGE(SIGSEGV, segv);
+    SIGNAL_MESSAGE(SIGBUS, bus);
+    SIGNAL_MESSAGE(SIGABRT, abrt);
+    SIGNAL_MESSAGE(SIGILL, ill);
+    SIGNAL_MESSAGE(SIGPIPE, pipe);
+    default: break;
+    }
+#undef SIGNAL_MESSAGE
+    if (message) write(STDERR_FILENO, message, length);
+    kill(getpid(), number);  /* SA_RESETHAND has restored the default action. */
+}
+
+static void install_signal_handlers(void) {
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = on_signal;
+    action.sa_flags = SA_RESETHAND;
+    sigemptyset(&action.sa_mask);
+    for (int *sig = (int[]){SIGTERM, SIGINT, SIGHUP, SIGSEGV, SIGBUS,
+                            SIGABRT, SIGILL, SIGPIPE, 0}; *sig; sig++)
+        sigaction(*sig, &action, NULL);
 }
 
 int main(int argc, char **argv) {
@@ -568,8 +769,7 @@ int main(int argc, char **argv) {
     if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB)) { perror("dvm-hid singleton lock"); return 1; }
     say("DVM_HID_START version=%d pid=%d\n", VERSION, getpid());
     if (!freopen("/dev/console", "r", stdin)) { perror("dvm-hid open console"); return 1; }
-    for (int *sig = (int[]){SIGTERM, SIGINT, SIGHUP, SIGSEGV, SIGBUS, SIGABRT, SIGILL, SIGPIPE, 0}; *sig; sig++)
-        signal(*sig, on_signal);
+    install_signal_handlers();
     sigset_t signals;
     sigemptyset(&signals);
     pthread_sigmask(SIG_SETMASK, &signals, NULL);
