@@ -95,6 +95,7 @@ static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t op_cond = PTHREAD_COND_INITIALIZER;
 static volatile char state = 'I';   /* I initialising, R ready, L lost */
 static volatile bool need_recovery;  /* services must be re-created */
+static bool initializing = true;     /* do not recover half-created services */
 static unsigned recoveries;
 static bool recovery_in_progress;
 static unsigned recovery_generation;
@@ -103,9 +104,9 @@ static bool validate_only;
 
 struct record { unsigned epoch, seq, a, b; int c; char kind; long long host_ms; };
 static uint64_t now_us(void) {
-    struct timeval tv;
-    gettimeofday(&tv, NULL);
-    return (uint64_t)tv.tv_sec * 1000000 + tv.tv_usec;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
 }
 
 static void say(const char *fmt, ...) {
@@ -313,7 +314,11 @@ static bool initialize_hid(void) {
         button_service.props = make_dict(k, v, 9);
     }
     dispatch_queue_t queue = dispatch_queue_create("dvm-hid.services", DISPATCH_QUEUE_SERIAL);
-    return create_service(&touch_service, queue) && create_service(&button_service, queue);
+    bool services_ok = create_service(&touch_service, queue) && create_service(&button_service, queue);
+    /* IOHIDEventSystemClientSetDispatchQueue retains its queue; retain no
+     * extra reference for every recovery attempt. */
+    dispatch_release(queue);
+    return services_ok;
 }
 
 static void *hid_thread(void *unused) {
@@ -326,8 +331,10 @@ static void *hid_thread(void *unused) {
     say("DVM_HID_INIT done ok=%d ms=%lld\n", ok,
         (long long)((t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_usec - t0.tv_usec) / 1000));
     pthread_mutex_lock(&lock);
-    state = ok ? 'R' : 'L';
+    state = ok && !need_recovery ? 'R' : 'L';
     announce();
+    initializing = false;
+    pthread_cond_broadcast(&op_cond);
     pthread_mutex_unlock(&lock);
     if (!ok) {
         /* A process which stays L forever is never restarted by launchd.
@@ -351,9 +358,11 @@ static void *hid_thread(void *unused) {
  */
 static bool held;
 static double held_x, held_y;
-static bool touch_down, touch_release_pending;
+static bool touch_down;
 static double touch_x, touch_y;
 static unsigned button_down;
+static bool touch_release_needed, touch_release_enqueued;
+static unsigned buttons_release_needed, buttons_release_enqueued;
 static uint64_t gesture_base_mach;
 static long long gesture_base_host_ms;
 static mach_timebase_info_data_t timebase;
@@ -381,6 +390,8 @@ struct op {
 #define OP_QUEUE 32
 static struct op ops[OP_QUEUE];
 static unsigned op_head, op_len;
+static bool dispatching;
+static struct op active_op;
 
 static bool post_touch_at(uint64_t ts, double x, double y, bool down, bool edge) {
     /* Range=1, touch=2, position=4, identity=32; transducer type 2 and
@@ -446,31 +457,60 @@ static bool queue_op(const struct record *r, char kind, double x, double y,
     pthread_cond_signal(&op_cond);
     return true;
 }
-static bool release_contact(const struct record *r) {
-    if (!held && !touch_down) return true;
-    double x = touch_down ? touch_x : held_x;
-    double y = touch_down ? touch_y : held_y;
-    held = false;
-    bool queued = queue_op(r, 'T', x, y, false, true, 0, false);
-    if (queued) touch_release_pending = true;
-    return queued;
+static bool queue_op_front(const struct record *r, char kind, double x, double y,
+                           bool down, bool edge, unsigned usage, bool report) {
+    if (op_len >= OP_QUEUE) return false;
+    op_head = (op_head + OP_QUEUE - 1) % OP_QUEUE;
+    ops[op_head] = (struct op){r->epoch, r->seq, op_generation, kind, x, y, down,
+                               edge, report, usage, timeline_timestamp(r->host_ms), r->c};
+    op_len++;
+    pthread_cond_signal(&op_cond);
+    return true;
 }
 static unsigned button_bit(unsigned usage) {
     return usage == 0x40 ? 1u : usage == 0x30 ? 2u : 0;
 }
-static bool release_buttons(const struct record *r) {
+/* Caller holds lock.  Recovery/cancel releases are placed ahead of fresh
+ * records, including records the reader accepted while an old dispatch was
+ * still blocked. */
+static bool schedule_releases(const struct record *r) {
     bool ok = true;
+    if (touch_release_needed && touch_down && !touch_release_enqueued) {
+        if (queue_op_front(r, 'T', touch_x, touch_y, false, true, 0, false)) {
+            touch_release_enqueued = true;
+        } else {
+            ok = false;
+        }
+    }
     static const unsigned usages[] = {0x40, 0x30};
     for (unsigned i = 0; i < sizeof(usages) / sizeof(usages[0]); i++) {
         unsigned bit = button_bit(usages[i]);
-        if (!(button_down & bit)) continue;
-        if (queue_op(r, 'B', 0, 0, false, true, usages[i], false)) {
-            button_down &= ~bit;
+        if (!(buttons_release_needed & button_down & bit) ||
+            (buttons_release_enqueued & bit)) continue;
+        if (queue_op_front(r, 'B', 0, 0, false, true, usages[i], false)) {
+            buttons_release_enqueued |= bit;
         } else {
             ok = false;
         }
     }
     return ok;
+}
+
+/* Cancel once for a packet, whether it arrived with a new epoch or as C in
+ * the current epoch.  Queued work is discarded; a down already in the worker
+ * is detected through active_op and balanced by the worker before new input. */
+static bool cancel_input(const struct record *r) {
+    op_generation++;
+    op_head = op_len = 0;
+    touch_release_enqueued = false;
+    buttons_release_enqueued = 0;
+    held = false;
+    if (touch_down || (dispatching && active_op.kind == 'T' && active_op.down))
+        touch_release_needed = true;
+    buttons_release_needed |= button_down;
+    if (dispatching && active_op.kind == 'B' && active_op.down)
+        buttons_release_needed |= button_bit(active_op.usage);
+    return schedule_releases(r);
 }
 
 /* Re-creation can itself block while the event system is being replaced.  A
@@ -514,12 +554,13 @@ static void recover_services(void) {
     for (unsigned attempt = 1; attempt <= RECOVERY_ATTEMPTS; attempt++) {
         dispatch_queue_t queue = dispatch_queue_create("dvm-hid.services", DISPATCH_QUEUE_SERIAL);
         bool ok = create_service(&touch_service, queue) && create_service(&button_service, queue);
+        dispatch_release(queue);
         pthread_mutex_lock(&lock);
         if (ok) {
             need_recovery = false;
             held = false;
-            touch_down = touch_release_pending = false;
-            button_down = 0;
+            touch_down = touch_release_needed = touch_release_enqueued = false;
+            button_down = buttons_release_needed = buttons_release_enqueued = 0;
             recovery_in_progress = false;
             state = 'R';
             announce();
@@ -546,7 +587,8 @@ static void *dispatch_thread(void *unused) {
     pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     pthread_mutex_lock(&lock);
     for (;;) {
-        while (!op_len && !need_recovery) pthread_cond_wait(&op_cond, &lock);
+        while (initializing || (!op_len && !need_recovery))
+            pthread_cond_wait(&op_cond, &lock);
         if (need_recovery) {
             op_head = op_len = 0;           /* stale gestures die with the service */
             pthread_mutex_unlock(&lock);
@@ -558,6 +600,10 @@ static void *dispatch_thread(void *unused) {
         struct op o = ops[op_head];
         op_head = (op_head + 1) % OP_QUEUE;
         op_len--;
+        dispatching = true;
+        active_op = o;
+        if (!o.report && o.kind == 'T' && !o.down) touch_release_enqueued = false;
+        if (!o.report && o.kind == 'B' && !o.down) buttons_release_enqueued &= ~button_bit(o.usage);
         pthread_mutex_unlock(&lock);
         uint64_t t0 = now_us();
         bool ok = o.kind == 'B' ? post_button_at(o.ts, o.usage, o.down)
@@ -566,23 +612,30 @@ static void *dispatch_thread(void *unused) {
                                 : false;
         uint64_t elapsed = now_us() - t0;
         pthread_mutex_lock(&lock);
+        dispatching = false;
         /* A cancel or an epoch transition may have cleared the operation
          * while it was already executing.  Balance any edge it did submit,
          * but do not emit a second completion for the later record. */
-        if (ok && o.generation != op_generation) {
-            struct record cleanup = {.epoch = epoch};
-            if (o.kind == 'T' && o.down && !touch_release_pending)
-                queue_op(&cleanup, 'T', o.x, o.y, false, true, 0, false);
-            if (o.kind == 'B' && o.down)
-                queue_op(&cleanup, 'B', 0, 0, false, true, o.usage, false);
-        } else if (ok && o.kind == 'T') {
+        if (ok && o.kind == 'T') {
             touch_down = o.down;
             touch_x = o.x;
             touch_y = o.y;
-            if (!o.down) touch_release_pending = false;
+            if (!o.down) touch_release_needed = false;
         } else if (ok && o.kind == 'B' && button_bit(o.usage)) {
             if (o.down) button_down |= button_bit(o.usage);
-            else button_down &= ~button_bit(o.usage);
+            else {
+                button_down &= ~button_bit(o.usage);
+                buttons_release_needed &= ~button_bit(o.usage);
+            }
+        }
+        if (o.generation != op_generation) {
+            struct record cleanup = {.epoch = epoch};
+            schedule_releases(&cleanup);
+        } else if (!ok && !o.report) {
+            /* An internal release failed.  Retry immediately; two failures
+             * still take the normal service-recovery path below. */
+            struct record cleanup = {.epoch = epoch};
+            schedule_releases(&cleanup);
         }
         failures = ok ? 0 : failures + 1;
         if (failures >= 2) need_recovery = true;
@@ -617,45 +670,32 @@ static char handle(const struct record *r) {
          * turn a later reset into a stale press.  QEMU epochs only increase
          * during one helper lifetime (wrap is not a practical concern). */
         if (epoch && r->epoch < epoch) return 'E';
-        /* Host state was reset (restore, helper restart, overflow).  Drop
-         * unsubmitted edges, then balance any edge already executing. */
-        op_generation++;
-        op_head = op_len = 0;
-        if (state == 'R') {
-            release_contact(r);
-            release_buttons(r);
-        } else {
-            held = false;
-            touch_down = touch_release_pending = false;
-            button_down = 0;
-        }
         epoch = r->epoch;
+        /* C itself is the one cancellation request for a new-epoch C. */
+        if (state == 'R' && r->kind != 'C') cancel_input(r);
+        else if (state != 'R') {
+            held = false;
+            touch_down = touch_release_needed = touch_release_enqueued = false;
+            button_down = buttons_release_needed = buttons_release_enqueued = 0;
+        }
     }
     switch (r->kind) {
     case 'P': return 'Q';
     case 'C':
-        if (state != 'R') {
-            held = false;
-            touch_down = touch_release_pending = false;
-            button_down = 0;
-            return 'Q';
-        }
+        if (state != 'R') return 'Q';
         /* C is host-side flow control, not an HID operation.  Its internal
          * releases deliberately have no DVMI2D record for the C sequence. */
-        op_generation++;
-        op_head = op_len = 0;
-        return release_contact(r) && release_buttons(r) ? 'Q' : 'F';
+        return cancel_input(r) ? 'Q' : 'F';
     case 'B':
         if (state != 'R') return 'N';
-        gesture_base_mach = mach_absolute_time();
-        gesture_base_host_ms = r->host_ms;
+        if (r->b) {
+            gesture_base_mach = mach_absolute_time();
+            gesture_base_host_ms = r->host_ms;
+        }
         return queue_op(r, 'B', 0, 0, r->b, true, r->a, true) ? 'Q' : 'F';
     case 'W':
         if (state != 'R') return 'N';
-        /* The host must retain its dispatch window until every accepted W
-         * completes.  Report an ignored wheel as F through the worker rather
-         * than acknowledging it forever with no DVMI2D. */
-        if (held) return queue_op(r, 'X', 0, 0, false, false, 0, true) ? 'Q' : 'F';
+        if (held) return 'E';                /* a real drag owns the finger */
         return queue_op(r, 'W', r->a / 32767.0, r->b / 32767.0,
                         false, false, 0, true) ? 'Q' : 'F';
     default: break;
@@ -663,15 +703,13 @@ static char handle(const struct record *r) {
     if (state != 'R') { held = false; return 'N'; }
     double x = r->a / 32767.0, y = r->b / 32767.0;
     if (r->kind == 'D') {
-        if (held) release_contact(r);       /* never stack two contacts */
+        if (held) cancel_input(r);           /* never stack two contacts */
         gesture_base_mach = mach_absolute_time();
         gesture_base_host_ms = r->host_ms;
         held = true; held_x = x; held_y = y;
         return queue_op(r, 'T', x, y, true, true, 0, true) ? 'Q' : 'F';
     }
-    if (!held) {                             /* orphan records still complete */
-        return queue_op(r, 'X', 0, 0, false, false, 0, true) ? 'Q' : 'F';
-    }
+    if (!held) return 'E';                   /* stale motion or release */
     held_x = x; held_y = y;
     if (r->kind == 'U') held = false;
     return queue_op(r, 'T', x, y, r->kind == 'M', r->kind == 'U', 0, true) ? 'Q' : 'F';
@@ -691,10 +729,10 @@ static void reader(void) {
         struct record r;
         if (!parse(p, &r)) { say("DVM_HID_REJECT %s\n", p); continue; }
         uint64_t t0 = now_us();
-        /* Delivery latency: QEMU stamps host wall-clock ms; the guest clock
-         * is host-synchronised through the RTC leaf (DARWIN_RTC_PV), so the
-         * difference measures UART FIFO -> kernel console -> fgets. */
-        long long delivery_ms = r.host_ms ? (long long)(t0 / 1000) - r.host_ms : -1;
+        /* QEMU stamps host monotonic time while this guest carries its own
+         * clock.  Cross-clock subtraction is not a latency metric and can
+         * underflow an unsigned dispatch duration, so leave it unavailable. */
+        long long delivery_ms = -1;
         pthread_mutex_lock(&lock);
         char code = handle(&r);
         char s = state;
@@ -707,10 +745,7 @@ static void reader(void) {
     pthread_mutex_lock(&lock);
     if (state == 'R') {
         struct record eof = {.epoch = epoch};
-        op_generation++;
-        op_head = op_len = 0;
-        release_contact(&eof);
-        release_buttons(&eof);
+        cancel_input(&eof);
     }
     pthread_mutex_unlock(&lock);
     say("DVM_HID_EOF error=%d errno=%d\n", ferror(stdin), errno);
