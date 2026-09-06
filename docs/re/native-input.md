@@ -1,5 +1,11 @@
 # Native input development (24A5430a)
 
+The current reviewed implementation is helper **v14** with QEMU `8b46eb6`.
+Read [the review and current runtime evidence](native-input-review.md) first: it
+fixes transport/recovery/cancellation defects and qualifies the historical
+Settings, Home, and restore conclusions below. A HID dispatch success is not
+a rendered UI transition; fresh runs also expose a separate display stall.
+
 ## Current transport: DVMI2 over the console UART (2026-09-05)
 
 The relay/Recap bridge is no longer the normal input path. The replacement
@@ -228,6 +234,20 @@ Right-click Home and mouse-wheel scrolling (helper v11, QEMU `native-input-qemu8
   not established. Helper v12 re-creates both virtual services after two
   consecutive dispatch failures or a reset notification and announces
   `I` -> `R`; see the v12 entry below for whether that recovers.
+
+Restore stability on this lineage (separate from input): `NATIVE_HID_HOME3`
+(fresh boot 6, helper v12, captured at the icon grid) hung on both of its
+restores, `NATIVE_HID_RESTORE3` and `RESTORE4`: no console output, frame
+count frozen, CPU 0 spinning at `0xfffffff02ac6107c` (static
+`0xfffffff00ac6107c`, a `wfe`/`isr_el1` spin loop waiting for the word at
+`[x9+0xd58]` to clear with an infinite timeout in `x1`) while the other five
+CPUs idled at `0xfffffff02aa654c8`. The lock holder never ran after the
+migration, which points at SMP/IPI or exclusive-monitor state across
+migration, not at the transport; QEMU itself kept its pings up and marked
+the guest `L` after 10 s of guest time as designed. `NATIVE_HID_HOME1/2`
+restored but replaced backboardd and SpringBoard within a minute. Restores
+of the older `POWERD_GUARD_BATTERY1` lineage did not show either symptom in
+this session (`NATIVE_HID_COMPAT1` loaded only).
 
 Known limitations:
 
