@@ -5,7 +5,10 @@
 #include "managed_guest.h"
 #endif
 static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void *bundle,double setupStart) {
-    id (*create)(id<MTLDevice>,id<MTLLibrary>,uint32_t)=dlsym(bundle,"DVMCreateResidentBlur");
+    uint32_t config[4];memcpy(config,ns.shared+DVM_PRESENT_CONFIG,sizeof(config));
+    uint32_t frameCount=config[0]?config[1]:33,hz=config[0]?config[2]:0;
+    if((config[0]&&config[0]!=1)||config[3]||frameCount<2||frameCount>DVM_PRESENT_MAX_FRAMES||(hz!=0&&hz!=30&&hz!=60))fail("present-batch-config");
+    id (*create)(id<MTLDevice>,id<MTLLibrary>,uint32_t,uint32_t)=dlsym(bundle,"DVMCreateResidentBlurBatch");
     NSDictionary *(*draw)(id,uint32_t)=dlsym(bundle,"DVMDrawResidentBlur");
     NSDictionary *(*verify)(id)=dlsym(bundle,"DVMVerifyResidentBlur");
     if(!create||!draw||!verify)fail("present-driver-extension");
@@ -60,16 +63,30 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
 #endif
     NSError *error=nil;dispatch_data_t data=dispatch_data_create(air.bytes,air.length,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),DISPATCH_DATA_DESTRUCTOR_DEFAULT);
     id<MTLLibrary> library=[device newLibraryWithData:data error:&error];if(!library)fail("present-library");
-    uint32_t nonce=arc4random();id resource=create(device,library,nonce);if(!resource)fail("present-resident-create");
+    uint32_t nonce=arc4random();id resource=create(device,library,nonce,frameCount);if(!resource)fail("present-resident-create");
 #ifdef DVM_SERVICE_POOL_CONTRACT
     mmioBarrier();if(((volatile uint32_t *)IOSurfaceGetBaseAddress(surface))[2]!=0x44564d43)fail("pool-host-to-guest-alias");
     fprintf(stderr,"GPU_LOAD_POOL_HOST_ALIAS verified=1 bytes=%u per_frame_copy=0 lifetime=vm\n",DVM_PRESENT_BUFFER_BYTES);
 #endif
     fprintf(stderr,"GPU_LOAD_PRESENT_SETUP us=%.0f nonce=%u surface=%u cache=0x700 width=1179 height=2556 row=4864\n",(now()-setupStart)*1e6,nonce,IOSurfaceGetID(surface));
-    struct Sample {double gpu,draw,delivery,swap,total;uint32_t swapID;} samples[33];
+    DVMPresentSample *samples=calloc(frameCount,sizeof(*samples));if(!samples)fail("present-timing-allocation");
     CGRect rect={{0,0},{1179,2556}};double batchStart=now(),steadyStart=0;
-    for(uint32_t frame=1;frame<=33;frame++){@autoreleasepool{
-        if(frame==2)steadyStart=now();double t0=now();
+    uint32_t slot=0,skipped=0;
+    for(uint32_t frame=1;frame<=frameCount;frame++){@autoreleasepool{
+        if(frame==2)steadyStart=now();
+        double target=now();
+        if(hz&&frame>=2){
+            target=steadyStart+(double)slot/hz;
+            double current=now();
+            if(frame>2&&current>target){
+                uint32_t missed=(uint32_t)((current-target)*hz)+1;
+                slot+=missed;skipped+=missed;target=steadyStart+(double)slot/hz;
+            }
+            // Absolute deadlines, with no catch-up burst. Sleep overshoot is
+            // included in start lateness and completion deadline measurements.
+            while((current=now())<target)usleep((useconds_t)((target-current)*1e6)+1);
+        }
+        double t0=now();
 #ifdef DVM_SHARED_SURFACE
         if(IOSurfaceLock(surface,0,NULL))fail("present-surface-lock");
 #endif
@@ -91,19 +108,25 @@ static void DVMRunPresentedBlur(id<MTLDevice>device,NSData*air,Namespace*ns,void
 #ifdef DVM_SERVICE_POOL_CONTRACT
         retire(resource,frame);
 #endif
-        double t3=now();samples[frame-1]=(struct Sample){[reply[@"gpu_us"] doubleValue],(t1-t0)*1e6,(t2-t1)*1e6,(t3-t2)*1e6,(t3-t0)*1e6,swap};
-        if(frame%8==0)fprintf(stderr,"GPU_LOAD_PRESENT_PROGRESS frame=%u\n",frame);
+        double t3=now();samples[frame-1]=(DVMPresentSample){[reply[@"gpu_us"] doubleValue],(t1-t0)*1e6,(t2-t1)*1e6,(t3-t2)*1e6,(t3-t0)*1e6,(target-batchStart)*1e6,(t0-batchStart)*1e6,(t3-batchStart)*1e6,swap,frame,slot,0};
+        if(frame>=2)slot++;
+        if(frame%(frameCount>120?240:8)==0)fprintf(stderr,"GPU_LOAD_PRESENT_PROGRESS frame=%u\n",frame);
     }}
-    double finished=now();fprintf(stderr,"GPU_LOAD_PRESENT_BATCH frames=33 wall_us=%.0f steady_wall_us=%.0f verification_reads=0\n",(finished-batchStart)*1e6,(finished-steadyStart)*1e6);
-    for(unsigned i=0;i<33;i++)fprintf(stderr,"GPU_LOAD_PRESENT_FRAME frame=%u gpu_us=%.3f draw_us=%.0f delivery_us=%.0f swap_us=%.0f total_us=%.0f swap=%u\n",i+1,samples[i].gpu,samples[i].draw,samples[i].delivery,samples[i].swap,samples[i].total,samples[i].swapID);
+    double finished=now();
+    size_t timingBytes=frameCount*sizeof(*samples);
+    memcpy(ns.shared+DVM_PRESENT_METRICS+16,samples,timingBytes);
+    uint32_t timingHeader[]={1,frameCount,sizeof(*samples),crc(samples,timingBytes)};
+    memcpy(ns.shared+DVM_PRESENT_METRICS,timingHeader,sizeof(timingHeader));mmioBarrier();
+    fprintf(stderr,"GPU_LOAD_PRESENT_BATCH frames=%u wall_us=%.0f steady_wall_us=%.0f verification_reads=0 ledger=1 hz=%u skipped=%u\n",frameCount,(finished-batchStart)*1e6,(finished-steadyStart)*1e6,hz,skipped);
+    free(samples);
     rc=power(fb,0);fprintf(stderr,"GPU_LOAD_PRESENT_POWER_RESET request=0 rc=0x%x\n",rc);if(rc)fail("present-power-reset");
     // Verification begins only after the final timed swap and batch timestamp.
     if(IOSurfaceLock(surface,kIOSurfaceLockReadOnly,NULL))fail("present-final-lock");
-    unsigned bad=DVMVerifyPresented(IOSurfaceGetBaseAddress(surface),nonce,33);
+    unsigned bad=DVMVerifyPresented(IOSurfaceGetBaseAddress(surface),nonce,frameCount);
     uint8_t sha[32];char text[65];CC_SHA256(IOSurfaceGetBaseAddress(surface),DVM_PRESENT_BYTES,sha);for(unsigned i=0;i<32;i++)snprintf(text+i*2,3,"%02x",sha[i]);
     if(IOSurfaceUnlock(surface,kIOSurfaceLockReadOnly,NULL)||bad)fail("present-final-pixels");
     NSDictionary *checked=verify(resource);if(![checked[@"verified"] boolValue])fail("present-host-final");
-    fprintf(stderr,"GPU_LOAD_PRESENT_FINAL verified=1 frame=33 nonce=%u sha=%s bad_pixels=0\n",nonce,text);
+    fprintf(stderr,"GPU_LOAD_PRESENT_FINAL verified=1 frame=%u nonce=%u sha=%s bad_pixels=0\n",frameCount,nonce,text);
     CFRelease(surface);
 #ifdef DVM_SERVICE_POOL_CONTRACT
     if(ns.unmap(ns.client,DVM_GPU_MEMORY_TYPE+2,mach_task_self(),(uintptr_t)surfaceBacking))fail("pool-unmap");

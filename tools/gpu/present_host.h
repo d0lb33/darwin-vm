@@ -12,7 +12,7 @@
 @property void *pixels;
 @property BOOL managed,displayPending;
 @property unsigned completionDelayUS;
-@property uint32_t nonce,lastFrame;
+@property uint32_t nonce,lastFrame,frameCount;
 @property id<MTLComputePipelineState> convert;
 @property id<MTLBuffer> destination;
 - (instancetype)initWithDevice:(id<MTLDevice>)device library:(id<MTLLibrary>)library destination:(void *)pointer nonce:(uint32_t)nonce;

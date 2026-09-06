@@ -11,6 +11,8 @@ if [[ "$mode" == --mmio-present-pool ]]; then mode=--mmio-present; shared_flags=
 if [[ "$mode" == --mmio-present-shared-probe ]]; then mode=--mmio-present; shared_flags=(-DDVM_SHARED_SURFACE); fi
 [[ "$mode" == nvme || "$mode" == --mmio || "$mode" == --mmio-binary || "$mode" == --mmio-blur || "$mode" == --mmio-present-contract || "$mode" == --mmio-present ]] || exit 2
 extra_flags=(-UDVM_DRIVER_MMIO)
+consumer_flags=(-UDVM_CA_PROBE)
+if [[ ${DVM_CA_PROBE:-0} == 1 ]]; then consumer_flags=(-DDVM_CA_PROBE); fi
 if [[ "$mode" == --mmio || "$mode" == --mmio-binary ]]; then extra_flags=(-DDVM_DRIVER_MMIO); fi
 if [[ "$mode" == --mmio-binary ]]; then extra_flags+=(-DDVM_DRIVER_BINARY); fi
 if [[ "$mode" == --mmio-blur ]]; then extra_flags=(-DDVM_DRIVER_MMIO -DDVM_DRIVER_BINARY -DDVM_DRIVER_BLUR); fi
@@ -30,7 +32,7 @@ partial=(-Wno-protocol -Wno-objc-protocol-property-synthesis)
 for name in driver_guest driver_probe driver_workload; do
     optimize=(-O1)
     if [[ ( "$mode" == --mmio-blur || "$mode" == --mmio-present ) && "$name" == driver_probe ]]; then optimize=(-O3); fi
-    xcrun clang -target arm64-apple-ios27.0 -isysroot "$sdk" -Wno-incompatible-sysroot "${flags[@]}" "${partial[@]}" "${extra_flags[@]}" "${shared_flags[@]}" "${optimize[@]}" -c "$repo/tools/gpu/$name.m" -o "$out/$name.o"
+    xcrun clang -target arm64-apple-ios27.0 -isysroot "$sdk" -Wno-incompatible-sysroot "${flags[@]}" "${partial[@]}" "${extra_flags[@]}" "${shared_flags[@]}" "${consumer_flags[@]}" "${optimize[@]}" -c "$repo/tools/gpu/$name.m" -o "$out/$name.o"
 done
 python3 - "$out" "$mode" <<'PY'
 from pathlib import Path
@@ -39,7 +41,7 @@ p=Path(sys.argv[1])
 extra={
  'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['OBJC_CLASS_$_NSBundle','OBJC_CLASS_$_NSMutableDictionary','OBJC_CLASS_$_NSArray','OBJC_CLASS_$_NSConstantDictionary'],
  'usr/lib/libSystem.tbd':['__memset_chk','bzero','clock_gettime','usleep','getpid','setvbuf','posix_memalign','arc4random','free','mach_task_self_',
- 'malloc','dispatch_queue_create','dispatch_sync','dispatch_async','dispatch_get_global_queue','dispatch_group_create','dispatch_group_enter','dispatch_group_leave','dispatch_group_wait',
+ 'malloc','calloc','dispatch_queue_create','dispatch_sync','dispatch_async','dispatch_get_global_queue','dispatch_group_create','dispatch_group_enter','dispatch_group_leave','dispatch_group_wait',
  'vfprintf','vsnprintf','sigaction','_exit','write','sched_yield','dispatch_queue_attr_make_with_qos_class','pthread_set_qos_class_self_np','setpriority',
  'dispatch_semaphore_create','dispatch_semaphore_signal','dispatch_semaphore_wait','dispatch_time','_NSConcreteStackBlock','_Block_object_assign','_Block_object_dispose','fwrite'],
  'usr/lib/libobjc.tbd':['objc_retainBlock','objc_sync_enter','objc_sync_exit'],
@@ -59,6 +61,7 @@ if sys.argv[2]!='nvme':
 PY
 link=(-target arm64-apple-ios27.0 -isysroot "$sdk" -Wno-incompatible-sysroot -F "$out/stubs/System/Library/Frameworks" -L "$out/stubs/usr/lib")
 frameworks=(-framework Foundation -framework CoreFoundation -framework IOSurface -framework Metal -lobjc)
+if [[ ${DVM_CA_PROBE:-0} == 1 ]]; then frameworks+=(-framework QuartzCore -framework CoreGraphics); fi
 xcrun clang "${link[@]}" -dynamiclib -Wl,-install_name,/usr/local/libexec/DVMProxy.bundle/DVMProxy "$out/driver_guest.o" "${frameworks[@]}" -o "$out/DVMProxy.bundle/DVMProxy"
 xcrun clang "${link[@]}" "$out/driver_probe.o" "$out/driver_workload.o" "${frameworks[@]}" -o "$out/dvm-gpu-load"
 codesign --force --sign - --timestamp=none "$out/DVMProxy.bundle"
@@ -73,11 +76,14 @@ python3 "$repo/tools/gpu/verify_guest_imports.py" --output "$out/import-provenan
 sed -n 's/^CDHash=//p' "$out/DVMProxy.codesign.txt" "$out/dvm-gpu-load.codesign.txt" > "$out/hashes.txt"
 python3 "$repo/build_tc.py" "$out/hashes.txt" "$out/helper.tc"
 xcrun clang "${flags[@]}" "$repo/tools/gpu/driver_host.m" -framework Metal -framework Foundation -o "$out/driver_host"
-xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_workload.m" "$repo/tools/gpu/driver_client.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/driver_client"
+xcrun clang "${flags[@]}" "${partial[@]}" "${consumer_flags[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_workload.m" "$repo/tools/gpu/driver_client.m" -framework Metal -framework Foundation -framework IOSurface -framework QuartzCore -framework CoreGraphics -o "$out/driver_client"
 xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_contract_test.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/driver_contract_test"
+xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_capability_test.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/driver_capability_test"
 cp "$repo/tools/gpu/present_"* "$repo/tools/gpu/blur_"* "$repo/tools/gpu/driver_"* "$repo/tools/gpu/build_driver.sh" "$out/"
 
 cp "$repo/qemu-sptm/include/xnu/darwin_gpu_transport.h" "$out/"
 cp "$repo/tools/gpu/managed_host.h" "$out/"
 cp "$repo/tools/gpu/managed_guest.h" "$out/"
+cp "$repo/tools/gpu/consumer_"* "$out/"
+printf "%s\n" "${DVM_CA_PROBE:-0}" > "$out/consumer-probe.txt"
 printf "%s\n" "$requested_mode" > "$out/transport-mode.txt"

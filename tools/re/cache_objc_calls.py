@@ -47,7 +47,9 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('cache_directory', type=Path)
     p.add_argument('disassembly', type=Path)
-    p.add_argument('--selector', required=True)
+    selection=p.add_mutually_exclusive_group(required=True)
+    selection.add_argument('--selector')
+    selection.add_argument('--all-selectors',action='store_true')
     a = p.parse_args()
     cache = Cache(a.cache_directory)
     resolved, function = {}, ''
@@ -63,7 +65,9 @@ def main():
                 resolved[address] = cache.selector(address)
             except (ValueError, UnicodeError):
                 resolved[address] = None
-        if resolved[address] == a.selector:
+        if a.all_selectors and resolved[address]:
+            print(line+' ; selector='+resolved[address])
+        elif not a.all_selectors and resolved[address] == a.selector:
             print(function, line, sep='\n')
 
 

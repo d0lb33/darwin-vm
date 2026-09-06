@@ -4,6 +4,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #include "driver_binary.h"
+#include "driver_capabilities.h"
 #include "blur_wire.h"
 #include "present_host.h"
 #include <fcntl.h>
@@ -18,7 +19,7 @@ enum {
     kMaxObjects = 128,
     kMaxTextures = 32 * 1024 * 1024,
     kMaxDispatches = 32,
-    kMaxDimension = 512,
+    kMaxDimension = DVM_TEXTURE_DIMENSION,
     kMaxLibrary = 16 * 1024 * 1024
 };
 
@@ -136,7 +137,7 @@ static BOOL Add(DVMHost *host, NSString *kind, id object, DVMEntry **out) {
 }
 static BOOL Usage(id value, MTLTextureUsage *usage) {
     uint64_t u;
-    if (!Number(value, &u) || !u || (u & ~3u))
+    if (!Number(value, &u) || !u || (u & ~DVM_TEXTURE_USAGE_MASK))
         return NO;
     *usage = (MTLTextureUsage)u;
     return YES;
@@ -247,7 +248,7 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     } else
         return HostError(seq, EINVAL, @"unsupported texture format");
     NSUInteger bytes = (NSUInteger)width * (NSUInteger)height * bpp;
-    if (bytes > 1024 * 1024)
+    if (bytes > DVM_TEXTURE_BYTES)
         return HostError(seq, EINVAL, @"texture exceeds framed transfer limit");
     if (bytes > kMaxTextures - host.textureBytes)
         return HostError(seq, ENOSPC, @"texture memory cap exceeded");
@@ -362,7 +363,7 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
 }
 static NSDictionary *Buffer(DVMHost *host, uint64_t seq, NSDictionary *r) {
     uint64_t n;
-    if (!Number(r[@"length"], &n) || !n || n > 1024 * 1024 || n > kMaxTextures - host.textureBytes)
+    if (!Number(r[@"length"], &n) || !n || n > DVM_BUFFER_BYTES || n > kMaxTextures - host.textureBytes)
         return HostError(seq, EINVAL, @"invalid buffer length");
     id<MTLBuffer> b = [host.device newBufferWithLength:n options:MTLResourceStorageModeShared];
     DVMEntry *e;
@@ -524,12 +525,15 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
     };
 }
 #include "present_host_submit.inc"
+#include "consumer_state_host.inc"
 
 static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *request) {
     NSString *op = request[@"op"];
     if (![op isKindOfClass:NSString.class])
         return HostError(seq, EINVAL, @"request lacks op");
+    if([op isEqual:@"capabilities"])return @{@"seq":@(seq),@"ok":@YES,@"contract":DVMContractProfile()};
     if([op hasPrefix:@"resident"])return ResidentRequest(host,seq,request);
+    if([op isEqual:@"depthState"])return DepthState(host,seq,request);
     if ([op isEqual:@"buffer"])
         return Buffer(host, seq, request);
     if ([op isEqual:@"library"])

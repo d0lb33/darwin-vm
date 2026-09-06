@@ -252,6 +252,9 @@ static NSData *library(void) {
 #ifdef DVM_DRIVER_PRESENT
 #include "present_workload.inc"
 #endif
+#ifdef DVM_CA_PROBE
+#include "consumer_probe.inc"
+#endif
 int main(int argc, char **argv) {
     @autoreleasepool {
         setvbuf(stderr, NULL, _IONBF, 0);
@@ -419,6 +422,9 @@ int main(int argc, char **argv) {
             if (![device conformsToProtocol:@protocol(MTLDevice)])
                 fail("device-protocol");
             fprintf(stderr, "GPU_LOAD_DRIVER_STAGE device-created\n");
+#ifdef DVM_CA_PROBE
+            DVMRunQuartzCoreConsumer(device);
+#endif
             #if defined(DVM_DRIVER_PRESENT)
             DVMRunPresentedBlur(device,air,ns,handle,setupStart);
 #elif defined(DVM_DRIVER_BLUR)
@@ -441,7 +447,7 @@ int main(int argc, char **argv) {
         } while (now() < until);
         if (!stats || [stats[@"submissions"] unsignedIntegerValue] !=
 #if defined(DVM_DRIVER_PRESENT)
-            33
+            ((uint32_t *)(ns.shared+DVM_PRESENT_METRICS))[1]
 #elif defined(DVM_DRIVER_BLUR)
             952
 #else
@@ -450,16 +456,18 @@ int main(int argc, char **argv) {
             ||
             [stats[@"live"][@"objects"] unsignedIntegerValue] != 0)
             fail("resource-retirement");
+#if defined(DVM_DRIVER_PRESENT)
+        fprintf(stderr,"GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions=%u resources=0\n",((uint32_t *)(ns.shared+DVM_PRESENT_METRICS))[1]);
+#else
         fprintf(
             stderr,
-            #if defined(DVM_DRIVER_PRESENT)
-            "GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions=33 resources=0\n"
-#elif defined(DVM_DRIVER_BLUR)
+            #if defined(DVM_DRIVER_BLUR)
             "GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0\n"
 #else
             "GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0\n"
 #endif
         );
+#endif
         activityEnd();
         return 0;
     }

@@ -29,6 +29,11 @@ def main():
             if path.is_symlink() or not path.is_file():
                 continue
             stream=a.reference_streams and path.name in ('guest-requests.bin','host-responses.bin')
+            compressed=False
+            if path.name in ('stderr.log.gz','serial.log.gz','wire.log.gz'):
+                ledger=path.with_name('compressed-logs.json')
+                if ledger.is_file():
+                    compressed=any(x['compressed']==path.name and x['compressed_sha256']==hashlib.sha256(path.read_bytes()).hexdigest() for x in json.loads(ledger.read_text()))
             mmio=False
             if a.mmio_frames:
                 if path.name=='shared-ram.bin' and path.stat().st_size==16*1024*1024:
@@ -60,7 +65,7 @@ def main():
                 request=path.with_name('guest-requests.bin').read_bytes()
                 if not request.startswith(b'LIBREF ') and request:
                     continue # legacy captures can contain the full Apple library
-            if (path.suffix not in ALLOWED and not stream and not mmio) or path.stat().st_size>16*1024*1024:
+            if (path.suffix not in ALLOWED and not stream and not mmio and not compressed) or path.stat().st_size>16*1024*1024:
                 continue
             relative=Path(source.name)/(path.relative_to(source) if source.is_dir() else Path(path.name))
             target=a.output/relative

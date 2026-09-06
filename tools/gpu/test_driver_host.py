@@ -84,6 +84,13 @@ class HostTests(unittest.TestCase):
     def test_oversized_frame(self):
         self.p.stdin.write(struct.pack('<I',2*1024*1024+1));self.p.stdin.flush()
         self.assertEqual(self.p.wait(timeout=5),3)
+    def test_depth_state_descriptor_validation_and_retirement(self):
+        good=dict(compare=7,write=False,front=[],back=[7,0,0,0,0xffffffff,0xffffffff])
+        for fields in (dict(good,compare=8),dict(good,write=0),dict(good,front=[0]),dict(good,back=[7,8,0,0,0,0])):
+            self.assertFalse(self.rpc('depthState',**fields)['ok'])
+        state=self.rpc('depthState',**good);self.assertTrue(state['ok'])
+        self.assertTrue(self.rpc('release',handle=state['handle'])['ok'])
+        self.assertEqual(self.rpc('stats')['live']['objects'],0)
     def test_resource_limits_and_typed_counts(self):
         self.assertFalse(self.rpc('buffer',length=True)['ok'])
         self.assertFalse(self.rpc('texture',width=512,height=512,format=115,usage=1)['ok'])
@@ -94,6 +101,10 @@ class HostTests(unittest.TestCase):
         self.assertEqual(live['resourceBytes'],16)
 
 class DriverTests(unittest.TestCase):
+    def test_capability_batch_is_negotiated_and_bound_to_validation(self):
+        result=subprocess.run([str(BUILD/'driver_capability_test')],capture_output=True,text=True,timeout=10)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('unsupported_stages_zero=1',result.stderr)
     def test_host_bootstrap_precedes_guest_and_preserves_first_sequence(self):
         with tempfile.TemporaryDirectory() as root:
             peer=DriverPeer(Path(root),BUILD/'driver_host',AIR,boot=True)

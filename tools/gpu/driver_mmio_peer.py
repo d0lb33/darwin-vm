@@ -61,6 +61,9 @@ class MMIOPeer(DriverPeer):
             self.close();raise
     def release(self,evidence):
         self.ram[0x100:0x120]=bytes.fromhex(AIR_SHA)
+        if hasattr(self,'present_config'):
+            frames,hz=self.present_config
+            struct.pack_into('<4I',self.ram,0x200,1,frames,hz,0)
         self.sock.sendall(struct.pack('<QII',0,0,0))
         self.released=True;self.released_at=time.monotonic()
         evidence.update(elapsed=self.released_at-self.started,bootstrap=self.bootstrap)

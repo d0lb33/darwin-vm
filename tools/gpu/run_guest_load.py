@@ -40,6 +40,8 @@ def main():
     p.add_argument('--probe-observe-display',action='store_true',
         help='after a standalone probe completes, require native presentation and stable input with a fresh ACK')
     p.add_argument('--driver-present',action='store_true',help='mode-3 resident blur acceptance with normal DCP frame witness')
+    p.add_argument('--present-frames',type=int,default=33,help='bounded batch size, including first-use frame (2..8192)')
+    p.add_argument('--present-hz',type=int,choices=(0,30,60),default=0,help='absolute guest pacing; zero is unpaced')
     p.add_argument('--driver-mmio',action='store_true',help='use shared RAM and MMIO notifications with --driver-worker')
     p.add_argument('--mmio-echo',action='store_true',help='owned 16 MiB shared RAM and dedicated MMIO echo device; no auxiliary namespace')
     p.add_argument('--aux-namespace', action='store_true',
@@ -68,8 +70,12 @@ def main():
     p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if not 2<=a.present_frames<=8192 or ((a.present_frames!=33 or a.present_hz) and not a.driver_present):
+        p.error('paced batch requires --driver-present and 2..8192 frames')
     if a.driver_present and (not a.driver_mmio or not a.driver_worker or (a.driver_worker.parent/"transport-mode.txt").read_text().strip() not in ("--mmio-present","--mmio-present-pool")):
         p.error("presentation requires the matching resident MMIO build")
+    if (a.present_frames!=33 or a.present_hz) and 'DVM_PRESENT_METRICS' not in (a.driver_worker.parent/'present_layout.h').read_text():
+        p.error('paced batch requires a timing-ledger capable driver build')
     if a.driver_worker and (a.driver_worker.parent/"transport-mode.txt").is_file() and (a.driver_worker.parent/"transport-mode.txt").read_text().strip() in ("--mmio-present","--mmio-present-pool") and not a.driver_present:
         p.error("resident MMIO build requires --driver-present and its display witness")
     if a.driver_mmio and (not a.driver_worker or a.aux_namespace or a.driver_failure_snapshot):
@@ -156,6 +162,9 @@ def main():
     if a.driver_worker:
         peer_class=MMIOPeer if a.driver_mmio else DriverPeer
         aux_peer=peer_class(out,a.driver_worker,a.library_cache,boot=driver_boot)
+        if a.driver_present and (a.present_frames!=33 or a.present_hz):
+            aux_peer.present_config=(a.present_frames,a.present_hz)
+            atomic_json(out/'present-config.json',dict(frames=a.present_frames,hz=a.present_hz))
         if a.driver_mmio:
             shutil.copyfile(Path(__file__).with_name("driver_mmio_peer.py"),out/"driver_mmio_peer.py")
             shutil.copyfile(Path(__file__).with_name("driver_binary.py"),out/"driver_binary.py")
@@ -282,7 +291,7 @@ def main():
                         driver_last_progress=time.monotonic()
                         if 'GPU_LOAD_DRIVER_READY' in line:driver_ready_seen=True
                         if 'GPU_LOAD_ERROR' in line:raise RuntimeError('shared-RAM guest failure: '+line)
-                        if line in ('GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions=33 resources=0'):
+                        if line in ('GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0',f'GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions={a.present_frames} resources=0'):
                             audit_complete=True;aux_complete=True
                             report['driver_complete_seconds']=time.monotonic()-started
                             report['completion_source']='shared-ram-audit'

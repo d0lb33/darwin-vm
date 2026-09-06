@@ -5,6 +5,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+import zlib
 import present_peer as p
 
 class FinalDisplayEvidence(unittest.TestCase):
@@ -57,5 +58,21 @@ class FinalDisplayEvidence(unittest.TestCase):
         self.assertIsNone(p.observe_native_recovery(self.out,offset,1))
         with log.open('a') as f:f.write('D594 nested completed, status 0x0\n')
         self.assertTrue(p.observe_native_recovery(self.out,offset,1)['verified'])
+
+class TimingEvidence(unittest.TestCase):
+    def ledger(self):
+        raw=bytearray(0x210010+2*80)
+        payload=b''.join(struct.pack('<8d4I',1,2,3,4,9,i*20000,i*20000+1,i*20000+10,17+i,i+1,i,0) for i in range(2))
+        struct.pack_into('<4I',raw,0x210000,1,2,80,zlib.crc32(payload))
+        raw[0x210010:]=payload
+        return raw
+    def test_corruption_size_and_nan_fail_closed(self):
+        raw=self.ledger();self.assertEqual(p.timing_ledger(raw,2)[1]['frame'],2)
+        with self.assertRaisesRegex(ValueError,'header'):p.timing_ledger(raw,3)
+        raw[-1]^=1
+        with self.assertRaisesRegex(ValueError,'CRC'):p.timing_ledger(raw,2)
+        raw=self.ledger();struct.pack_into('<d',raw,0x210010,float('nan'))
+        struct.pack_into('<I',raw,0x21000c,zlib.crc32(raw[0x210010:]))
+        with self.assertRaisesRegex(ValueError,'values'):p.timing_ledger(raw,2)
 
 if __name__=='__main__':unittest.main()

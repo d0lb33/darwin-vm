@@ -4,6 +4,10 @@
 #include <time.h>
 #include <unistd.h>
 int DVMRunLuma(id<MTLDevice>, NSData *, unsigned);
+#ifdef DVM_CA_PROBE
+static void fail(const char *s){fprintf(stderr,"GPU_LOAD_ERROR driver=%s\n",s);exit(1);}
+#include "consumer_probe.inc"
+#endif
 static BOOL transfer(int fd, void *p, size_t n, BOOL writeMode) {
     while (n) {
         ssize_t k = writeMode ? write(fd, p, n) : read(fd, p, n);
@@ -68,6 +72,10 @@ int main(int argc, const char **argv) {
             }
         };
         @autoreleasepool {
+#ifdef DVM_CA_PROBE
+            if(!strcmp(argv[1],"consumer"))DVMRunQuartzCoreConsumer(DVMCreateMetalDevice(rpc));
+            else
+#endif
             DVMRunLuma(DVMCreateMetalDevice(rpc), air, (unsigned)atoi(argv[3]));
         }
         // Verify asynchronous retirement with a bounded condition, including

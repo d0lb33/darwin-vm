@@ -77,3 +77,15 @@ class ManagedTests(unittest.TestCase):
         self.assertFalse(self.rpc('release',handle=handle)['ok'])
         self.assertTrue(self.rpc('residentRetire',handle=handle,frame=1)['ok'])
         self.assertTrue(self.rpc('release',handle=handle)['ok'])
+    def test_extended_frame_identity_and_early_verification(self):
+        library=self.library()
+        for frames in (True,1,8193):
+            self.assertFalse(self.rpc('residentCreate',library=library,nonce=7,frames=frames)['ok'])
+        handle=self.rpc('residentCreate',library=library,nonce=7,frames=257)['handle']
+        for frame in range(1,258):
+            self.assertTrue(self.rpc('residentDraw',handle=handle,frame=frame)['ok'])
+            self.assertTrue(self.rpc('residentRetire',handle=handle,frame=frame)['ok'])
+            if frame==33:self.assertFalse(self.rpc('residentVerify',handle=handle)['ok'])
+        self.assertFalse(self.rpc('residentDraw',handle=handle,frame=258)['ok'])
+        self.assertTrue(self.rpc('residentVerify',handle=handle)['ok'])
+        self.assertEqual(struct.unpack_from('<I',read_resource(self.out),12)[0],0xff000101)

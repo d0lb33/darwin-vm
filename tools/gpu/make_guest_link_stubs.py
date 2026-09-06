@@ -31,7 +31,7 @@ foundation = {
  '_OBJC_CLASS_$_NSNumber','_OBJC_CLASS_$_NSString',
 }
 corefoundation = {
- '_CFRelease','_CFRetain','___CFConstantStringClassReference','___kCFBooleanTrue',
+ '_CFRelease','_CFRetain','___CFConstantStringClassReference','___kCFBooleanTrue','___kCFBooleanFalse',
  # Clang emits this exception type reference for the parent harness's @catch.
  # Its 24A5430a Foundation symbol table records CoreFoundation as provider.
  '_OBJC_EHTYPE_$_NSException',
@@ -65,6 +65,8 @@ tbd('System/Library/Frameworks/Foundation.framework/Foundation.tbd','/System/Lib
 tbd('System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd','/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation',corefoundation)
 tbd('System/Library/Frameworks/IOSurface.framework/IOSurface.tbd','/System/Library/Frameworks/IOSurface.framework/IOSurface',iosurface)
 tbd('System/Library/Frameworks/Metal.framework/Metal.tbd','/System/Library/Frameworks/Metal.framework/Metal',metal)
+tbd('System/Library/Frameworks/QuartzCore.framework/QuartzCore.tbd','/System/Library/Frameworks/QuartzCore.framework/QuartzCore', {'_OBJC_CLASS_$_CARenderer','_OBJC_CLASS_$_CALayer','_OBJC_CLASS_$_CATransaction','_kCARendererMetalCommandQueue'})
+tbd('System/Library/Frameworks/CoreGraphics.framework/CoreGraphics.tbd','/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics', {'_CGColorCreateGenericRGB','_CGColorRelease'})
 tbd('usr/lib/libobjc.A.tbd','/usr/lib/libobjc.A.dylib',objc)
 tbd('usr/lib/libobjc.tbd','/usr/lib/libobjc.A.dylib',objc)
 tbd('usr/lib/libSystem.tbd','/usr/lib/libSystem.B.dylib',system)

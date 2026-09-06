@@ -3,6 +3,8 @@
 #import "driver_api.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <IOSurface/IOSurface.h>
+#include "present_layout.h"
+#include "driver_capabilities.h"
 
 static NSError *error(NSString *s) {
     return [NSError errorWithDomain:@"DVMMetalDriver"
@@ -19,6 +21,8 @@ static void reject(NSString *s) {
 @property(nonatomic, strong) dispatch_queue_t serial;
 @property(nonatomic) BOOL submissionInFlight;
 @property(nonatomic) BOOL binaryPayloads;
+@property(nonatomic,strong) NSDictionary *negotiatedContract;
+- (NSDictionary *)contractCapabilities;
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err;
 - (void)retire:(NSNumber *)handle;
 @end
@@ -90,16 +94,49 @@ static void reject(NSString *s) {
 - (void)encoding;
 @end
 
+#include "consumer_state_guest.inc"
 @implementation DVMDevice
+- (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor *)d {return DVMNewDepth(self,d);}
 - (NSString *)name {
     return @"DVM host Metal (experimental compute subset)";
 }
-- (BOOL)hasUnifiedMemory {
-    return NO;
-} // Guest and host storage are explicitly copied.
+- (NSString *)vendorName {return @"Darwin VM";}
+- (NSDictionary *)contractCapabilities {
+    @synchronized(self) {
+        if(!_negotiatedContract) {
+            NSError *failure=nil;NSDictionary *r=[self call:@{@"op":@"capabilities"} error:&failure];
+            NSDictionary *profile=r[@"contract"];
+            if(![profile isEqual:DVMContractProfile()])reject(failure.description?:@"guest/host capability contract mismatch");
+            _negotiatedContract=DVMContractProfile();
+        }
+        return _negotiatedContract[@"queries"];
+    }
+}
+#define DVM_BOOL_GETTER(selector,value) - (BOOL)selector {return [[self contractCapabilities][@#selector] boolValue];}
+#define DVM_UINT_GETTER(selector,value) - (NSUInteger)selector {return [[self contractCapabilities][@#selector] unsignedIntegerValue];}
+DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
+#undef DVM_BOOL_GETTER
+#undef DVM_UINT_GETTER
+- (id<MTLBinaryArchive>)newBinaryArchiveWithDescriptor:(MTLBinaryArchiveDescriptor *)d error:(NSError **)err {
+    (void)d;if(err)*err=error(@"binary archive caching is not supported");return nil;
+}
 - (BOOL)supportsFamily:(MTLGPUFamily)family {
     (void)family;
     return NO;
+}
+- (BOOL)supportsFeatureSet:(MTLFeatureSet)set {(void)set;return NO;}
+- (BOOL)supportsTextureSampleCount:(NSUInteger)count {return count==1;}
+- (NSUInteger)requiredLinearTextureBytesPerRowForDescriptor:(MTLTextureDescriptor *)d {
+    // No linear-texture allocation/alias operation exists in this protocol.
+    // A guessed pitch would promise a resource contract we cannot honor.
+    reject([NSString stringWithFormat:@"linear textures unsupported by forwarding profile: type=%lu width=%lu height=%lu format=%lu usage=%lu storage=%lu",(unsigned long)d.textureType,(unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.pixelFormat,(unsigned long)d.usage,(unsigned long)d.storageMode]);
+    return 0;
+}
+- (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format {
+    (void)format;reject(@"linear textures unsupported by forwarding profile");return 0;
+}
+- (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(MTLPixelFormat)format {
+    (void)format;reject(@"texture-buffer views unsupported by forwarding profile");return 0;
 }
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err {
     __block NSDictionary *reply = nil;
@@ -145,6 +182,34 @@ static void reject(NSString *s) {
     o.functionNames = r[@"functionNames"];
     return o;
 }
+- (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)err {
+#ifdef DVM_CA_REHEARSAL
+#if TARGET_OS_IPHONE
+#error Host rehearsal substitution must never be in an iOS driver
+#endif
+    const char *rehearsal=getenv("DVM_REHEARSAL_AIR");
+    if(!rehearsal)reject(@"host rehearsal requires explicit AIR path");
+    fprintf(stderr,"DVM_HOST_REHEARSAL requested=%s substitute=%s scope=host-only\n",url.path.UTF8String,rehearsal);
+    url=[NSURL fileURLWithPath:@(rehearsal)];
+#endif
+    NSData *bytes=[NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:err];
+    if(!bytes)return nil;
+    // This driver accepts the independently verified exact-guest AIR slice.
+    // Preserve the requested file's bytes; never substitute a host library.
+    const uint8_t *p=bytes.bytes;NSUInteger offset=0,length=bytes.length;
+    if(length>=8&&p[0]==0xca&&p[1]==0xfe&&p[2]==0xba&&p[3]==0xbe){
+        uint32_t count=OSSwapBigToHostInt32(*(const uint32_t *)(p+4));
+        if(count>128||length<8+count*20){if(err)*err=error(@"fat library table");return nil;}
+        BOOL found=NO;
+        for(uint32_t i=0;i<count;i++){
+            uint32_t off=OSSwapBigToHostInt32(*(const uint32_t *)(p+8+i*20+8)),n=OSSwapBigToHostInt32(*(const uint32_t *)(p+8+i*20+12));
+            if(n==2705796&&(uint64_t)off+n<=length){offset=off;length=n;found=YES;break;}
+        }
+        if(!found){if(err)*err=error(@"requested file lacks the verified AIR slice");return nil;}
+    }
+    dispatch_data_t data=dispatch_data_create(p+offset,length,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),DISPATCH_DATA_DESTRUCTOR_DEFAULT);
+    return [self newLibraryWithData:data error:err];
+}
 - (id<MTLComputePipelineState>)newComputePipelineStateWithFunction:(id<MTLFunction>)f
                                                              error:(NSError **)err {
     if (![f isKindOfClass:DVMFunction.class] || ((DVMFunction *)f).library.owner != self) {
@@ -172,10 +237,11 @@ static void reject(NSString *s) {
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
     if (!d || d.textureType != MTLTextureType2D || d.depth != 1 || d.arrayLength != 1 ||
         d.mipmapLevelCount != 1 || d.sampleCount != 1 || d.storageMode != MTLStorageModeShared ||
-        d.width < 1 || d.height < 1 || d.width > 512 || d.height > 512 ||
+        d.width < 1 || d.height < 1 || d.width > DVM_TEXTURE_DIMENSION || d.height > DVM_TEXTURE_DIMENSION ||
         (d.pixelFormat != MTLPixelFormatBGRA8Unorm && d.pixelFormat != MTLPixelFormatRGBA16Float) ||
-        (d.usage & ~(MTLTextureUsageShaderRead | MTLTextureUsageShaderWrite)))
+        (d.usage & ~DVM_TEXTURE_USAGE_MASK))
         return nil;
+    if(d.width*d.height*(d.pixelFormat==MTLPixelFormatRGBA16Float?8:4)>DVM_TEXTURE_BYTES)return nil;
     NSError *e = nil;
     NSDictionary *r = [self call:@{
         @"op" : @"texture",
@@ -212,7 +278,7 @@ static void reject(NSString *s) {
     return q;
 }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)options {
-    if (!n || n > 1024 * 1024 || options != MTLResourceStorageModeShared)
+    if (!n || n > DVM_BUFFER_BYTES || options != MTLResourceStorageModeShared)
         return nil;
     NSError *e = nil;
     NSDictionary *r = [self call:@{@"op" : @"buffer", @"length" : @(n)} error:&e];
@@ -487,21 +553,21 @@ static void reject(NSString *s) {
 }
 - (void)setTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i {
     [self check];
-    if (i > 7 || ![t isKindOfClass:DVMTexture.class] || t.device != self.device)
+    if (i >= DVM_COMPUTE_BINDINGS || ![t isKindOfClass:DVMTexture.class] || t.device != self.device)
         reject(@"foreign texture or index");
     _textures[@(i)] = t;
 }
 - (void)setBytes:(const void *)p length:(NSUInteger)n atIndex:(NSUInteger)i {
     [self check];
-    if (!p || !n || n > 4096 || i > 7)
+    if (!p || !n || n > DVM_INLINE_BYTES || i >= DVM_COMPUTE_BINDINGS)
         reject(@"invalid inline bytes");
     _constants[@(i)] = [NSData dataWithBytes:p length:n];
     [_buffers removeObjectForKey:@(i)];
 }
 - (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)i {
     [self check];
-    if (i > 7 || ![b isKindOfClass:DVMBuffer.class] || b.device != self.device ||
-        offset >= b.length || offset % 16)
+    if (i >= DVM_COMPUTE_BINDINGS || ![b isKindOfClass:DVMBuffer.class] || b.device != self.device ||
+        offset >= b.length || offset % DVM_BUFFER_BINDING_ALIGNMENT)
         reject(@"invalid buffer binding");
     _buffers[@(i)] = @{@"object" : b, @"offset" : @(offset)};
     [_constants removeObjectForKey:@(i)];
@@ -511,7 +577,7 @@ static void reject(NSString *s) {
 }
 - (void)setThreadgroupMemoryLength:(NSUInteger)n atIndex:(NSUInteger)i {
     [self check];
-    if (i > 7 || !n || n > 16384 || n % 16)
+    if (i >= DVM_COMPUTE_BINDINGS || !n || n > 16384 || n % 16)
         reject(@"invalid threadgroup scratch");
     _scratch[@(i)] = @(n);
 }
@@ -581,28 +647,32 @@ id<MTLDevice> DVMCreateBinaryMetalDevice(DVMMetalRPC rpc) {
 // MTLTexture shared backing; explicit entry points keep that limitation visible.
 @interface DVMResidentTask : DVMObject
 @property(nonatomic,strong) DVMLibrary *library;
-@property(nonatomic) uint32_t lastFrame;
+@property(nonatomic) uint32_t lastFrame,frameCount;
 @end
 @implementation DVMResidentTask
 @end
-id DVMCreateResidentBlur(id<MTLDevice> device,id<MTLLibrary> library,uint32_t nonce) {
+id DVMCreateResidentBlurBatch(id<MTLDevice> device,id<MTLLibrary> library,uint32_t nonce,uint32_t frames) {
+    if(frames<2||frames>DVM_PRESENT_MAX_FRAMES)reject(@"resident frame budget");
     if(![(id)device isKindOfClass:DVMDevice.class]||![(id)library isKindOfClass:DVMLibrary.class])reject(@"resident object type");
     DVMDevice *d=(id)device;DVMLibrary *l=(id)library;
     if(l.owner!=d||!d.binaryPayloads||d.submissionInFlight)reject(@"resident device ownership/state");
-    NSError *e=nil;NSDictionary *r=[d call:@{@"op":@"residentCreate",@"library":l.handle,@"nonce":@(nonce)} error:&e];
+    NSError *e=nil;NSDictionary *r=[d call:@{@"op":@"residentCreate",@"library":l.handle,@"nonce":@(nonce),@"frames":@(frames)} error:&e];
     if(!r)reject(e.description);
-    DVMResidentTask *task=[DVMResidentTask new];task.owner=d;task.library=l;task.handle=r[@"handle"];return task;
+    DVMResidentTask *task=[DVMResidentTask new];task.owner=d;task.library=l;task.handle=r[@"handle"];task.frameCount=frames;return task;
+}
+id DVMCreateResidentBlur(id<MTLDevice> device,id<MTLLibrary> library,uint32_t nonce) {
+    return DVMCreateResidentBlurBatch(device,library,nonce,33);
 }
 NSDictionary *DVMDrawResidentBlur(id object,uint32_t frame) {
     if(![object isKindOfClass:DVMResidentTask.class])reject(@"resident object type");
     DVMResidentTask *task=object;
-    if(frame!=task.lastFrame+1||frame>33||task.owner.submissionInFlight)reject(@"resident frame sequence");
+    if(frame!=task.lastFrame+1||frame>task.frameCount||task.owner.submissionInFlight)reject(@"resident frame sequence");
     NSError *e=nil;NSDictionary*r=[task.owner call:@{@"op":@"residentDraw",@"handle":task.handle,@"frame":@(frame)} error:&e];
     if(!r||[r[@"frame"] unsignedIntValue]!=frame||[r[@"status"] unsignedIntValue]!=4)reject(e.description?:@"resident completion");
     task.lastFrame=frame;return r;
 }
 NSDictionary *DVMVerifyResidentBlur(id object) {
-    if(![object isKindOfClass:DVMResidentTask.class]||((DVMResidentTask *)object).lastFrame!=33)reject(@"resident final verification state");
+    if(![object isKindOfClass:DVMResidentTask.class]||((DVMResidentTask *)object).lastFrame!=((DVMResidentTask *)object).frameCount)reject(@"resident final verification state");
     DVMResidentTask *task=object;NSError *e=nil;
     NSDictionary*r=[task.owner call:@{@"op":@"residentVerify",@"handle":task.handle} error:&e];if(!r)reject(e.description);return r;
 }
