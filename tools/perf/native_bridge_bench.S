@@ -11,6 +11,7 @@
     msr S3_6_C15_C1_2, x0
     msr S3_6_C15_C8_1, x10
     msr tpidr_el2, x12
+    msr tpidr_el0, x12          /* never ledgered: native on both backends */
     b ready
 .org 0x100
 ready:
@@ -23,6 +24,10 @@ ready:
     b.eq sysread
     cmp x20, #3
     b.eq transition
+    cmp x20, #4
+    b.eq nativeread
+    cmp x20, #5
+    b.eq guardedread
 integer:
     add x9, x9, x11
     add x9, x9, x11
@@ -62,10 +67,32 @@ transition:
     subs x19, x19, #1
     b.ne transition
     b done
+nativeread:
+    mrs x11, tpidr_el0
+    add x9, x9, x11
+    subs x19, x19, #1
+    b.ne nativeread
+    b done
+guardedread:
+    /* One GENTER; the guarded handler sets TPIDR_GL2 and loops on it. */
+    mov x13, x19
+    .long 0x00201420
+    b done
 .org 0x200
 done:
     b done
 .org 0x300
 guarded:
+    cmp x20, #5
+    b.eq guarded_loop_entry
     add x9, x9, #1
+    .long 0x00201400
+guarded_loop_entry:
+    msr S3_6_C15_C11_1, x12
+    mov x19, x13
+guarded_loop:
+    mrs x11, S3_6_C15_C11_1
+    add x9, x9, x11
+    subs x19, x19, #1
+    b.ne guarded_loop
     .long 0x00201400

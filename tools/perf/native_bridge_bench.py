@@ -46,6 +46,9 @@ def run(a, accel, case, count, name, payload, ledger):
     if accel == 'hvf':
         env.update(QEMU_HVF_VIRTUAL_EL2='1', QEMU_HVF_VIRTUAL_SHADOW='1',
                    QEMU_HVF_VIRTUAL_LEDGER=str(ledger.resolve()))
+        for pair in a.bridge_env:
+            key, _, value = pair.partition('=')
+            env[key] = value
     remote = None
     item = dict(accel=accel, case=case, iterations=count, command=cmd, passed=False)
     with (a.out / f'{name}.stderr').open('w') as log:
@@ -109,7 +112,7 @@ def run(a, accel, case, count, name, payload, ledger):
             after = gprs()
             assert after[32] == STOP_PC, hex(after[32])
             assert after[19] == 0
-            expected = count * (24 if case < 2 else 0x1234 if case == 2 else 1)
+            expected = count * (24 if case < 2 else 0x1234 if case in (2, 4, 5) else 1)
             assert after[9] == expected, (after[9], expected)
             state = registers(remote)
             assert state['CURRENTG'] == 0
@@ -151,6 +154,10 @@ def main():
     ap.add_argument('--compute-count', type=int, default=100000000)
     ap.add_argument('--read-count', type=int, default=10000)
     ap.add_argument('--transition-count', type=int, default=1000)
+    ap.add_argument('--bridge-env', action='append', default=[],
+                    help='KEY=VALUE applied to HVF runs only (experiment knobs)')
+    ap.add_argument('--cases', default='',
+                    help='Comma-separated case labels to run (default: all)')
     a = ap.parse_args()
     if not 1 <= a.repeat <= 10 or not 1 <= a.compute_count <= 100000000:
         ap.error('repeat/compute count out of bounds')
@@ -166,6 +173,10 @@ def main():
     adapted = bytearray(raw)
     for off in range(0, len(raw), 4):
         word = struct.unpack_from('<I', raw, off)[0]
+        # TPIDR_EL0 accesses are left native on purpose: the native_read case
+        # measures a non-trapping register read as the fast-path ceiling.
+        if word in (0xd51bd04c, 0xd53bd04b):
+            continue
         if ((word & 0xffc00000 == 0xd5000000 and (word >> 19) & 3)
                 or word in (0x00201420, 0x00201400)):
             if word not in words:
@@ -184,7 +195,13 @@ def main():
                   host_load=os.getloadavg(), runs=[], medians={})
     cases = [('measurement_floor', 0, 0), ('integer', 0, a.compute_count),
              ('neon', 1, a.compute_count), ('tpidr_read', 2, a.read_count),
-             ('genter_gexit', 3, a.transition_count)]
+             ('genter_gexit', 3, a.transition_count),
+             ('native_read', 4, a.compute_count),
+             ('tpidr_gl2_read', 5, a.read_count)]
+    if a.cases:
+        wanted = set(a.cases.split(','))
+        cases = [c for c in cases if c[0] in wanted]
+    report['bridge_env'] = a.bridge_env
     def save():
         (a.out / 'results.json').write_text(json.dumps(report, indent=2))
     for rep in range(a.repeat):

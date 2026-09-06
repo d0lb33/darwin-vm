@@ -29,6 +29,8 @@ def main():
                     help='Negative control: remove initial native execute permission')
     ap.add_argument('--check-tables', type=Path,
                     help='Compare stopped guest table pages with a prior capture JSON')
+    ap.add_argument('--bridge-env', action='append', default=[],
+                    help='KEY=VALUE bridge knob passed to QEMU (e.g. QEMU_HVF_VIRTUAL_QUIET=1)')
     ap.add_argument('--memory', action='append', default=[], metavar='PA:SIZE',
                     help='Capture up to 64 KiB of physical guest RAM per range')
     a = ap.parse_args()
@@ -50,6 +52,9 @@ def main():
                DVM_QEMU=str(a.qemu.resolve()))
     if a.shadow:
         env['QEMU_HVF_VIRTUAL_SHADOW'] = '1'
+    for pair in a.bridge_env:
+        key, _, value = pair.partition('=')
+        env[key] = value
     if a.deny_shadow_exec:
         if not a.shadow:
             ap.error('--deny-shadow-exec requires --shadow')
