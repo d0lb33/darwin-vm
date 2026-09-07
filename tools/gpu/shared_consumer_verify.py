@@ -15,6 +15,8 @@ def fields(line):
 
 
 def verify_records(directory, lines, records, count, hz=0, scene=None):
+    from render_staging_capture import expand_render_staging
+    records=expand_render_staging(records)
     directory=Path(directory)
     # A running supervisor imports this verifier on its first completed job.
     # Retain the earlier call signature: derive a missing scene from the

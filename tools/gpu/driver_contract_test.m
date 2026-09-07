@@ -21,6 +21,8 @@ int main(void) {
                 NSString *op = r[@"op"];
                 if ([op isEqual:@"library"])
                     return @{@"handle" : @(++handle), @"functionNames" : @[ @"test" ]};
+                if ([op isEqual:@"function"])
+                    return @{@"handle":@(++handle),@"type":@(MTLFunctionTypeKernel)};
                 if ([op isEqual:@"pipeline"])
                     return @{
                         @"handle" : @(++handle),
@@ -58,6 +60,7 @@ int main(void) {
                 NSError *error = nil;
                 id<MTLLibrary> lib = [device newLibraryWithData:bytes error:&error];
                 id<MTLFunction> f = [lib newFunctionWithName:@"test"];
+                check(f.functionType==MTLFunctionTypeKernel,"owned function stage metadata");
                 check(![other newComputePipelineStateWithFunction:f error:&error] && error,
                       "foreign function rejected");
                 id<MTLComputePipelineState> p = [device newComputePipelineStateWithFunction:f

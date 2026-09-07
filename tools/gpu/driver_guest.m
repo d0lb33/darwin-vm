@@ -17,6 +17,7 @@ static NSError *error(NSString *s) {
 static void reject(NSString *s) {
     [NSException raise:NSInvalidArgumentException format:@"DVM Metal: %@", s];
 }
+#include "render_staging_guest.inc"
 static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSurfaceRef surface,NSUInteger plane){
     // The installed test supervisor exposes its checked audit writer. Driver
     // stderr alone is not retained by that guest launch path. Native clients
@@ -403,10 +404,10 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name {
     if (![_functionNames containsObject:name])
         return nil;
-    DVMFunction *f = [DVMFunction new];
-    f.library = self;
-    f.name = name;
-    return f;
+    // Unspecialized functions still need a real stage and owned native handle.
+    // A name-only placeholder reports functionType=0 to Metal descriptors.
+    MTLFunctionDescriptor *descriptor=[MTLFunctionDescriptor functionDescriptor];descriptor.name=name;
+    return [self newFunctionWithDescriptor:descriptor error:nil];
 }
 @end
 @implementation DVMFunction
@@ -709,7 +710,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                 NSMutableDictionary *request=[@{@"op":render?@"renderSubmit":blur?@"blurSubmit":@"submit",@"commands":self.commands,@"uploads":uploads,@"readbacks":readbacks} mutableCopy];
                 if(render)request[@"guestTaskIDs"]=self.responsibleTaskIDs;
                 if(blur){request[@"w"]=@(output.width);request[@"h"]=@(output.height);}
-                NSDictionary *r=self.commandQueue.owner.transport(request,&e);
+                NSDictionary *r=render?DVMRenderTransport(self.commandQueue.owner.transport,request,&e):self.commandQueue.owner.transport(request,&e);
                 if (!r || [r[@"status"] integerValue] != MTLCommandBufferStatusCompleted)
                     self.error = e ?: error(@"GPU did not complete");
                 else {

@@ -4,6 +4,7 @@
 // Actual guest UIKit content and diagnostics shared by offscreen/display tests.
 // CPU layer rendering is captured separately; it is not a byte-exact GPU oracle.
 #include "consumer_uikit_scene.inc"
+#include "consumer_uikit_effect_scene.inc"
 #ifdef DVM_CA_UIKIT_TRACE
 #import <objc/runtime.h>
 extern CFTypeID CABackingStoreGetTypeID(void);
@@ -27,6 +28,10 @@ static void *UIKitCopyRenderValue(id value,SEL selector){
     return result;
 }
 #endif
+static NSString *UIKitOneLine(id value){
+    NSString *text=[value description]?:@"nil";
+    return [[text stringByReplacingOccurrencesOfString:@"\n" withString:@" "] stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
+}
 static void UIKitInspect(CALayer *layer, const char *stage, unsigned depth){
     fprintf(stderr,"GPU_LOAD_UIKIT_LAYER stage=%s depth=%u class=%s delegate=%s width=%.0f height=%.0f contents=%s needs=%u flipped=%u contentflip=%u scale=%.1f\n",
         stage,depth,NSStringFromClass(layer.class).UTF8String,NSStringFromClass([(id)layer.delegate class]).UTF8String,
@@ -36,6 +41,10 @@ static void UIKitInspect(CALayer *layer, const char *stage, unsigned depth){
     fprintf(stderr,"GPU_LOAD_UIKIT_GEOMETRY stage=%s depth=%u frame=%.3f,%.3f,%.3f,%.3f corner_radius=%.3f corner_curve=%s masks=%u edge_mask=%u edge_aa=%u\n",
         stage,depth,frame.origin.x,frame.origin.y,frame.size.width,frame.size.height,
         layer.cornerRadius,layer.cornerCurve.UTF8String,layer.masksToBounds,(unsigned)layer.edgeAntialiasingMask,layer.allowsEdgeAntialiasing);
+    @try {
+        id background=[layer valueForKey:@"backgroundFilters"];
+        if(layer.filters.count||background)fprintf(stderr,"GPU_LOAD_UIKIT_FILTER stage=%s depth=%u layer=%s filters=%.160s background=%.160s\n",stage,depth,NSStringFromClass(layer.class).UTF8String,UIKitOneLine(layer.filters).UTF8String,UIKitOneLine(background).UTF8String);
+    }@catch(NSException *exception){(void)exception;}
     if(layer.contents){
         CFStringRef description=CFCopyDescription((__bridge CFTypeRef)layer.contents);
         NSString *singleLine=[(__bridge NSString *)description stringByReplacingOccurrencesOfString:@"\n" withString:@" "];

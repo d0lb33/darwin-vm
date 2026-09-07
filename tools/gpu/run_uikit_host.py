@@ -17,6 +17,7 @@ from analyze_uikit_capture import write_png
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('out',type=Path)
+    p.add_argument('--effect',choices=('none','blur','glass'),default='none',help='actual UIVisualEffectView over the checker')
     p.add_argument('--frames',type=int,choices=(1,3),default=1)
     p.add_argument('--display-animate',action='store_true',help='native reference for alternating card geometry/transparency')
     p.add_argument('--display-frame',type=int,help='native 1179x2556 display-layout reference with this final frame marker')
@@ -53,6 +54,7 @@ def main():
     if a.display_animate:env['DVM_UIKIT_DISPLAY_ANIMATE']='1'
     if a.display_frame is not None:env['DVM_UIKIT_DISPLAY_FRAME']=str(a.display_frame)
     env.pop('DVM_UIKIT_GUEST_RASTERS',None)
+    env['DVM_UIKIT_EFFECT']=str(('none','blur','glass').index(a.effect))
     if a.animate:env['DVM_UIKIT_HOST_ANIMATE']='1'
     if a.diagnostic_unsplit:env['DVM_UIKIT_DIAGNOSTIC_UNSPLIT']='1'
     if a.native_contract:env['DVM_UIKIT_NATIVE_CONTRACT']='1'
@@ -64,6 +66,7 @@ def main():
     metadata=dict(frames=a.frames,diagnostic_unsplit=a.diagnostic_unsplit,scope='host-catalyst-rehearsal-not-exact-guest',forwarded=bool(a.forwarded_library))
     metadata['frame_time_step_seconds']=1/60
     metadata['animate']=a.animate
+    metadata['effect']=a.effect
     metadata['display_frame']=a.display_frame
     metadata['display_animate']=a.display_animate
     metadata['width']=1179 if a.display_frame is not None else 320

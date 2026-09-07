@@ -1,6 +1,7 @@
 """Real AIR execution, malformed protocol, and public-selector driver checks."""
 import base64
 import copy
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -60,6 +61,66 @@ class HostTests(unittest.TestCase):
         self.assertFalse(self.rpc('renderSubmit',commands=[],uploads=[dict(texture=handle,row=16,data=data)],readbacks=[])['ok'])
         self.assertEqual(self.rpc('stats')['submissions'],before)
         self.assertFalse(self.rpc('texture',width=4,height=4,format=80,usage=5,storage=3)['ok'])
+
+    def test_private_block_write_usage_contract(self):
+        contract=self.rpc('capabilities')['contract']
+        self.assertEqual(contract['privateColorTextureAdditionalUsages'],[65541])
+        self.assertEqual(contract['privateColorTextureUsageFormats'],[70,80])
+        for fmt in (70,80):
+            t=self.rpc('texture',width=67,height=39,format=fmt,usage=65541,storage=2)
+            self.assertTrue(t['ok']);self.assertEqual(t['nativeStorageMode'],2)
+            self.assertFalse(self.rpc('read',texture=t['handle'])['ok'])
+            self.assertTrue(self.rpc('release',handle=t['handle'])['ok'])
+        for fields in (dict(storage=0),dict(storage=1),dict(format=1),dict(format=115),
+                       dict(type=7,depth=2),dict(usage=65536),dict(usage=65537),
+                       dict(usage=65540),dict(usage=65543),dict(usage=131077)):
+            request=dict(width=64,height=64,format=80,usage=65541,storage=2)
+            request.update(fields)
+            self.assertFalse(self.rpc('texture',**request)['ok'],request)
+        self.assertEqual(self.rpc('stats')['live']['objects'],0)
+
+    def test_staged_render_ownership_integrity_and_atomic_validation(self):
+        target=self.rpc('texture',width=64,height=64,format=80,usage=5)['handle']
+        original=bytes([71])*16384
+        self.rpc('upload',texture=target,row=256,data=base64.b64encode(original).decode())
+        good=dict(kind='render',target=target,load=2,store=1,clear=[1,0,0,1],operations=[['viewport',0,0,64,64,0,1]]*250)
+        request=dict(op='renderSubmit',commands=[good]*12,uploads=[],readbacks=[])
+        raw=json.dumps(request,separators=(',',':')).encode()
+        self.assertGreater(len(raw),65536)
+        sha=hashlib.sha256(raw).hexdigest()
+        self.assertFalse(self.rpc('renderStageBegin',length=2*1024*1024+1,sha256=sha)['ok'])
+        token=self.rpc('renderStageBegin',length=len(raw),sha256=sha)['token']
+        self.assertFalse(self.rpc('renderStageBegin',length=len(raw),sha256=sha)['ok'])
+        self.assertFalse(self.rpc('release',handle=target)['ok'])
+        self.assertFalse(self.rpc('renderSubmit',commands=[good],uploads=[],readbacks=[])['ok'])
+        self.assertFalse(self.rpc('renderStageCommit',token=token)['ok'])
+        for change in (dict(offset=1),dict(token=token+1),dict(payload=''),dict(payload=base64.b64encode(bytes(32769)).decode())):
+            chunk=dict(token=token,offset=0,payload=base64.b64encode(raw[:16]).decode());chunk.update(change)
+            self.assertFalse(self.rpc('renderStageChunk',**chunk)['ok'])
+        self.assertEqual(self.rpc('stats')['submissions'],0)
+        self.assertTrue(self.rpc('renderStageAbort',token=token)['ok'])
+        self.assertFalse(self.rpc('renderStageChunk',token=token,offset=0,payload='eA==')['ok'])
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=target)['data']),original)
+        def stage(data,digest=None):
+            begin=self.rpc('renderStageBegin',length=len(data),sha256=digest or hashlib.sha256(data).hexdigest())
+            self.assertTrue(begin['ok']);t=begin['token']
+            for offset in range(0,len(data),32768):
+                chunk=data[offset:offset+32768]
+                r=self.rpc('renderStageChunk',token=t,offset=offset,payload=base64.b64encode(chunk).decode())
+                self.assertTrue(r['ok']);self.assertEqual(r['offset'],offset+len(chunk))
+            return self.rpc('renderStageCommit',token=t)
+        self.assertFalse(stage(raw,'0'*64)['ok'])
+        bad=copy.deepcopy(request);bad['commands'][-1]['operations'].append(['pipeline',999999])
+        self.assertFalse(stage(json.dumps(bad).encode())['ok'])
+        self.assertEqual(self.rpc('stats')['submissions'],0)
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=target)['data']),original)
+        result=stage(raw)
+        self.assertTrue(result['ok']);self.assertEqual(result['status'],4)
+        self.assertEqual(result['stagedBytes'],len(raw));self.assertEqual(result['stagedSHA256'],sha)
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=target)['data']),bytes([0,0,255,255])*4096)
+        self.assertTrue(self.rpc('release',handle=target)['ok'])
+        live=self.rpc('stats')['live']
+        self.assertEqual((live['objects'],live['stagedRenderBytes'],live['stagedRenderTransactions']),(0,0,0))
 
     def test_alpha_only_sampled_texture(self):
         contract=self.rpc('capabilities')['contract']

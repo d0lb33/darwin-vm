@@ -20,6 +20,13 @@ int main(void){@autoreleasepool{
     texture.storageMode=MTLStorageModeShared;texture.usage=MTLTextureUsageShaderRead;
     check(![device newTextureWithDescriptor:texture],"advertised texture extent enforced");
     check(![device newBufferWithLength:DVM_BUFFER_BYTES+1 options:MTLResourceStorageModeShared],"advertised buffer extent enforced");
+    texture.width=16;texture.usage=65541;texture.storageMode=MTLStorageModeShared;
+    check(![device newTextureWithDescriptor:texture],"private block usage rejected on shared storage");
+    texture.storageMode=MTLStorageModePrivate;texture.usage=65543;
+    check(![device newTextureWithDescriptor:texture],"block usage compute writes unvalidated");
+    texture.usage=65541;texture.pixelFormat=MTLPixelFormatRGBA16Float;
+    check(![device newTextureWithDescriptor:texture],"block usage format bound");
+    texture.usage=MTLTextureUsageShaderRead;texture.storageMode=MTLStorageModeShared;texture.pixelFormat=MTLPixelFormatBGRA8Unorm;
     check(requests==1,"out of bounds rejected before transport");
     texture.width=16;texture.compressionType=MTLTextureCompressionTypeLossy;
     check(![device newTextureWithDescriptor:texture],"lossy allocation rejected by lossless contract");

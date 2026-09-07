@@ -1,7 +1,10 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 11u
+#define DVM_CONTRACT_VERSION 13u
+#define DVM_RENDER_REQUEST_BYTES (2u*1024u*1024u)
+#define DVM_RENDER_REQUEST_CHUNK 32768u
+#define DVM_RENDER_DIRECT_BYTES 60000u
 #define DVM_TEXTURE_TRANSFER_CHUNK 32768u
 #define DVM_QUEUED_COMMAND_BUFFERS 32u
 #define DVM_TEXTURE_DIMENSION 4096u
@@ -15,6 +18,9 @@
 #define DVM_RENDER_BUFFERS 31u
 #define DVM_INLINE_BYTES 4096u
 #define DVM_TEXTURE_USAGE_MASK 7u
+// Native Metal descriptor/texture descriptions identify this exact bit.
+// Preserve it for owned private 2D color textures; never silently clear it.
+#define DVM_TEXTURE_BLOCK_WRITES_ONLY 0x10000u
 #define DVM_MANAGED_PAGE_BYTES 16384u
 // Texture row/base alignment is separate from kernel page registration. The
 // owned BGRA IOSurface has a 4864-byte row (64 aligned), not a 16 KiB row.
@@ -32,6 +38,15 @@ static inline unsigned DVMFormatUsageMask(NSUInteger format) {
     // A8 is an alpha-only sampled image in this profile. It is not a color
     // attachment or compute-write target. Other existing formats keep v8 usage.
     return format==1?1:(DVMFormatBytes(format)?DVM_TEXTURE_USAGE_MASK:0);
+}
+static inline BOOL DVMTextureUsageValid(NSUInteger format,NSUInteger storage,NSUInteger type,NSUInteger usage) {
+    if(usage&DVM_TEXTURE_BLOCK_WRITES_ONLY) {
+        // Observed QuartzCore allocation: render writes followed by sampling.
+        // Compute writes and other private-bit combinations remain unvalidated.
+        return storage==MTLStorageModePrivate&&type==MTLTextureType2D&&
+            (format==70||format==80)&&usage==(DVM_TEXTURE_BLOCK_WRITES_ONLY|5u);
+    }
+    return usage&&!(usage&~DVMFormatUsageMask(format));
 }
 static inline unsigned DVMConstantBytes(NSUInteger type) {
     switch(type){case MTLDataTypeBool:case MTLDataTypeUChar:return 1;case MTLDataTypeUChar2:return 2;case MTLDataTypeUChar4:return 4;case MTLDataTypeUInt:case MTLDataTypeInt:case MTLDataTypeFloat:return 4;default:return 0;}
@@ -82,7 +97,10 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"color-attachment-feedback-v11",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"staged-render-and-private-color-v13",
+        @"privateColorTextureAdditionalUsages":@[@(DVM_TEXTURE_BLOCK_WRITES_ONLY|5u)],
+        @"privateColorTextureUsageFormats":@[@70,@80],
+        @"renderRequestBytes":@DVM_RENDER_REQUEST_BYTES,@"renderRequestChunkBytes":@DVM_RENDER_REQUEST_CHUNK,@"renderRequestTransactions":@1,
         @"framebufferRead":@"current-fragment-single-color-attachment-ordered-programmable-blending",
         @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureUploadTransactions":@1,
         @"queuedCommandBuffers":@DVM_QUEUED_COMMAND_BUFFERS,@"executionQueues":@1,

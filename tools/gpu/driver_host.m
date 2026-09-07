@@ -48,6 +48,9 @@ enum {
 @property(nonatomic) uint64_t nextHandle, lastSeq, creations, submissions;
 @property(nonatomic) NSUInteger renderPasses,renderDraws;
 @property(nonatomic) NSUInteger textureBytes,residentBytes;
+@property(nonatomic,strong) NSMutableData *renderStage;
+@property(nonatomic,copy) NSString *renderStageSHA;
+@property(nonatomic) uint64_t renderStageToken,renderStageLength;
 @end
 @implementation DVMHost
 @end
@@ -145,7 +148,7 @@ static BOOL Add(DVMHost *host, NSString *kind, id object, DVMEntry **out) {
 }
 static BOOL Usage(id value, MTLTextureUsage *usage) {
     uint64_t u;
-    if (!Number(value, &u) || !u || (u & ~DVM_TEXTURE_USAGE_MASK))
+    if (!Number(value, &u) || !u || (u & ~(DVM_TEXTURE_USAGE_MASK|DVM_TEXTURE_BLOCK_WRITES_ONLY)))
         return NO;
     *usage = (MTLTextureUsage)u;
     return YES;
@@ -254,7 +257,7 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
         return HostError(seq, EINVAL, @"invalid format");
     bpp=DVMFormatBytes(format);pixel=format;
     if(!bpp)return HostError(seq, EINVAL, @"unsupported texture format");
-    if(usage&~DVMFormatUsageMask(format))return HostError(seq,EINVAL,@"texture format usage contract");
+    if(!DVMTextureUsageValid(format,storage,type,usage))return HostError(seq,EINVAL,@"texture format usage contract");
     NSUInteger bytes = (NSUInteger)width * (NSUInteger)height * (NSUInteger)depth * bpp;
     if (bytes > (storage==MTLStorageModePrivate?DVM_PRIVATE_TEXTURE_BYTES:DVM_TEXTURE_BYTES))
         return HostError(seq, EINVAL, @"texture exceeds storage-mode byte limit");
@@ -271,6 +274,7 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     id<MTLTexture> texture = [host.device newTextureWithDescriptor:descriptor];
     if (!texture)
         return HostError(seq, ENOMEM, @"Metal texture allocation failed");
+    if(texture.usage!=usage)return HostError(seq,ENOTSUP,@"native texture usage differs from requested contract");
     DVMEntry *entry;
     if (!Add(host, @"texture", texture, &entry))
         return HostError(seq, ENOSPC, @"object table is full");
@@ -402,7 +406,8 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
             @"buffers" : @(buffers),
             @"objects" : @(host.entries.count),
             @"resourceBytes" : @(host.textureBytes+host.residentBytes),
-            @"residentWorkloads":@(host.residentBytes?1:0)
+            @"residentWorkloads":@(host.residentBytes?1:0),
+            @"stagedRenderBytes":@(host.renderStage.length),@"stagedRenderTransactions":@(host.renderStage?1:0)
         },
         @"creations" : @(host.creations),
         @"submissions" : @(host.submissions),@"renderPasses":@(host.renderPasses),@"renderDraws":@(host.renderDraws)
@@ -578,10 +583,14 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
 #include "consumer_function_host.inc"
 #include "shared_render_host.inc"
 
+static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *request);
+#include "render_staging_host.inc"
 static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *request) {
     NSString *op = request[@"op"];
     if (![op isKindOfClass:NSString.class])
         return HostError(seq, EINVAL, @"request lacks op");
+    if([op hasPrefix:@"renderStage"])return RenderStage(host,seq,request);
+    if(host.renderStage&&![op isEqual:@"stats"])return HostError(seq,EBUSY,@"incomplete render request transaction");
     if([op isEqual:@"writeTextureChunk"]||[op isEqual:@"abortTextureUpload"])return TextureChunk(host,seq,request);
     if([op isEqual:@"renderSubmit"]||[op isEqual:@"submit"]||[op isEqual:@"blurSubmit"])
         for(DVMEntry *e in host.entries.allValues)if(e.textureUpload)return HostError(seq,EBUSY,@"GPU submission during incomplete texture upload");
@@ -599,6 +608,13 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
         if(!alignment||DVM_SHARED_TEXTURE_ALIGNMENT%alignment||DVM_PRESENT_ROW%DVM_SHARED_TEXTURE_ALIGNMENT||
            DVM_MANAGED_PAGE_BYTES%DVM_SHARED_TEXTURE_ALIGNMENT)
             return HostError(seq,ENOTSUP,@"host cannot honor owned IOSurface alignment profile");
+        for(NSNumber *format in @[@70,@80]){
+            MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format.unsignedIntegerValue width:4 height:4 mipmapped:NO];
+            d.storageMode=MTLStorageModePrivate;d.usage=DVM_TEXTURE_BLOCK_WRITES_ONLY|5u;
+            id<MTLTexture> probe=[host.device newTextureWithDescriptor:d];
+            if(!probe||probe.usage!=d.usage||probe.storageMode!=d.storageMode)
+                return HostError(seq,ENOTSUP,@"host cannot honor private block-write color textures");
+        }
         return @{@"seq":@(seq),@"ok":@YES,@"contract":DVMContractProfile()};
     }
     if([op hasPrefix:@"resident"])return ResidentRequest(host,seq,request);

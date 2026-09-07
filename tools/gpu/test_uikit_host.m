@@ -4,7 +4,7 @@
 #import <QuartzCore/CARenderer.h>
 #import <QuartzCore/CALayer.h>
 #import <QuartzCore/CATransaction.h>
-#include "consumer_uikit_scene.inc"
+#include "consumer_uikit_support.inc"
 #include "consumer_uikit_raster_scene.inc"
 #include "consumer_uikit_display_scene.inc"
 #include <stdio.h>
@@ -70,7 +70,6 @@ static unsigned nativeLibraryCalls;
 #import "driver_api.h"
 #endif
 static void require(BOOL ok,const char *why){if(!ok){fprintf(stderr,"UIKIT_HOST_FAIL %s\n",why);exit(1);}}
-static void display(CALayer *layer){[layer setNeedsDisplay];[layer displayIfNeeded];for(CALayer *child in layer.sublayers)display(child);}
 int main(int argc,const char **argv){@autoreleasepool{
     require(argc==2,"output directory");
     CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
@@ -113,12 +112,17 @@ int main(int argc,const char **argv){@autoreleasepool{
     queue=[device newCommandQueue];
 #endif
     [CATransaction begin];[CATransaction setDisableActions:YES];
-    UIView *view=DVMUIKitScene(space,320,480);[view layoutIfNeeded];display(view.layer);
+    UIView *view=DVMUIKitScene(space,320,480);
+    unsigned effect=getenv("DVM_UIKIT_EFFECT")?(unsigned)atoi(getenv("DVM_UIKIT_EFFECT")):0;
+    DVMUIKitAddEffect(view,effect);
+    fprintf(stderr,"UIKIT_HOST_EFFECT kind=%u window=%u\n",effect,view.window!=nil);
+    [view layoutIfNeeded];UIKitDisplay(view.layer);
     if(getenv("DVM_UIKIT_GUEST_RASTERS")){
         DVMUIKitReplaceGlyphs(view,space,@(getenv("DVM_UIKIT_GUEST_RASTERS")));
-        [view layoutIfNeeded];display(view.layer);
+        [view layoutIfNeeded];UIKitDisplay(view.layer);
     }
     [CATransaction commit];[CATransaction flush];
+    UIKitInspect(view.layer,"after-display",0);
     BOOL displayed=getenv("DVM_UIKIT_DISPLAY_FRAME")!=NULL;
     unsigned width=displayed?1179:320,height=displayed?2556:480;
     CALayer *root=displayed?DVMUIKitDisplayScene(view,space):view.layer;

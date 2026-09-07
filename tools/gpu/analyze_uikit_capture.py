@@ -12,6 +12,7 @@ import struct
 import zlib
 from pathlib import Path
 from verify_audit_capture import verify_audits
+from render_staging_capture import expand_render_staging
 
 
 def write_png(path, bgra, width=320, height=480):
@@ -32,6 +33,7 @@ def analyze(job):
     audit_mode=verify_audits(audits,(job/'shared-ram.bin').read_bytes())
     lines=[r['line'] for r in audits]
     records=[json.loads(s) for s in (job/'driver-host.jsonl').read_text().splitlines()]
+    records=expand_render_staging(records)
     submits=[r for r in records if r['op']=='renderSubmit']
     if not submits or any(r['reply'].get('status')!=4 for r in submits):raise ValueError('no completed GPU rendering')
     targets={p['target'] for r in submits for p in r['request']['commands']}

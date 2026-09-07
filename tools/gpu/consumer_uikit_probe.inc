@@ -13,6 +13,10 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         fprintf(stderr,"GPU_LOAD_RENDERER_FLAGS value=%u\n",(unsigned)DVM_CA_RENDERER_FLAGS);
         CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
         UIView *view=DVMUIKitScene(space,width,height);
+#ifdef DVM_CA_UIKIT_EFFECT
+        DVMUIKitAddEffect(view,DVM_CA_UIKIT_EFFECT);
+        fprintf(stderr,"GPU_LOAD_UIKIT_EFFECT kind=%u window=%u\n",DVM_CA_UIKIT_EFFECT,view.window!=nil);
+#endif
         stage="uikit-layout";fprintf(stderr,"GPU_LOAD_UIKIT_STAGE name=%s\n",stage);
         [view layoutIfNeeded];UIKitInspect(view.layer,"before-display",0);UIKitDisplay(view.layer);[CATransaction commit];[CATransaction flush];UIKitInspect(view.layer,"after-display",0);
         MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];

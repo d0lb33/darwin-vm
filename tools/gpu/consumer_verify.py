@@ -15,6 +15,8 @@ def verify(out,events,records):
     return verify_records(out,lines,records)
 
 def verify_records(out,lines,records,expected_frames=1,expected_scene=0):
+    from render_staging_capture import expand_render_staging
+    records=expand_render_staging(records)
     out=Path(out)
     if expected_frames!=1 and not 3<=expected_frames<=4096:raise ValueError('scene frame bound')
     sequence=expected_frames>1
