@@ -1,3 +1,6 @@
+#ifndef DVM_CA_RENDERER_FLAGS
+#define DVM_CA_RENDERER_FLAGS 0
+#endif
 // Actual guest UIKit content. Its CPU layer rendering is an independent pixel
 // reference; CARenderer must submit the same layer tree through the proxy.
 #import <UIKit/UIView.h>
@@ -7,11 +10,34 @@
 #import <UIKit/UIColor.h>
 #import <UIKit/UIFont.h>
 #import <UIKit/UIImage.h>
+#ifdef DVM_CA_UIKIT_TRACE
+#import <objc/runtime.h>
+extern CFTypeID CABackingStoreGetTypeID(void);
+static IMP UIKitOriginalCopyRenderValue;
+static void *UIKitCopyRenderValue(id value,SEL selector){
+    // Diagnostic only: preserve the exact guest implementation and its owned
+    // return value. The fixed offset is from 24A5430a's getter at 0x1844da684.
+    BOOL backing=CFGetTypeID((__bridge CFTypeRef)value)==CABackingStoreGetTypeID();
+    unsigned flags=backing?*(const uint16_t *)((const uint8_t *)(__bridge const void *)value+0x1ec):0;
+    void *result=((void *(*)(id,SEL))UIKitOriginalCopyRenderValue)(value,selector);
+    if(backing){
+        const uint8_t *front=*(const uint8_t **)((const uint8_t *)(__bridge const void *)value+0x190);
+        const uint8_t *shmem=front?*(const uint8_t **)(front+0x10):NULL;
+        uint64_t length=shmem?*(const uint64_t *)(shmem+0x10):0;
+        const uint8_t *header=shmem?*(const uint8_t **)(shmem+0x18):NULL;
+        fprintf(stderr,"GPU_LOAD_UIKIT_BACKING flags=%x result=%u front=%u shmem=%u drawable=%u bytes=%llu shmem_flags=%x format=%u levels=%u\n",
+            flags,result!=NULL,front!=NULL,shmem!=NULL,front&&*(void **)(front+0x18)!=NULL,
+            (unsigned long long)length,shmem?shmem[0xd]:0,header&&length>=36?*(const uint32_t *)(header+0xc):0,
+            header&&length>=36?*(const uint32_t *)(header+0x20):0);
+    }
+    return result;
+}
+#endif
 static void UIKitInspect(CALayer *layer, const char *stage, unsigned depth){
-    fprintf(stderr,"GPU_LOAD_UIKIT_LAYER stage=%s depth=%u class=%s delegate=%s width=%.0f height=%.0f contents=%s needs=%u flipped=%u scale=%.1f\n",
+    fprintf(stderr,"GPU_LOAD_UIKIT_LAYER stage=%s depth=%u class=%s delegate=%s width=%.0f height=%.0f contents=%s needs=%u flipped=%u contentflip=%u scale=%.1f\n",
         stage,depth,NSStringFromClass(layer.class).UTF8String,NSStringFromClass([(id)layer.delegate class]).UTF8String,
         layer.bounds.size.width,layer.bounds.size.height,layer.contents?NSStringFromClass([layer.contents class]).UTF8String:"nil",
-        layer.needsDisplay,layer.geometryFlipped,layer.contentsScale);
+        layer.needsDisplay,layer.geometryFlipped,layer.contentsAreFlipped,layer.contentsScale);
     if(layer.contents){
         CFStringRef description=CFCopyDescription((__bridge CFTypeRef)layer.contents);
         NSString *singleLine=[(__bridge NSString *)description stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
@@ -28,9 +54,15 @@ static void UIKitDisplay(CALayer *layer){
 static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
     const char *stage="uikit-view";CARenderer *renderer=nil;
     @try {
+#ifdef DVM_CA_UIKIT_TRACE
+        Method method=class_getInstanceMethod(NSObject.class,sel_registerName("CA_copyRenderValue"));
+        if(!method)fail("uikit-copy-render-method");
+        UIKitOriginalCopyRenderValue=method_setImplementation(method,(IMP)UIKitCopyRenderValue);
+#endif
         fprintf(stderr,"GPU_LOAD_UIKIT_STAGE name=%s main=%u\n",stage,[NSThread isMainThread]);
         [CATransaction begin];[CATransaction setDisableActions:YES];
         const unsigned width=320,height=480,row=width*4;
+        fprintf(stderr,"GPU_LOAD_RENDERER_FLAGS value=%u\n",(unsigned)DVM_CA_RENDERER_FLAGS);
         CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
         UIView *view=[[UIView alloc] initWithFrame:CGRectMake(0,0,width,height)];
         view.backgroundColor=[UIColor colorWithRed:.08 green:.12 blue:.20 alpha:1];
@@ -56,18 +88,12 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         button.layer.cornerRadius=16;[view addSubview:button];
         stage="uikit-layout";fprintf(stderr,"GPU_LOAD_UIKIT_STAGE name=%s\n",stage);
         [view layoutIfNeeded];UIKitInspect(view.layer,"before-display",0);UIKitDisplay(view.layer);[CATransaction commit];[CATransaction flush];UIKitInspect(view.layer,"after-display",0);
-        stage="uikit-cpu-reference";fprintf(stderr,"GPU_LOAD_UIKIT_STAGE name=%s\n",stage);
-        NSMutableData *reference=[NSMutableData dataWithLength:row*height];
-        CGContextRef context=CGBitmapContextCreate(reference.mutableBytes,width,height,8,row,space,kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little);
-        if(!context)fail("uikit-cpu-context");
-        CGContextTranslateCTM(context,0,height);CGContextScaleCTM(context,1,-1);
-        [view.layer renderInContext:context];CGContextRelease(context);UIKitInspect(view.layer,"after-cpu",0);
         MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
         d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
         id<MTLTexture> target=[device newTextureWithDescriptor:d];if(!target)fail("uikit-target");
         id<MTLCommandQueue> queue=[device newCommandQueue];
         stage="uikit-renderer";fprintf(stderr,"GPU_LOAD_UIKIT_STAGE name=%s\n",stage);
-        renderer=[CARenderer rendererWithMTLTexture:target options:@{kCARendererMetalCommandQueue:queue,kCARendererColorSpace:(__bridge id)space}];
+        renderer=[CARenderer rendererWithMTLTexture:target options:@{kCARendererMetalCommandQueue:queue,kCARendererColorSpace:(__bridge id)space,@"kCARendererFlags":@DVM_CA_RENDERER_FLAGS}];
         if(!renderer)fail("uikit-renderer-nil");
         [CATransaction begin];[CATransaction setDisableActions:YES];
         renderer.layer=view.layer;renderer.bounds=view.bounds;
@@ -81,6 +107,14 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         if(![stats[@"renderPasses"] unsignedIntegerValue]||![stats[@"renderDraws"] unsignedIntegerValue])fail("uikit-no-gpu-submission");
         NSMutableData *actual=[NSMutableData dataWithLength:row*height];
         [target getBytes:actual.mutableBytes bytesPerRow:row fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        // CPU reference comes after GPU capture so any private UIKit drawing
+        // side effects of renderInContext cannot prepare the GPU input for us.
+        stage="uikit-cpu-reference";fprintf(stderr,"GPU_LOAD_UIKIT_STAGE name=%s\n",stage);
+        NSMutableData *reference=[NSMutableData dataWithLength:row*height];
+        CGContextRef context=CGBitmapContextCreate(reference.mutableBytes,width,height,8,row,space,kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little);
+        if(!context)fail("uikit-cpu-context");
+        CGContextTranslateCTM(context,0,height);CGContextScaleCTM(context,1,-1);
+        [view.layer renderInContext:context];CGContextRelease(context);UIKitInspect(view.layer,"after-cpu",0);
         // Capture the independent CPU reference through ordinary texture I/O so
         // the host verifier can compare both byte arrays, not trust our verdict.
         id<MTLTexture> referenceTexture=[device newTextureWithDescriptor:d];

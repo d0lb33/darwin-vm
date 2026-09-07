@@ -120,7 +120,7 @@ class MMIOPeer(DriverPeer):
         record=dict(wire_encoding="blur-v1" if blur else "binary-v1" if binary else "json",seq=seq,op=request.get('op'),request_bytes=n,reply_bytes=length,
             host_service_us=service_us,host_received_ns=started,host_completed_ns=time.monotonic_ns(),
             request={k:v for k,v in request.items() if k!='data'},reply=reply)
-        if request.get('op') in ('writeRenderBuffer','upload') and 'data' in request:
+        if request.get('op') in ('writeRenderBuffer','upload','writeTextureChunk') and 'data' in request:
             # Generated resource contents are replayable; Apple libraries stay
             # referenced by their verified hash and separate local AIR cache.
             name=f'render-upload-{seq:06d}.json'

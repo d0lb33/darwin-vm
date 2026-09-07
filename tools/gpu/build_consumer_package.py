@@ -14,8 +14,14 @@ p.add_argument('--hz',type=int,choices=(0,30,60),default=0)
 p.add_argument('--scene',type=int,choices=range(5),default=0,help='0 moving, 1 alpha, 2 clip/transform, 3 image, 4 group opacity')
 p.add_argument('--shared-surface',action='store_true',help='owned IOSurface CARenderer/display test; requires mapping-provider helper')
 p.add_argument('--regions',action='store_true',help='append a public region-transfer probe after the single red CALayer control')
+p.add_argument('--renderer-flags',type=lambda s:int(s,0),choices=(0,2),default=0,help='bounded exact-guest CARenderer coordinate-contract experiment')
+p.add_argument('--orientation',action='store_true',help='asymmetric plain CALayer image CPU/GPU control')
 p.add_argument('--uikit',action='store_true',help='actual guest UIKit view tree and independent CPU reference; offscreen diagnostic')
+p.add_argument('--uikit-trace',action='store_true',help='observe original backing-store conversion in the isolated UIKit process')
 a=p.parse_args()
+if a.renderer_flags and not (a.orientation or a.uikit):p.error('renderer flags require an orientation or UIKit diagnostic')
+if a.orientation and (a.uikit or a.frames!=1 or a.shared_surface or a.regions or a.scene):p.error('orientation requires --frames 1, offscreen, no other scene mode')
+if a.uikit_trace and not a.uikit:p.error('UIKit tracing requires --uikit')
 if a.uikit and (a.frames!=1 or a.shared_surface or a.regions or a.scene):p.error('UIKit requires --frames 1, offscreen, no other scene mode')
 if a.regions and (a.frames!=1 or a.shared_surface):p.error('region probe requires --frames 1 without --shared-surface')
 if a.frames!=1 and not 3<=a.frames<=4096:p.error('frames must be 1 or 3..4096')
@@ -28,11 +34,11 @@ sdk=subprocess.check_output(['xcrun','--sdk','iphoneos' if a.uikit else 'macosx'
 flags=['-target','arm64-apple-ios27.0','-isysroot',sdk,'-Wno-incompatible-sysroot',
        '-fobjc-arc','-fobjc-arc-exceptions','-O1','-Wall','-Wextra','-Werror',
        '-Wno-deprecated-declarations','-fno-objc-msgsend-selector-stubs']
-uikit_headers=['-DDVM_CA_UIKIT'] if a.uikit else []
-subprocess.run(['xcrun','clang',*flags,*uikit_headers,*(['-DDVM_CA_SHARED'] if a.shared_surface else []),*(['-DDVM_CA_REGIONS'] if a.regions else []),f'-DDVM_CA_FRAMES={a.frames}',f'-DDVM_CA_HZ={a.hz}',f'-DDVM_CA_SCENE={a.scene}','-c',str(src/'consumer_package.m'),'-o',str(a.out/'consumer_package.o')],check=True)
+uikit_headers=(['-DDVM_ORIENTATION_GUEST'] if a.orientation else [])+(['-DDVM_CA_UIKIT'] if a.uikit else [])+(['-DDVM_CA_UIKIT_TRACE'] if a.uikit_trace else [])
+subprocess.run(['xcrun','clang',*flags,*uikit_headers,f'-DDVM_CA_RENDERER_FLAGS={a.renderer_flags}',*(['-DDVM_CA_SHARED'] if a.shared_surface else []),*(['-DDVM_CA_REGIONS'] if a.regions else []),f'-DDVM_CA_FRAMES={a.frames}',f'-DDVM_CA_HZ={a.hz}',f'-DDVM_CA_SCENE={a.scene}','-c',str(src/'consumer_package.m'),'-o',str(a.out/'consumer_package.o')],check=True)
 symbols=subprocess.check_output(['nm','-u',str(a.out/'consumer_package.o')],text=True).split()
 stub=a.out/'stubs/usr/lib/libobjc.tbd';text=stub.read_text()
-added=[s for s in symbols if s.startswith('_objc_') and '"'+s+'"' not in text]
+added=[s for s in symbols if (s.startswith('_objc_') or s in ('_class_getInstanceMethod','_method_setImplementation','_sel_registerName')) and '"'+s+'"' not in text]
 stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))
 stub=a.out/'stubs/usr/lib/libSystem.tbd';text=stub.read_text()
 added=[s for s in ('_task_info','_mach_task_self_','_backtrace','_sigaction','_memset_pattern16') if '"'+s+'"' not in text]
@@ -40,8 +46,8 @@ stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for
 for framework,names in {
     'Foundation':['_NSSetUncaughtExceptionHandler',*(['_OBJC_CLASS_$_NSThread'] if a.uikit else [])],
     'CoreFoundation':['_CFDataCreate',*(['_CFGetTypeID','_CFCopyDescription'] if a.uikit else [])],
-    'CoreGraphics':['_CGPointZero','_CGDataProviderCreateWithCFData','_CGDataProviderRelease','_CGImageCreate','_CGImageRelease',*(['_CGBitmapContextCreate','_CGBitmapContextCreateImage','_CGContextRelease','_CGContextTranslateCTM','_CGContextScaleCTM'] if a.uikit else [])],
-    'QuartzCore':['_CATransform3DMakeScale','_kCAFilterNearest',*(['_CACurrentMediaTime'] if a.uikit else [])],
+    'CoreGraphics':[*(['_CGContextSetInterpolationQuality'] if a.orientation else []),'_CGPointZero','_CGDataProviderCreateWithCFData','_CGDataProviderRelease','_CGImageCreate','_CGImageRelease',*(['_CGBitmapContextCreate','_CGBitmapContextCreateImage','_CGContextRelease','_CGContextTranslateCTM','_CGContextScaleCTM'] if a.uikit or a.orientation else [])],
+    'QuartzCore':['_CATransform3DMakeScale','_kCAFilterNearest',*(['_CACurrentMediaTime'] if a.uikit or a.orientation else []),*(['_CABackingStoreGetTypeID'] if a.uikit_trace else [])],
 }.items():
     stub=a.out/f'stubs/System/Library/Frameworks/{framework}.framework/{framework}.tbd'
     text=stub.read_text();added=[s for s in names if '"'+s+'"' not in text]
@@ -72,12 +78,12 @@ revision['consumer_package_relinked']=True
 imports=a.out/'consumer-package.nm-u';imports.write_bytes(subprocess.check_output(['nm','-u',str(binary)]))
 (a.out/'DVMProxy.nm-u').write_bytes(imports.read_bytes())
 subprocess.run(['python3',str(src/'verify_guest_imports.py'),'--output',str(a.out/'consumer-package-imports.tsv'),str(imports)],check=True)
-record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,uikit=a.uikit,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,uikit=a.uikit,uikit_trace=a.uikit_trace,orientation=a.orientation,renderer_flags=a.renderer_flags,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
             helper_sha256=hashlib.sha256((a.out/'dvm-gpu-load').read_bytes()).hexdigest(),
             scope='test export compiled; guest execution untested')
 if record['helper_sha256']!=hashlib.sha256((a.base/'dvm-gpu-load').read_bytes()).hexdigest():
     raise ValueError('package unexpectedly changed the pinned helper')
-for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc'):
+for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc','test_layer_orientation.m'):
     (a.out/name).write_bytes((src/name).read_bytes())
 (a.out/'consumer-package.json').write_text(json.dumps(record,indent=2)+'\n')
 print(json.dumps(record))

@@ -61,6 +61,20 @@ class HostTests(unittest.TestCase):
         self.assertEqual(self.rpc('stats')['submissions'],before)
         self.assertFalse(self.rpc('texture',width=4,height=4,format=80,usage=5,storage=3)['ok'])
 
+    def test_alpha_only_sampled_texture(self):
+        contract=self.rpc('capabilities')['contract']
+        self.assertIn(1,contract['textureFormats'])
+        self.assertEqual(contract['textureFormatUsageOverrides']['1'],1)
+        for usage in (2,4,5,7):
+            self.assertFalse(self.rpc('texture',width=16,height=16,format=1,usage=usage)['ok'])
+        texture=self.rpc('texture',width=16,height=16,format=1,usage=1)
+        self.assertTrue(texture['ok']);self.assertEqual(texture['row'],16)
+        data=bytes(range(256))
+        self.assertTrue(self.rpc('upload',texture=texture['handle'],row=16,data=base64.b64encode(data).decode())['ok'])
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=texture['handle'])['data']),data)
+        self.assertTrue(self.rpc('release',handle=texture['handle'])['ok'])
+        self.assertEqual(self.rpc('stats')['live']['objects'],0)
+
     def test_resource_process_bits_are_owned_opaque_metadata(self):
         handle=self.rpc('buffer',length=16)['handle']
         for bits in (0,42,2**32-1):
@@ -71,6 +85,12 @@ class HostTests(unittest.TestCase):
 
     def test_private_size_contract_and_live_budget(self):
         contract=self.rpc('capabilities')['contract']
+        row_alignment=contract['queries']['iosurfaceReadOnlyTextureAlignmentBytes']
+        native_alignment=self.rpc('linearLayout',format=80)['alignment']
+        self.assertEqual(row_alignment,64)
+        self.assertEqual(row_alignment%native_alignment,0)
+        self.assertEqual(4864%row_alignment,0)
+        self.assertEqual(contract['queries']['minBufferNoCopyAlignmentBytes'],16384)
         self.assertEqual(contract['queries']['maxTextureWidth2D'],4096)
         self.assertEqual(contract['privateTextureBytes'],16*1024*1024)
         for storage in (0,1):

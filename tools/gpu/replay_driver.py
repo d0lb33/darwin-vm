@@ -46,7 +46,7 @@ def main():
                     if hashlib.sha256(payload).hexdigest()!=row['upload_sha256']:raise ValueError('upload capture hash')
                     request=json.loads(payload)
                     if {k:v for k,v in request.items() if k!='data'}!=row['request']:raise ValueError('upload descriptor mismatch')
-                if row['op'] in ('upload','writeRenderBuffer') and 'data' not in request:raise ValueError('missing generated upload bytes')
+                if row['op'] in ('upload','writeRenderBuffer','writeTextureChunk') and 'data' not in request:raise ValueError('missing generated upload bytes')
                 raw=json.dumps(request).encode();worker.stdin.write(struct.pack('<I',len(raw))+raw);worker.stdin.flush()
                 n,=struct.unpack('<I',read_exact(worker.stdout,4))
                 if not 0<n<=2*1024*1024:raise ValueError('reply extent')

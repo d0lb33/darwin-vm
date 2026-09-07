@@ -254,6 +254,7 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
         return HostError(seq, EINVAL, @"invalid format");
     bpp=DVMFormatBytes(format);pixel=format;
     if(!bpp)return HostError(seq, EINVAL, @"unsupported texture format");
+    if(usage&~DVMFormatUsageMask(format))return HostError(seq,EINVAL,@"texture format usage contract");
     NSUInteger bytes = (NSUInteger)width * (NSUInteger)height * (NSUInteger)depth * bpp;
     if (bytes > (storage==MTLStorageModePrivate?DVM_PRIVATE_TEXTURE_BYTES:DVM_TEXTURE_BYTES))
         return HostError(seq, EINVAL, @"texture exceeds storage-mode byte limit");
@@ -584,7 +585,16 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     if([op isEqual:@"writeTextureChunk"]||[op isEqual:@"abortTextureUpload"])return TextureChunk(host,seq,request);
     if([op isEqual:@"renderSubmit"]||[op isEqual:@"submit"]||[op isEqual:@"blurSubmit"])
         for(DVMEntry *e in host.entries.allValues)if(e.textureUpload)return HostError(seq,EBUSY,@"GPU submission during incomplete texture upload");
-    if([op isEqual:@"capabilities"])return @{@"seq":@(seq),@"ok":@YES,@"contract":DVMContractProfile()};
+    if([op isEqual:@"capabilities"]){
+        // Our only IOSurface texture import is owned BGRA storage. Verify the
+        // native implementation accepts the advertised row/base granularity;
+        // kernel registration still requires 16 KiB pages independently.
+        NSUInteger alignment=[host.device minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
+        if(!alignment||DVM_SHARED_TEXTURE_ALIGNMENT%alignment||DVM_PRESENT_ROW%DVM_SHARED_TEXTURE_ALIGNMENT||
+           DVM_MANAGED_PAGE_BYTES%DVM_SHARED_TEXTURE_ALIGNMENT)
+            return HostError(seq,ENOTSUP,@"host cannot honor owned IOSurface alignment profile");
+        return @{@"seq":@(seq),@"ok":@YES,@"contract":DVMContractProfile()};
+    }
     if([op hasPrefix:@"resident"])return ResidentRequest(host,seq,request);
     if([op hasPrefix:@"sharedRender"])return SharedRenderRequest(host,seq,request);
     if([op isEqual:@"depthState"])return DepthState(host,seq,request);
