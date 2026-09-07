@@ -7,6 +7,7 @@
 @property(atomic) MTLPurgeableState residencyState;
 @property(atomic) uint64_t storageGeneration;
 @property(atomic) BOOL purgeabilityFailed;
+@property(atomic) NSUInteger pendingUses; // updates under owner monitor, shared by aliases
 - (DVMResource *)purgeabilityRoot;
 - (void)prepareForPurgeability:(MTLPurgeableState)state;
 - (void)purgeabilityChanged:(MTLPurgeableState)old current:(MTLPurgeableState)current;

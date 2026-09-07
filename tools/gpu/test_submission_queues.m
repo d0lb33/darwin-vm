@@ -20,7 +20,7 @@ int main(void){@autoreleasepool{
     dispatch_queue_set_specific(complete,&completionKey,&completionKey,NULL);
     __block unsigned submissions=0,callbacks=0;
     id<MTLDevice> device=DVMCreateMetalDevice(^NSDictionary *(NSDictionary *request,NSError **error){
-        (void)error;check(dispatch_get_specific(&submissionKey)==&submissionKey,"submission queue routing");
+        (void)error;check(dispatch_get_specific(&submissionKey)==NULL,"transport execution independent of client workloop");
         check([request[@"op"] isEqual:@"renderSubmit"],"empty render submission");submissions++;
         return @{@"status":@(MTLCommandBufferStatusCompleted),@"buffers":@{}};
     });
@@ -44,6 +44,7 @@ int main(void){@autoreleasepool{
     check(rejected,"configuration frozen after buffer creation");
     dispatch_suspend(submit);
     [(id<MTLCommandBuffer>)commands[0] commit];[(id<MTLCommandBuffer>)commands[1] commit];
+    dispatch_sync([(id)device valueForKey:@"serial"],^{check(submissions==0,"suspended client queue gates admission without occupying transport");});
     rejected=NO;@try{[(id<MTLCommandBuffer>)commands[2] commit];}@catch(NSException *e){(void)e;rejected=YES;}
     check(rejected,"per-queue pending bound enforced");
     dispatch_resume(submit);

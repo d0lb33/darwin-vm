@@ -38,6 +38,7 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @interface DVMDevice : NSObject <MTLDevice>
 @property(nonatomic, copy) DVMMetalRPC transport;
 @property(nonatomic, strong) dispatch_queue_t serial;
+@property(nonatomic, strong) dispatch_queue_t submissionOrder;
 @property(nonatomic) NSUInteger pendingSubmissions;
 @property(nonatomic,readonly) BOOL submissionInFlight;
 @property(nonatomic) BOOL binaryPayloads;
@@ -169,6 +170,7 @@ static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
 @property(nonatomic, strong) DVMQueue *commandQueue;
 @property(nonatomic, strong) NSMutableArray *commands;
 @property(nonatomic, strong) NSMutableArray *resources;
+@property(nonatomic, strong) NSArray<DVMResource *> *pendingRoots;
 @property(nonatomic, strong) NSMutableArray *handlers;
 @property(nonatomic,strong) NSMutableArray *scheduledHandlers;
 @property(nonatomic,strong) NSArray *responsibleTaskIDs;
@@ -275,8 +277,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return reply;
 }
 - (void)retire:(NSNumber *)handle mapping:(id<DVMMetalImportedMapping>)mapping {
-    // Queued retirement follows earlier submissions. Pending command buffers
-    // retain their resources, so deallocation cannot overtake encoded use.
+    // Pending command buffers retain their resources and alias roots, so
+    // deallocation cannot overtake encoded use of this allocation.
     dispatch_async(_serial, ^{
         NSError *e = nil;
         NSDictionary *reply=self.transport(@{@"op" : @"release", @"handle" : handle}, &e);
@@ -528,7 +530,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (void)didModifyRange:(NSRange)range {
     [self requireResident];
-    if(self.owner.submissionInFlight||range.location>self.length||range.length>self.length-range.location)
+    if(self.purgeabilityRoot.pendingUses||range.location>self.length||range.length>self.length-range.location)
         reject(@"buffer modification outside owned idle allocation");
 }
 @end
@@ -611,11 +613,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     if(slice||image<row*r.size.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
     NSUInteger bpp=DVMFormatBytes(self.pixelFormat),length=r.size.width*bpp;
     if(self.backingBuffer) {
-        if(self.owner.submissionInFlight)reject(@"linear texture upload in flight");
+        if(self.purgeabilityRoot.pendingUses)reject(@"linear texture upload in flight");
         for(NSUInteger y=0;y<r.size.height;y++)memcpy((uint8_t *)self.backingBuffer.contents+self.backingOffset+(r.origin.y+y)*self.backingRow+r.origin.x*bpp,(const uint8_t *)p+y*row,length);
         return;
     }
-    if (self.owner.submissionInFlight) reject(@"texture upload while GPU work is in flight");
+    if (self.purgeabilityRoot.pendingUses) reject(@"texture upload while its resource is in flight");
     BOOL full=r.size.width==_width&&r.size.height==_height&&r.size.depth==self.depth;
     // A partial update must preserve completed GPU writes outside its region.
     // Reuse an unsubmitted CPU image, otherwise fetch the completed native
@@ -635,7 +637,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     if(self.shadowGeneration!=generation){self.completedShadow=nil;self.shadowGeneration=generation;}
     if(self.surfaceMapping)reject(@"owned IOSurface has no copied readback path");
     if(self.storageMode==MTLStorageModePrivate)reject(@"private textures have no CPU transfer access");
-    if(self.owner.submissionInFlight)reject(@"texture read while GPU work is in flight");
+    if(self.purgeabilityRoot.pendingUses)reject(@"texture read while its resource is in flight");
     if(self.completedShadow)return self.completedShadow;
     NSError *e = nil;
     if(self.backingBuffer) {
@@ -831,11 +833,19 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             DVMTexture *t = o;
             [textures addObject:t];
         }
-    dispatch_async(_commandQueue.owner.serial, ^{
-        // Keep the device FIFO reservation in place while the caller's
-        // submission queue executes. Resource RPCs cannot overtake this work.
-        // As with native private dispatch queues, callers must not block the
-        // supplied serial target waiting for work scheduled onto that target.
+    NSMutableArray *roots=[NSMutableArray array];
+    for(id resource in _resources)if([resource isKindOfClass:DVMResource.class]){
+        DVMResource *root=[resource purgeabilityRoot];
+        if(![roots containsObject:root]){[roots addObject:root];root.pendingUses++;}
+    }
+    self.pendingRoots=roots;
+    dispatch_async(_commandQueue.owner.submissionOrder, ^{
+        // The device submission FIFO may wait for a client workloop, but must
+        // never occupy the transport while doing so. Exact guest idle cleanup
+        // calls setPurgeableState synchronously from that same workloop.
+        // Resource RPCs can run before admission; residency is revalidated in
+        // execute before any upload or GPU submission. Once admitted, the
+        // entire command and its completion bookkeeping own the transport.
         void (^execute)(void)=^{
         @autoreleasepool {
             @try {
@@ -935,6 +945,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             }
             @synchronized(self.commandQueue.owner) {
                 self.commandQueue.owner.lastSubmissionError=self.error;
+                for(DVMResource *root in self.pendingRoots)root.pendingUses--;
+                self.pendingRoots=nil;
                 self.commandQueue.owner.pendingSubmissions--;
                 self.commandQueue.pendingSubmissions--;
             }
@@ -943,8 +955,9 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             dispatch_async(callbacks, ^{for(MTLCommandBufferHandler h in handlers)h(self);});
         }
         };
-        if(self.commandQueue.submissionQueue)dispatch_sync(self.commandQueue.submissionQueue,execute);
-        else execute();
+        void (^admit)(void)=^{dispatch_sync(self.commandQueue.owner.serial,execute);};
+        if(self.commandQueue.submissionQueue)dispatch_sync(self.commandQueue.submissionQueue,admit);
+        else admit();
     });
     }
 }
@@ -1064,6 +1077,7 @@ id<MTLDevice> DVMCreateMetalDevice(DVMMetalRPC rpc) {
     d.transport = rpc;
     dispatch_queue_attr_t attr=dispatch_queue_attr_make_with_qos_class(DISPATCH_QUEUE_SERIAL,QOS_CLASS_USER_INTERACTIVE,0);
     d.serial = dispatch_queue_create("org.darwin-vm.metal.transport", attr);
+    d.submissionOrder = dispatch_queue_create("org.darwin-vm.metal.submission-order", attr);
     return d;
 }
 

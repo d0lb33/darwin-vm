@@ -37,6 +37,12 @@ def main():
     wrapper.write_text('#include "driver_guest.m"\nuint64_t DVMRevisionNumber(void){return '+str(a.revision)+';}\n')
     bundle=a.out/'DVMProxy.bundle';bundle.mkdir()
     run(['xcrun','clang',*flags,'-I',str(src),'-c',str(wrapper),'-o',str(a.out/'revision.o')])
+    # Register allocation changes can emit additional ARC register helpers.
+    # Declare emitted imports, then verify them against the exact guest exports.
+    symbols=set(subprocess.check_output(['nm','-u',str(a.out/'revision.o')],text=True).split())
+    objc=a.out/'stubs/usr/lib/libobjc.tbd';text=objc.read_text()
+    names=sorted(s for s in symbols if s.startswith('_objc_') and '"'+s+'"' not in text)
+    objc.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in names)))
     stub=a.out/'stubs/System/Library/Frameworks/Foundation.framework/Foundation.tbd'
     text=stub.read_text();symbol='"_OBJC_CLASS_$_NSURL"'
     if symbol not in text:stub.write_text(text.replace('symbols: [ ','symbols: [ '+symbol+', '))

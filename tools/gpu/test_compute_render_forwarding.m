@@ -68,7 +68,7 @@ int main(void){@autoreleasepool{
                     if(variant==2){id sourceHandle=nil;for(NSArray *binding in compute[@"textures"])if([binding[0] isEqual:@2])sourceHandle=binding[1];check(sourceHandle!=nil,"sparse source fixture");compute[@"textures"]=@[@[@2,sourceHandle],@[@5,sourceHandle]];}
                     if(variant==3)compute[@"buffers"]=@[];
                     if(variant==4)compute[@"bytes"]=@[@{@"index":@3,@"data":@"AA=="}];
-                    if(variant==5)[bad[@"commands"] addObject:bad[@"commands"][0]];
+                    if(variant==5)while([bad[@"commands"] count]<=DVM_ORDERED_COMMANDS)[bad[@"commands"] addObject:bad[@"commands"][0]];
                     NSDictionary *failure=ProcessRequest(host,++seq,bad);
                     check(![failure[@"ok"] boolValue]&&host.submissions==submissions,"mixed preflight atomic rejection");
                     fprintf(stderr,"DVM_COMPUTE_NEGATIVE variant=%u failure=%s\n",variant,[failure[@"description"] UTF8String]);
@@ -83,5 +83,5 @@ int main(void){@autoreleasepool{
     check([native isEqual:actual],"native versus forwarded mixed frames");
     // Drain asynchronous retirements through the real device RPC serial queue.
     [(id<DVMComputeStats>)forwarded consumerCompletion];check(host.entries.count==0&&host.textureBytes==0,"mixed resource retirement");
-    puts("DVM_COMPUTE_RENDER_PASS frames=6 specialization=1 sparse_bindings=1 sampled_and_written_textures=1 render_compute_render_blit=1 native_equal=1 writeback=1 retirement=1 commands64=1 reject65=1");
+    puts("DVM_COMPUTE_RENDER_PASS frames=6 specialization=1 sparse_bindings=1 sampled_and_written_textures=1 render_compute_render_blit=1 native_equal=1 writeback=1 retirement=1 commands64=1 reject_over_contract_limit=1");
 }}

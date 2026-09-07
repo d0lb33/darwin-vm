@@ -85,5 +85,44 @@ int main(void){@autoreleasepool{
     id<MTLCommandBuffer> cb=[[device newCommandQueue] commandBuffer];[[cb renderCommandEncoderWithDescriptor:pass] endEncoding];
     uint64_t beforeSubmit=host.submissions;[cb commit];[cb waitUntilCompleted];
     assert(cb.status==MTLCommandBufferStatusError&&cb.error&&host.submissions==beforeSubmit);
+    // A resource RPC may precede a command awaiting client-queue admission.
+    // Reject that command before native execution if its resource became volatile.
+    id<MTLDevice> gatedDevice=DVMCreateMetalDevice(rpc);
+    id<MTLTexture> gatedTexture=[gatedDevice newTextureWithDescriptor:td];assert(gatedTexture);
+    dispatch_queue_t gate=dispatch_queue_create("test.purge.admission",DISPATCH_QUEUE_SERIAL);
+    id<MTLCommandQueue> gatedQueue=[gatedDevice newCommandQueue];
+    [(id)gatedQueue setValue:gate forKey:@"submissionQueue"];
+    MTLRenderPassDescriptor *gatedPass=[MTLRenderPassDescriptor new];
+    gatedPass.colorAttachments[0].texture=gatedTexture;gatedPass.colorAttachments[0].loadAction=2;gatedPass.colorAttachments[0].storeAction=1;
+    id<MTLCommandBuffer> gated=[gatedQueue commandBuffer];[[gated renderCommandEncoderWithDescriptor:gatedPass] endEncoding];
+    dispatch_semaphore_t gateDone=dispatch_semaphore_create(0);
+    [gated addCompletedHandler:^(id<MTLCommandBuffer> c){(void)c;dispatch_semaphore_signal(gateDone);}];
+    id<MTLTexture> unrelated=[gatedDevice newTextureWithDescriptor:td];assert(unrelated);
+    dispatch_suspend(gate);[gated commit];
+    uint32_t texel=0xff123456;
+    [unrelated replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&texel bytesPerRow:4];
+    uint32_t copied=0;[unrelated getBytes:&copied bytesPerRow:4 fromRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0];assert(copied==texel);
+    assert(refused(^{[gatedTexture replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&texel bytesPerRow:4];}));
+    uint64_t nativeBefore=host.submissions;
+    [gatedTexture setPurgeableState:MTLPurgeableStateVolatile];
+    dispatch_resume(gate);
+    assert(!dispatch_semaphore_wait(gateDone,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC)));
+    assert(gated.status==MTLCommandBufferStatusError&&gated.error&&host.submissions==nativeBefore);
+    [gatedTexture setPurgeableState:MTLPurgeableStateNonVolatile];
+    [gatedTexture replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&texel bytesPerRow:4];
+    [gatedTexture getBytes:&copied bytesPerRow:4 fromRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0];assert(copied==texel);
+    id<MTLBuffer> copySource=[gatedDevice newBufferWithLength:256 options:0],copyTarget=[gatedDevice newBufferWithLength:256 options:0];
+    MTLTextureDescriptor *aliasDescriptor=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:80 width:16 height:1 mipmapped:NO];aliasDescriptor.storageMode=0;aliasDescriptor.usage=1;
+    id<MTLTexture> copyAlias=[copySource newTextureWithDescriptor:aliasDescriptor offset:0 bytesPerRow:64];assert(copyAlias);
+    memset(copySource.contents,0x6b,256);
+    id<MTLCommandBuffer> copy=[gatedQueue commandBuffer];id<MTLBlitCommandEncoder> blit=[copy blitCommandEncoder];
+    [blit copyFromBuffer:copySource sourceOffset:0 toBuffer:copyTarget destinationOffset:0 size:256];[blit endEncoding];
+    [copy addCompletedHandler:^(id<MTLCommandBuffer> c){(void)c;dispatch_semaphore_signal(gateDone);}];
+    dispatch_suspend(gate);[copy commit];
+    assert(refused(^{[copyAlias replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&texel bytesPerRow:4];}));
+    dispatch_resume(gate);assert(!dispatch_semaphore_wait(gateDone,dispatch_time(DISPATCH_TIME_NOW,3*NSEC_PER_SEC)));
+    assert(copy.status==MTLCommandBufferStatusCompleted&&!memcmp(copySource.contents,copyTarget.contents,256));
+    [copyAlias replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&texel bytesPerRow:4];
+    puts("RESOURCE_USE_PASS unrelated_upload_read=1 pending_target_rejected=1 completion_releases_use=1 volatile_preflight_cancels=1 buffer_alias_inflight_rejected=1 blit_pixels=1");
     puts("PASS purgeability frontend: pending CPU writes retained, native Empty reacquisition, buffer/linear alias state, stale upload cache invalidation, no redundant retained upload, 1D/2D/3D texture refill, volatile CPU-access rejection and lost-ack CPU/GPU quarantine");
 }}
