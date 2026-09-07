@@ -143,7 +143,7 @@ staged bundle load. **Untested:** a scoped correction to the remaining
 signature and executable-mapping contracts, unrestricted revision loading,
 normal system device discovery and system-wide QuartzCore acceleration.
 
-Next bounded probe: instrument the original return and relevant inputs of the
+The proposed follow-up was to instrument the original return and relevant inputs of the
 exact file-signature and executable-mapping policy callbacks for this test
 process and its staged bundle. AMFI's `vnode_check_signature` implementation
 starts at `0xfffffff0091ad774`, identified by its diagnostic at
@@ -164,6 +164,149 @@ guest jobs passed independent audit/pixel verification. Both generated
 BootKCs were reconstructed byte-for-byte from the preimages, listed patches
 and payload, with unchanged device-tree bytes. Post-experiment hashes of all pinned boot
 inputs and the complete disk ancestry also matched both manifests.
+
+## User-bounded follow-up: two fixes
+
+The user limited further runtime-loading work to **two fixes**, with a stop
+if a new revision still could not execute. These are separate from the two
+earlier experiments above. Both reuse the already-installed BUILD2 helper,
+driver/backend and unchanged QEMU; only an isolated BootKC changes. Each trial
+uses a fresh disposable child of `CA_DEV_LOADER_INSTALL2`, establishes readiness
+once, and runs successive tests in fresh processes. No guest reinstall,
+debugger or trust-cache insertion is used in these trials.
+
+### Fix 1: scoped ad-hoc CT gate
+
+Review of the earlier **exact guest** UART, not merely static inspection,
+found `unsuitable CT policy 0 for this platform/device, rejecting signature`
+for the staged revision. The guarded branch at `0xfffffff0091ae5c8` leads to
+that diagnostic; the original accepted continuation is `0xfffffff0091ae5f0`.
+`--file-policy 1` allows that one branch only for a parsed ad-hoc signature,
+real CT policy zero, Developer Mode, the entitled current process after its
+explicit development opening, and this exact path shape:
+
+```
+/private/var/tmp/dvm-gpu-runner/<1..20 decimal digits>/DVMProxy.bundle/DVMProxy
+```
+
+The exception retains real policy bits and subsequent AMFI checks. The
+mid-function trampoline preserves caller-clobbered integer/SIMD registers and
+NZCV; ordinary accepted branches keep their native continuation. A separate
+observer calls the original `mac_file_check_mmap` at `0xfffffff00b31e2dc`, logs
+its result for the entitled/debugged test child, and returns it unchanged.
+Its six-argument ABI and in/out maximum-protection pointer are established by
+the exact dispatcher's prologue/call sites. Apple's public
+[MAC policy interface](https://raw.githubusercontent.com/apple-oss-distributions/xnu/main/security/mac_policy.h)
+corroborates the callback semantics, but is not exact-guest runtime evidence.
+
+`CA_LOAD_FIX1_BOOT`: 2,291-byte payload, BootKC SHA-256
+`8dc2564b4b5961f8bec66cecad28793dfd3ae6e060dfbd9f6322028a05380b48`.
+In `CA_LOAD_FIX1_GUEST`:
+
+| Job / PID | Outcome |
+| --- | --- |
+| `1788744384804857` / 267 | Installed normal GPU control passes; 15.889 s spawn-to-exit |
+| `1788744384880102` / 278 | New revision: TXM 0, CT exception `allow=1` twice, then AMFI signature validation fails; exit 1; no GPU work |
+| `1788744656633763` / 423 | Trusted bundle on Data: TXM 0, original mmap returns EPERM (1), prot 5, flags `0x40012`, offset 0, maximum 7 unchanged; exit 1 |
+| `1788744719357846` / 475 | Installed normal GPU control passes again; 1.890 s spawn-to-exit |
+
+The new-revision failure remains NSCocoaErrorDomain 3588 / errno 1, code blob
+offset `0x3a820`, size `0x300`. Its per-job UART contains both `allow=1` and
+`AMFI: code signature validation failed.` No executable-mapping observer ran
+for this failed revision. **Observed:** the CT exception alone is insufficient.
+**Not established:** which subsequent AMFI validation branch failed; the
+generic diagnostic does not identify it. The trusted Data control independently
+identifies an actual MAC mmap denial, rather than relying on dyld's wording.
+
+Both normal controls independently pass audit CRC/sequence, package/upload
+identity, actual render/draw, exact red pixels and zero live resources. Native
+readiness occurs at 145.700 s, 70 presentations, input PID 162; teardown retains
+that PID, 2,576 presentations and zero timeouts. One restart/rejected ACK occurs
+before readiness and does not increase afterward. The owned VM is stopped and
+reaped. Session acceptance of expected negative jobs is **not** acceptance of
+runtime revision loading.
+
+### Fix 2: scoped observed RX mapping
+
+`--file-policy 2` adds one exception to the original mmap result: EPERM becomes
+success only for the opted-in entitled/debugged current process in Developer
+Mode, requested protection 5 (read/execute), flags `0x40012`, file offset zero,
+and unchanged original/output maximum protection 7. It does not widen maximum
+protections or permit a requested writable/executable mapping. This exception
+is **process-scoped, not pathname-scoped**. Other requests retain the original
+result; upstream signature validation and SPTM/TXM remain unchanged. Both the
+original and returned mmap results are logged.
+
+This final fix tests the independently observed mapping contract. It does not
+claim to repair the new revision's remaining signature failure. Four jobs are
+defined in advance: normal installed control, new revision on Data, trusted
+bundle on Data, normal installed control, then stop. No third loading fix is
+authorized by this experiment's limit.
+
+`CA_LOAD_FIX2_BOOT`: 2,395-byte payload, BootKC SHA-256
+`e4b6a2d02e97f3f058fa5ec1993c0423915eda8926dca0f7dac21c343e5f0741`.
+
+Observed in `CA_LOAD_FIX2_GUEST`:
+
+| Job / PID | Outcome |
+| --- | --- |
+| `1788744850776462` / 271 | Installed normal GPU control passes; 9.539 s spawn-to-exit |
+| `1788744850854056` / 279 | New revision: TXM 0, CT `allow=1` twice, same signature rejection; exit 1; no GPU submission |
+| `1788744850930345` / 280 | Trusted bundle on Data: mmap original 1, returned 0; actual CARenderer → host Metal, all 4,096 red pixels verified; 2.053 s spawn-to-exit |
+| `1788744851034604` / 282 | Installed normal GPU control passes afterward; 2.141 s spawn-to-exit |
+
+The Data success independently verifies guest staging SHA-256, audit CRC and
+sequence, generated uploads, one render pass/indexed draw, exact final pixel
+hash and zero live host resources. It uses the **unchanged boot-trusted driver**,
+not REVISION3. The new revision still fails before mmap; the recorded generic
+AMFI failure does not prove TXM rejected file registration or identify a more
+specific subsequent validation branch.
+
+Readiness: 151.674 s, 174 native presentations, input PID 230, ten stable seconds
+and a fresh ACK. Final: same PID, 363 presentations. Five timeouts, five rejected
+ACKs and one helper restart happened **before** readiness; those counters did
+not increase during the tests. This confirms continuity during this short batch,
+not a clean boot, a gesture test, offscreen-CALayer presentation, or sustained
+pacing. Both owned VMs exited and were reaped after queued stops.
+
+**Proven in this test image:** controlled staging and execution of an already
+boot-trusted driver from Data through the opt-in RX mapping exception, followed
+by normal GPU control. **Disproven within the two tested fixes:** CT-gate plus
+RX-mapping exceptions are sufficient for this absent-from-boot-cache revision.
+**Unresolved:** remaining file-signature validation/label acceptance; its exact
+later failing branch is not yet observed. A future authorized experiment could
+trace that branch and its original result without altering monitor approval.
+
+Implementation stopped at the user's two-fix limit. No third fix or broader GPU
+change was made. Continuing GPU development can use the already proven isolated
+install/reboot path; dynamic revision loading remains an iteration improvement,
+not proof against the existing accelerated CARenderer implementation.
+
+Validation: 79 project tests passed before Fix 1. Both experimental BootKCs were
+reconstructed exactly from recorded patch preimages/payloads. The final builder's
+default `--file-policy 0` reproduces prior BOOT4 byte-for-byte. Five positive jobs
+across this follow-up passed independent verification. These checks do not
+substitute for the failed revised-driver acceptance test. Small evidence and
+signed job packages are in
+`~/dvm-artifacts/research/gpu-development-loader-two-fix-limit-ios27/`.
+All pinned boot inputs and the complete disk ancestry matched their manifests
+after both trials. The preserved v2 trust cache has 3,961 entries; the installed
+control's CDHash is present and REVISION3's is absent. Complete preserved signed
+bundles allow all five successful jobs to pass the independent verifier again
+from durable evidence. Build source snapshots retain each tested variant,
+including Fix 1's original observational logging format.
+
+Reproduce the two variants with `build_development_loader.py --file-policy 1`
+or `2`, using the durable managed-pool `bootkc` / `dtree`, then
+`prepare_display_state_trial.py --installed
+/tmp/dvm/CA_DEV_LOADER_INSTALL2/warm-manifest.json` with an isolated output.
+Run `run_guest_load.py` with `--driver-mmio --driver-present --driver-consumer
+--driver-runner --driver-wait-display`, the pinned BUILD2 `driver_host`, and the
+exact QuartzCore library. Queue the four recorded jobs with `runner_control.py`
+(`--mode installed` controls; `--mode data --development --expected observe`
+for staged candidates), then `--stop`. Preserved ledgers, source snapshots,
+manifests, launch commands and per-job packages supply exact inputs; input disk
+overlays themselves are disposable and are not promoted as a new baseline.
 
 ## Reproduction
 

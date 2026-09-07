@@ -36,9 +36,20 @@ def commands(b,h):
         yield c,o;o+=n
 
 def build(a):
+    links=dict(LINKS)
+    guards=dict(GUARDS)
+    hooks=[('policy',0xfffffff0091b009c),('monitor',0xfffffff00b045b40)]
+    if a.file_policy:
+        guards.update({0xfffffff0091ae5c8:'57010037f65340f9f35b00a9e023fff0',
+                       0xfffffff00b31e2dc:'7f2303d5ff0302d1fc6f02a9fa6703a9',
+                       0xfffffff0091c8ec8:'7176ffd031c21e91300240f9110a1fd7'})
+        links['_dvm_blob_flags']=0xfffffff0091c8ec8
+        links['_dvm_ct_accept']=0xfffffff0091ae5f0
+        links['_dvm_ct_reject']=0xfffffff0091ae5cc
+        hooks.append(('mmap',0xfffffff00b31e2dc))
     b=a.bootkc.read_bytes()
     if hashlib.sha256(b).hexdigest()!=SHA:raise ValueError('requires pinned managed-export BootKC')
-    for va,value in GUARDS.items():
+    for va,value in guards.items():
         if b[va-BASE:va-BASE+len(bytes.fromhex(value))]!=bytes.fromhex(value):raise ValueError(f'ABI guard {va:x}')
     if any(b[CAVE-BASE:END-BASE]):raise ValueError('RX padding is not empty')
     # Prove this padding belongs to the outer executable mapping and overlaps
@@ -62,7 +73,7 @@ def build(a):
     shutil.copyfile(src,a.out/src.name);shutil.copyfile(__file__,a.out/Path(__file__).name)
     sdk=subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()
     cmd=['xcrun','clang++','-target','arm64e-apple-ios27.0','-isysroot',sdk,'-I',sdk+'/System/Library/Frameworks/Kernel.framework/Headers',
-         '-DKERNEL','-mkernel','-fno-exceptions','-fno-rtti','-fno-stack-protector','-fno-builtin','-std=c++17','-Os','-S',str(src),'-o',str(a.out/'shim.s')]
+         '-DKERNEL',f'-DDVM_LOADER_FIX={a.file_policy}','-mkernel','-fno-exceptions','-fno-rtti','-fno-stack-protector','-fno-builtin','-std=c++17','-Os','-S',str(src),'-o',str(a.out/'shim.s')]
     subprocess.run(cmd,check=True);asm=(a.out/'shim.s').read_text()
     if '.ptrauth_kernel_abi_version 0' not in asm:raise ValueError('kernel ABI')
     lines=[]
@@ -74,13 +85,29 @@ def build(a):
             elif '__cstring,' in s:line='.section .rodata,"a"'
             else:raise ValueError('unexpected section '+s)
         line=line.split(';')[0];line=re.sub(r'([A-Za-z_.$][\w.$]*)@PAGEOFF',r':lo12:\1',line).replace('@PAGE','');lines.append(line)
-    for name,address in [('policy',0xfffffff0091b009c),('monitor',0xfffffff00b045b40)]:
+    for name,address in hooks:
         words=struct.unpack_from('<II',b,address-BASE)
         lines+=['.text','.p2align 2',f'.global _dvm_original_{name}',f'_dvm_original_{name}:']+[f'.inst {w:#x}' for w in words]+[f'b _dvm_{name}_continue']
-        LINKS[f'_dvm_{name}_continue']=address+8
+        links[f'_dvm_{name}_continue']=address+8
+    if a.file_policy:
+        # Mid-function branch: preserve every caller-clobbered integer/SIMD
+        # register and NZCV, unlike an ordinary ABI function entry wrapper.
+        lines+=['.text','.p2align 2','.global _dvm_ct_branch','_dvm_ct_branch:',
+                'tbz w23, #0, .Lct_scope','b _dvm_ct_accept','.Lct_scope:','sub sp, sp, #688']
+        lines += [f'stp x{i}, x{i+1}, [sp, #{i*8}]' for i in range(0,18,2)]
+        lines += ['stp x18, x30, [sp, #144]','mrs x16, nzcv','str x16, [sp, #160]']
+        lines += [f'stp q{i}, q{i+1}, [sp, #{176+i*16}]' for i in range(0,32,2)]
+        lines += ['mov x0, x19','mov x1, x21','ldr x2, [sp, #848]',
+                  'bl _dvm_development_ct','cbz w0, .Lct_deny']
+        for label,target in (('.Lct_allow','_dvm_ct_accept'),('.Lct_deny','_dvm_ct_reject')):
+            lines += [label+':']
+            lines += [f'ldp q{i}, q{i+1}, [sp, #{176+i*16}]' for i in range(0,32,2)]
+            lines += ['ldr x16, [sp, #160]','msr nzcv, x16']
+            lines += [f'ldp x{i}, x{i+1}, [sp, #{i*8}]' for i in range(0,18,2)]
+            lines += ['ldp x18, x30, [sp, #144]','add sp, sp, #688',f'b {target}']
     (a.out/'shim-elf.s').write_text('\n'.join(lines)+'\n')
     ld=f'SECTIONS {{ . = {CAVE:#x}; .text : {{ *(.text) }} .rodata : {{ *(.rodata) }} /DISCARD/ : {{ *(.comment) *(.note*) }} }}\n'
-    (a.out/'layout.ld').write_text(ld+''.join(f'{name} = {va:#x};\n' for name,va in LINKS.items()))
+    (a.out/'layout.ld').write_text(ld+''.join(f'{name} = {va:#x};\n' for name,va in links.items()))
     subprocess.run(['xcrun','clang','-target','aarch64-none-elf','-march=armv8.3-a','-c',str(a.out/'shim-elf.s'),'-o',str(a.out/'shim.o')],check=True)
     subprocess.run(['ld.lld','-T',str(a.out/'layout.ld'),'-e','_dvm_development_uc',str(a.out/'shim.o'),'-o',str(a.out/'shim.elf')],check=True)
     llvm='/opt/homebrew/opt/llvm/bin/'
@@ -94,8 +121,9 @@ def build(a):
     def put(address,value,purpose):
         off=address-BASE;old=patched[off:off+len(value)];patched[off:off+len(value)]=value
         patches.append(dict(address=hex(address),before=old.hex(),after=value.hex(),purpose=purpose))
-    for address,name in ((0xfffffff00b1f1a10,'uc'),(0xfffffff0091b009c,'policy'),(0xfffffff00b045b40,'monitor')):
+    for name,address in [('uc',0xfffffff00b1f1a10)]+hooks:
         put(address,struct.pack('<I',0xd503245f)+branch(address+4,table['_dvm_development_'+name]),name)
+    if a.file_policy:put(0xfffffff0091ae5c8,branch(0xfffffff0091ae5c8,table['_dvm_ct_branch']),'scoped ad-hoc CT decision')
     so,va,old=preceding;size=CAVE+len(payload)-va
     put(BASE+so+32,struct.pack('<Q',size),'preceding RX VM extent')
     put(BASE+so+48,struct.pack('<Q',size),'preceding RX file extent')
@@ -105,10 +133,11 @@ def build(a):
     report=dict(scope='opt-in development worker only; monitor status and actual revised driver execution required',
         source_bootkc=str(a.bootkc.resolve()),source_sha256=SHA,output_sha256=hashlib.sha256(patched).hexdigest(),
         payload_address=hex(CAVE),payload_bytes=len(payload),payload_sha256=hashlib.sha256(payload).hexdigest(),
-        preceding_fileset=entry_name,patches=patches,guards={hex(k):v for k,v in GUARDS.items()},links={k:hex(v) for k,v in LINKS.items()},
+        file_policy_fix=a.file_policy,preceding_fileset=entry_name,patches=patches,guards={hex(k):v for k,v in guards.items()},links={k:hex(v) for k,v in links.items()},
         output_bootkc_sha256=hashlib.sha256(patched).hexdigest(),output_dtree_sha256=hashlib.sha256(a.dtree.read_bytes()).hexdigest(),
         source_dtree=str(a.dtree.resolve()),compile_command=cmd,sptm_modified=False,txm_modified=False,normal_transport_preserved=True)
     (a.out/'ledger.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report))
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--bootkc',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--dtree',type=Path,required=True)
+    p.add_argument('--file-policy',type=int,choices=(0,1,2),default=0,help='0: prior probe; 1: staged ad-hoc CT gate and mmap observation; 2: also scoped observed RX mmap exception')
     build(p.parse_args())

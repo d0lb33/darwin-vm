@@ -20,6 +20,51 @@ static bool entitled(void *proc) {
     return proc && proc==dvm_current_proc() &&
         !dvm_entitled(proc,"org.darwin-vm.development-loader",&value) && value;
 }
+#if DVM_LOADER_FIX >= 1
+extern "C" unsigned dvm_blob_flags(void *);
+extern "C" int dvm_original_mmap(void *,void *,int,int,unsigned long long,int *);
+static bool stagedPath(const char *path) {
+    const char *prefix="/private/var/tmp/dvm-gpu-runner/";
+    if(!path)return false;
+    while(*prefix)if(*path++!=*prefix++)return false;
+    unsigned digits=0;
+    while(*path>='0'&&*path<='9'){path++;if(++digits>20)return false;}
+    if(!digits)return false;
+    const char *suffix="/DVMProxy.bundle/DVMProxy";
+    do {if(*path++!=*suffix)return false;}while(*suffix++);
+    return true;
+}
+// The ad-hoc signature has already been parsed. Grant only this test-file
+// policy exception; retain its real CT bits and the remaining AMFI checks.
+extern "C" bool dvm_development_ct(const char *path,void *blob,unsigned long long policy) {
+    void *proc=dvm_current_proc();
+    if(policy||!stagedPath(path)||!entitled(proc)||
+       !(dvm_csflags(proc)&0x10000000)||!dvm_developer_mode())return false;
+    unsigned flags=dvm_blob_flags(blob);
+    bool allow=(flags&2)!=0;
+    dvm_printf("DVM_DEV_LOADER ct pid=%d flags=0x%x policy=0x%llx allow=%d path=%s\n",dvm_pid(),flags,policy,allow,path);
+    return allow;
+}
+extern "C" int dvm_development_mmap(void *cred,void *fg,int prot,int flags,
+        unsigned long long offset,int *maxprot) {
+    int before=*maxprot;
+    int result=dvm_original_mmap(cred,fg,prot,flags,offset,maxprot);
+    void *proc=dvm_current_proc();
+    if((prot&4)&&entitled(proc)&&(dvm_csflags(proc)&0x10000000)) {
+        int original=result;
+#if DVM_LOADER_FIX >= 2
+        // Exact observed dyld RX request only. Signature validation remains
+        // upstream; no writable-executable mapping or expanded max protection.
+        // This is process-scoped, not pathname-scoped: only the opted-in,
+        // specially entitled disposable test child receives the exception.
+        if(result==1&&prot==5&&flags==0x40012&&offset==0&&
+           before==7&&*maxprot==7&&dvm_developer_mode())result=0;
+#endif
+        dvm_printf("DVM_DEV_LOADER mmap pid=%d result=%d returned=%d prot=%x flags=%x offset=%llx max_before=%x max_after=%x fg=%p\n",dvm_pid(),original,result,prot,flags,offset,before,*maxprot,fg);
+    }
+    return result;
+}
+#endif
 extern "C" int dvm_development_policy(void *proc) {
     return entitled(proc)?0:dvm_original_policy(proc);
 }

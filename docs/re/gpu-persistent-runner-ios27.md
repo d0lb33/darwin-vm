@@ -128,11 +128,14 @@ larger objective and separate acceptance categories.
 ## Next loading experiment: scoped kernel development support
 
 **Update:** the [kernel development-loader experiments](gpu-development-loader-ios27.md)
-now prove stock TXM approval with the scoped service and helper `get-task-allow`.
-Staged revisions still fail signature validation, and trusted Data bundles still
-fail executable mapping. Four ordinary exact-guest GPU controls passed across
-two sessions. Investigate those remaining file-policy callbacks next; do not
-repeat the earlier process-flags-only experiment.
+prove stock TXM approval with the scoped service and helper `get-task-allow`.
+The subsequent user-bounded two-fix experiment now proves actual CARenderer
+execution and verified pixels from an already boot-trusted bundle staged on
+Data, using a scoped RX mapping exception. Newly signed revisions still fail
+signature validation after the scoped ad-hoc CT gate. Five additional positive
+jobs passed independent verification; normal controls pass before and after.
+**Work stopped at the two-fix limit.** Runtime loading of a new revision remains
+unresolved; GPU development can still use isolated installation/reboot.
 
 The user authorized an opt-in kernel addition for testing on isolated boot
 artifacts. Stop searching for a remount/entitlement-only shortcut. The required
