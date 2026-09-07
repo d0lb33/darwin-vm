@@ -342,7 +342,28 @@ and only `.pages` for generation 3's live 5 and 6. `quarantine` is empty,
 `ownership_failure` is null, `reuse` stays true, and exactly one worker
 replacement occurred per boundary.
 
-### One capture per VM
+### Historical one-capture limitation (fixed after merge)
+
+The limitation below describes the QEMU used for sessions8/9. The merged
+capture fix exports a fresh snapshot on every stop and publishes a versioned
+`last-scanout.json` manifest last. `session_cli capture` copies the console,
+source and manifest while paused, checks a fresh successful snapshot ID and
+then resumes. Identical pixels are allowed; a repeated content hash is not
+evidence of a stale snapshot. Old QEMU retains the conservative hash fallback.
+A withheld/missing pixel verdict now fails `test --capture` acceptance.
+
+`REPEAT_CAPTURE1` validates three captures in one exact-guest VM using the
+unchanged V28 reload boot package and a rebuilt, separately pinned QEMU:
+snapshot1/presentation311, snapshot2/presentation324 and snapshot3/presentation726
+all report zero conversion/display differences and verified source-to-console
+delivery. Home dispatch and display recovery pass between the first two.
+These are repeated captures in generation1, not new reload-cycle evidence.
+30 session/capture unit tests and 81 project regressions pass. Unit coverage
+also verifies two fresh identical-pixel snapshots, copying before resume, and
+withholding a repeated snapshot ID. Evidence:
+`/Users/jdolbe1/dvm-artifacts/research/gpu-repeat-capture-20260907`.
+
+Historical evidence:
 
 `darwin_iomfb.c` `gpu_present_stopped` exports the retained RGhA witness once
 per VM: `rgha_witness.exported` latches and `iomfb_export` opens with `"wx"`.
@@ -362,9 +383,10 @@ after the replacement that matters.
   driver's `texture memory cap exceeded` -> `GPU_LOAD_SYSTEM_UNCAUGHT ...
   render operation budget`; that wall was the compositor driver's, not the
   restart mechanism's, and the merged limits removed it.
-* **Pixel verification is one generation per VM**, by QEMU's retained-witness
-  design. Replacement #1 was verified in `BBRELOAD_SESSION6` and replacement
-  #2 in `BBRELOAD_SESSION9`; no single VM has verified both.
+* **Historical reload pixel evidence spans sessions.** Replacement #1 was
+  verified in `BBRELOAD_SESSION6` and #2 in `BBRELOAD_SESSION9`. The later
+  repeated-capture fix removes that tool restriction, but does not retroactively
+  turn those runs into pixel checks of both replacements in one VM.
 * **The slow Home transition is unaddressed here.** The merged evidence records
   a first unmistakable transition 1.405 s after input with a 648 ms frame gap
   during icon movement. Nothing in this work measures or improves it, and the

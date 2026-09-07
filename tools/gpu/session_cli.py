@@ -445,25 +445,36 @@ class Session:
         directory = self.captures/name
         directory.mkdir(exist_ok=False)
         monitor = HMP(self.out/'monitor.sock', timeout=10)
+        before_snapshot = read_json(self.out/'last-scanout.json', {})
         stopped = monitor.command('stop')
-        answer = monitor.command(f'screendump "{directory}/scanout.ppm"')
-        resumed = monitor.command('cont')
+        answer = resumed = ''
+        try:
+            if stopped:
+                raise RuntimeError('capture stop failed: '+stopped)
+            answer = monitor.command(f'screendump "{directory}/scanout.ppm"')
+            if answer:
+                raise RuntimeError('capture screendump failed: '+answer)
+            # Copy the committed witness group before resuming. A later stop
+            # may atomically replace these paths for the next capture.
+            for source in ('last-scanout.a408', 'last-scanout.rgha', 'last-scanout.bgra', 'last-scanout.json'):
+                if (self.out/source).exists():
+                    shutil.copyfile(self.out/source, directory/source)
+        finally:
+            resumed = monitor.command('cont')
+        if resumed:
+            raise RuntimeError('capture resume failed: '+resumed)
         record = dict(ok=True, name=name, monitor=dict(stop=stopped, screendump=answer, cont=resumed),
                       status=self.peer.status(), guest=self.peer.guest_status(),
                       display=dict(presentations=self.display.presentations, completions=self.display.completions),
                       input=read_json(self.out/'input-status.json', {}))
-        # QEMU exports the retained RGhA witness once per VM, on the first
-        # stop (darwin_iomfb.c gpu_present_stopped: rgha_witness.exported plus
-        # fopen "wx"). A later capture therefore sees the FIRST capture's
-        # source next to a newer console, which is not a pixel failure. Detect
-        # that and withhold the verdict rather than report a false mismatch.
-        for source in ('last-scanout.a408', 'last-scanout.rgha', 'last-scanout.bgra'):
-            if (self.out/source).exists():
-                shutil.copyfile(self.out/source, directory/source)
+        snapshot = read_json(directory/'last-scanout.json', None)
+        record['snapshot'] = snapshot
         witness = hashlib.sha256((directory/'last-scanout.rgha').read_bytes()).hexdigest() \
             if (directory/'last-scanout.rgha').exists() else None
         record['retained_source_sha256'] = witness
-        stale = witness is not None and witness in self.witnesses
+        stale = (not snapshot.get('ok') or snapshot.get('version') != 1 or
+                 snapshot.get('snapshot', 0) <= before_snapshot.get('snapshot', 0)) if snapshot is not None else (
+                     witness is not None and witness in self.witnesses)
         self.witnesses.add(witness) if witness else None
         (directory/'shared-ram.bin').write_bytes(self.peer.ram[:])
         entry = self.peer.current()
@@ -471,10 +482,10 @@ class Session:
             self.peer.generation_evidence(dict(entry, last_record=len(self.peer.records),
                                                last_audit=self.peer.audit_seen), directory/'generation')
         if stale:
+            record['ok'] = False
             record['scanout'] = dict(exit=None, stale_retained_source=True, sha256=witness,
-                                     note='QEMU exports the retained RGhA witness once per VM; this '
-                                          'capture reuses an earlier capture\'s source, so no pixel '
-                                          'verdict is available. Verify pixels in one capture per VM.')
+                                     note='No fresh successful snapshot export. Legacy QEMU may export only '
+                                          'once; rebuilt QEMU supplies a new snapshot ID at each stop.')
             atomic_json(directory/'capture.json', record)
             return record
         if all((directory/n).exists() for n in ('last-scanout.a408', 'last-scanout.rgha', 'last-scanout.bgra', 'scanout.ppm')):
@@ -484,6 +495,7 @@ class Session:
             record['scanout'] = dict(exit=check.returncode, stdout=check.stdout[-4000:], stderr=check.stderr[-2000:])
             record['ok'] = check.returncode == 0
         else:
+            record['ok'] = False
             record['scanout'] = dict(exit=None, note='no retained native scanout in this session yet')
         atomic_json(directory/'capture.json', record)
         return record
