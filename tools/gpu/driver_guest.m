@@ -534,6 +534,10 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @end
 
 @implementation DVMTexture
+- (void)requireResident {
+    [super requireResident];
+    if(self.viewParent&&self.residencyState>MTLPurgeableStateNonVolatile)reject(@"volatile texture view requires nonvolatile reacquisition");
+}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state {return self.viewParent?DVMTextureViewPurgeable(self,state):[super setPurgeableState:state];}
 - (DVMResource *)purgeabilityRoot {return self.viewParent?self.viewParent.purgeabilityRoot:(self.backingBuffer?:self);}
 - (void)prepareForPurgeability:(MTLPurgeableState)state {
@@ -598,7 +602,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)p bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
     // Shared 2D parents in this profile have only level zero. Keep their CPU
     // shadow and pending writes at the parent so aliases never diverge.
-    if(self.viewParent){[self.viewParent replaceRegion:r mipmapLevel:level+self.viewLevel slice:slice withBytes:p bytesPerRow:row bytesPerImage:image];return;}
+    if(self.viewParent){[self requireResident];[self.viewParent replaceRegion:r mipmapLevel:level+self.viewLevel slice:slice withBytes:p bytesPerRow:row bytesPerImage:image];return;}
     // Native 1D transfers have no row/image stride. Normalize only our CPU
     // shadow layout; the wire continues to carry the complete tight image.
     if(self.textureType==MTLTextureType1D){row=r.size.width*DVMFormatBytes(self.pixelFormat);image=row;}
@@ -625,7 +629,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     self.completedShadow=nil;
 }
 - (NSData *)read {
-    if(self.viewParent)return [self.viewParent read];
+    if(self.viewParent){[self requireResident];return [self.viewParent read];}
     [self requireResident];
     uint64_t generation=self.purgeabilityRoot.storageGeneration;
     if(self.shadowGeneration!=generation){self.completedShadow=nil;self.shadowGeneration=generation;}

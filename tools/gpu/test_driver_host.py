@@ -17,6 +17,45 @@ AIR = Path('/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib')
 SHA = '8860e4a17d89783da06429a302db0bc61b2939963f202c0c6ad31189a1021364'
 
 class HostTests(unittest.TestCase):
+    def test_development_encoder_budget_execution_and_atomic_rejection(self):
+        contract=self.rpc('capabilities')['contract']
+        self.assertEqual(contract['encoderOperationLimit'],4096)
+        self.assertEqual(contract['orderedCommandLimit'],256)
+        self.assertEqual(contract['maximumLiveObjects'],4096)
+        texture=self.rpc('texture',width=4,height=4,format=80,usage=5)['handle']
+        render=dict(kind='render',target=texture,load=2,store=1,clear=[1,0,0,1],
+                    operations=[['cull',0]]*4096)
+        good=self.rpc('renderSubmit',commands=[render],uploads=[],readbacks=[])
+        self.assertTrue(good['ok'],good);self.assertEqual(good['status'],4)
+        expected=bytes([0,0,255,255])*16
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=texture)['data']),expected)
+        bad=dict(render,clear=[0,1,0,1],operations=[['cull',0]]*4097)
+        self.assertFalse(self.rpc('renderSubmit',commands=[bad],uploads=[],readbacks=[])['ok'])
+        self.assertEqual(self.rpc('stats')['submissions'],1)
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=texture)['data']),expected)
+        self.assertTrue(self.rpc('release',handle=texture)['ok'])
+
+    def test_texture_view_overlap_and_parent_retirement(self):
+        root=self.rpc('texture',width=64,height=64,format=80,usage=5,storage=2,levels=2)['handle']
+        def view(parent,level=0):
+            reply=self.rpc('textureView',texture=parent,format=80,type=2,level=level,levels=1,slice=0,slices=1)
+            self.assertTrue(reply['ok'],reply);return reply['handle']
+        first=view(root);nested=view(first);second=view(root,1)
+        self.assertFalse(self.rpc('release',handle=first)['ok'])
+        self.assertFalse(self.rpc('release',handle=root)['ok'])
+        clear=dict(kind='render',target=root,load=2,store=1,clear=[1,0,0,1],operations=[])
+        bads=[['copyTexture',root,0,[0,0],[16,16],nested,0,[0,0]],
+              ['copyTexture',first,0,[0,0],[16,16],nested,0,[8,8]]]
+        for operation in bads:
+            reply=self.rpc('renderSubmit',commands=[clear,dict(kind='blit',operations=[operation])],uploads=[],readbacks=[])
+            self.assertFalse(reply['ok'],reply);self.assertIn('overlap',reply['description'])
+            self.assertEqual(self.rpc('stats')['submissions'],0)
+        # Equal coordinates in distinct absolute mip levels do not overlap.
+        reply=self.rpc('renderSubmit',commands=[clear,dict(kind='blit',operations=[['copyTexture',nested,0,[0,0],[32,32],second,0,[0,0]]])],uploads=[],readbacks=[])
+        self.assertTrue(reply['ok'],reply);self.assertEqual(reply['status'],4)
+        for handle in (nested,first,second,root):self.assertTrue(self.rpc('release',handle=handle)['ok'])
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
+
     def test_descriptor_compute_exact_air_and_atomic_rejection(self):
         # Exact guest AIR on the host backend; this is not guest runtime evidence.
         encode=lambda data:base64.b64encode(data).decode()
@@ -35,9 +74,15 @@ class HostTests(unittest.TestCase):
             reply=self.rpc('computePipeline',**dict(descriptor,functionHandle=function))
             self.assertTrue(reply['ok'],reply);self.assertTrue(reply['bindings']);pipelines.append(reply['handle'])
         texture=self.rpc('texture',width=64,height=48,format=115,usage=5)['handle']
+        allocation=self.rpc('stats')['live']['resourceBytes']
+        view_reply=self.rpc('textureView',texture=texture,format=115,type=2,level=0,levels=1,slice=0,slices=1)
+        self.assertTrue(view_reply['ok'],view_reply)
+        view=view_reply['handle'];self.assertEqual(view_reply['purgeableState'],2)
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],allocation)
+        self.assertFalse(self.rpc('release',handle=texture)['ok'])
         partial=self.rpc('buffer',length=96)['handle'];result=self.rpc('buffer',length=16)['handle']
         uniform=encode(bytes.fromhex('0000000040003000010000000600000001000000'))
-        first=dict(kind='compute',pipeline=pipelines[0],textures=[[0,texture]],buffers=[dict(index=2,buffer=partial,offset=0)],
+        first=dict(kind='compute',pipeline=pipelines[0],textures=[[0,view]],buffers=[dict(index=2,buffer=partial,offset=0)],
                    bytes=[dict(index=0,data=uniform)],samplers=[],threadgroupMemory=[dict(index=0,length=1024)],groups=[1,6,1],threads=[8,8,1])
         second=dict(kind='compute',pipeline=pipelines[1],textures=[],buffers=[dict(index=1,buffer=partial,offset=0),dict(index=2,buffer=result,offset=0)],
                     bytes=[dict(index=0,data=uniform)],samplers=[],threadgroupMemory=[dict(index=0,length=128)],groups=[1,1,1],threads=[8,1,1])
@@ -63,12 +108,12 @@ class HostTests(unittest.TestCase):
             expected=[float(3072*(1+frame)),1536.,768.,3072.]
             self.assertEqual(base64.b64decode(reply['buffers'][str(result)]),struct.pack('<4f',*expected))
             self.assertEqual(base64.b64decode(reply['buffers'][str(partial)]),struct.pack('<4f',*[v/6 for v in expected])*6)
-        for handle in [lib,*functions,*pipelines,texture,partial,result]:self.assertTrue(self.rpc('release',handle=handle)['ok'])
+        for handle in [lib,*functions,*pipelines,view,texture,partial,result]:self.assertTrue(self.rpc('release',handle=handle)['ok'])
         self.assertEqual(self.rpc('stats')['live']['objects'],0)
 
     def test_negotiated_object_table_capacity_and_reuse(self):
         limit=self.rpc('capabilities')['contract']['maximumLiveObjects']
-        self.assertEqual(limit,256)
+        self.assertEqual(limit,4096)
         handles=[self.rpc('buffer',length=16)['handle'] for _ in range(limit)]
         self.assertEqual(self.rpc('stats')['live']['objects'],limit)
         self.assertFalse(self.rpc('buffer',length=16)['ok'])
@@ -268,7 +313,7 @@ class HostTests(unittest.TestCase):
         self.assertTrue(self.rpc('renderSubmit',commands=[clear],uploads=[],readbacks=[])['ok'])
         self.assertTrue(self.rpc('release',handle=t)['ok'])
         self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
-        self.assertFalse(self.rpc('texture',width=2048,height=2048,format=115,usage=5,storage=2,levels=2)['ok'])
+        self.assertFalse(self.rpc('texture',width=4096,height=4096,format=115,usage=5,storage=2,levels=2)['ok'])
 
     def test_staged_render_ownership_integrity_and_atomic_validation(self):
         target=self.rpc('texture',width=64,height=64,format=80,usage=5)['handle']
@@ -344,27 +389,55 @@ class HostTests(unittest.TestCase):
         self.assertEqual(4864%row_alignment,0)
         self.assertEqual(contract['queries']['minBufferNoCopyAlignmentBytes'],16384)
         self.assertEqual(contract['queries']['maxTextureWidth2D'],4096)
-        self.assertEqual(contract['privateTextureBytes'],32*1024*1024)
-        self.assertEqual(contract['ordinaryResourceBytes'],64*1024*1024)
+        self.assertEqual(contract['privateTextureBytes'],128*1024*1024)
+        self.assertEqual(contract['ordinaryResourceBytes'],512*1024*1024)
         for storage in (0,1):
             self.assertFalse(self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=storage)['ok'])
         screen=self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=2)
         self.assertTrue(screen['ok']);self.assertEqual(screen['nativeStorageMode'],2)
         self.assertTrue(self.rpc('release',handle=screen['handle'])['ok'])
-        # Independent axis and byte limits, plus the 64 MiB live allocation cap.
+        # Independent axis and byte limits, plus the 512 MiB live allocation cap.
         self.assertFalse(self.rpc('texture',width=4097,height=1,format=80,usage=5,storage=2)['ok'])
-        self.assertFalse(self.rpc('texture',width=2048,height=2049,format=115,usage=5,storage=2)['ok'])
+        self.assertFalse(self.rpc('texture',width=4096,height=4096,format=115,usage=5,storage=2,levels=2)['ok'])
         handles=[]
-        for _ in range(4):
+        for _ in range(32):
             r=self.rpc('texture',width=2048,height=2048,format=80,usage=5,storage=2)
             self.assertTrue(r['ok']);handles.append(r['handle'])
-        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],64*1024*1024)
-        self.assertFalse(self.rpc('texture',width=1,height=1,format=80,usage=5,storage=2)['ok'])
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],512*1024*1024)
+        rejected=self.rpc('texture',width=1,height=1,format=80,usage=5,storage=2)
+        self.assertFalse(rejected['ok'])
+        self.assertEqual(rejected['requestedLogicalBytes'],4)
+        self.assertEqual(rejected['liveLogicalBytes'],512*1024*1024)
+        self.assertEqual(rejected['ordinaryResourceBudgetBytes'],512*1024*1024)
         self.assertTrue(self.rpc('release',handle=handles.pop())['ok'])
         tiny=self.rpc('texture',width=1,height=1,format=80,usage=5,storage=2)
         self.assertTrue(tiny['ok'])
         for handle in handles+[tiny['handle']]:self.assertTrue(self.rpc('release',handle=handle)['ok'])
         self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
+
+    def test_compositor_two_screen_targets_and_budget_reuse(self):
+        # Allocation-only host rehearsal of PACING1's large live descriptors.
+        # Remaining logical charges are modeled by buffers, not a scene replay.
+        descriptors=[(1280,932,30,0,1,1),(640,320,115,2,5,1),
+                     (1024,192,115,2,5,1),(1216,2560,115,2,5,1),
+                     (1216,704,115,2,65541,1),(576,192,115,2,5,2)]
+        for _ in range(3):
+            handles=[]
+            for w,h,fmt,storage,usage,levels in descriptors:
+                reply=self.rpc('texture',width=w,height=h,format=fmt,storage=storage,usage=usage,levels=levels)
+                self.assertTrue(reply['ok'],reply);handles.append(reply['handle'])
+            remaining=43794942-self.rpc('stats')['live']['ordinaryLogicalBytes']
+            self.assertGreater(remaining,0)
+            while remaining:
+                size=min(remaining,1024*1024)
+                reply=self.rpc('buffer',length=size)
+                self.assertTrue(reply['ok'],reply);handles.append(reply['handle']);remaining-=size
+            reply=self.rpc('texture',width=1216,height=2560,format=115,storage=2,usage=65541)
+            self.assertTrue(reply['ok'],reply);handles.append(reply['handle'])
+            self.assertEqual(self.rpc('stats')['live']['ordinaryLogicalBytes'],68698622)
+            for handle in reversed(handles):self.assertTrue(self.rpc('release',handle=handle)['ok'])
+            self.assertEqual(self.rpc('stats')['live']['ordinaryLogicalBytes'],0)
+            self.assertEqual(self.rpc('stats')['live']['objects'],0)
 
     def test_texture_chunks_bound_replies_and_commit_atomically(self):
         encoded=lambda data:base64.b64encode(data).decode()

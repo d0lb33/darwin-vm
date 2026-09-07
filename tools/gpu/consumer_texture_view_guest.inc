@@ -10,7 +10,8 @@ static id<MTLTexture> DVMNewTextureView(DVMTexture *parent,MTLPixelFormat format
     view.width=MAX((NSUInteger)1,parent.width>>levels.location);view.height=MAX((NSUInteger)1,parent.height>>levels.location);view.depth=1;view.mipLevels=levels.length;
     view.textureType=type;view.pixelFormat=format;view.usage=parent.usage;view.acceptedOptions=parent.acceptedOptions;view.hostAllocatedSize=[r[@"allocatedSize"] unsignedIntegerValue];
     view.backingBuffer=parent.backingBuffer;view.backingOffset=parent.backingOffset;view.backingRow=parent.backingRow;view.surfaceObject=parent.surfaceObject;view.surfaceMapping=parent.surfaceMapping;
-    if(![r[@"width"] isEqual:@(view.width)]||![r[@"height"] isEqual:@(view.height)]||![r[@"levels"] isEqual:@(view.mipLevels)]||![r[@"parentLevel"] isEqual:@(levels.location)]||![r[@"parentSlice"] isEqual:@0])reject(@"native texture view metadata contract");
+    view.residencyState=[r[@"purgeableState"] unsignedIntegerValue];
+    if(view.residencyState<2||view.residencyState>4||![r[@"width"] isEqual:@(view.width)]||![r[@"height"] isEqual:@(view.height)]||![r[@"levels"] isEqual:@(view.mipLevels)]||![r[@"parentLevel"] isEqual:@(levels.location)]||![r[@"parentSlice"] isEqual:@0])reject(@"native texture view metadata contract");
     return view;
 }
 
@@ -21,11 +22,15 @@ static MTLPurgeableState DVMTextureViewPurgeable(DVMTexture *view,MTLPurgeableSt
     if(view.surfaceMapping&&state>MTLPurgeableStateNonVolatile)reject(@"pinned IOSurface volatility requires native retirement");
     DVMResource *root=view.purgeabilityRoot;__block NSDictionary *reply=nil;__block NSError *failure=nil;
     dispatch_sync(view.owner.serial,^{
+      BOOL sent=NO;
+      @try {
         if(root.purgeabilityFailed){failure=error(@"uncertain parent purgeability");return;}
+        sent=YES;
         reply=view.owner.transport(@{@"op":@"resourcePurgeable",@"handle":view.handle,@"state":@(state)},&failure);
         NSUInteger old=[reply[@"previous"] unsignedIntegerValue],current=[reply[@"current"] unsignedIntegerValue],rootOld=[reply[@"rootPrevious"] unsignedIntegerValue],rootCurrent=[reply[@"rootCurrent"] unsignedIntegerValue];
         if(![reply[@"ok"] boolValue]||![reply[@"handle"] isEqual:view.handle]||![reply[@"root"] isEqual:root.handle]||![reply[@"requested"] isEqual:@(state)]||old<2||old>4||current<2||current>4||rootOld<2||rootOld>4||rootCurrent<2||rootCurrent>4){root.purgeabilityFailed=YES;reply=nil;return;}
         [root purgeabilityChanged:rootOld current:rootCurrent];view.residencyState=current;
+      } @catch(NSException *exception){if(sent)root.purgeabilityFailed=YES;reply=nil;failure=error(exception.reason);}
     });
     if(!reply)reject(failure.description?:@"texture view purgeability acknowledgement");
     return [reply[@"previous"] unsignedIntegerValue];

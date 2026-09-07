@@ -50,7 +50,7 @@ static id<MTLSamplerState> DVMNewSampler(DVMDevice *device,MTLSamplerDescriptor 
 - (id<MTLDevice>)device {return self.command.device;}
 - (void)record:(NSArray *)op {
     if(self.ended)reject(@"render encoder ended");[self.command encoding];
-    if(self.operations.count>=256)reject(@"render operation budget");[self.operations addObject:op];
+    if(self.operations.count>=DVM_ENCODER_OPERATIONS)reject(@"render operation budget");[self.operations addObject:op];
 }
 - (NSNumber *)own:(id)object kind:(Class)kind {
     if(![object isKindOfClass:kind]||[object device]!=self.device)reject(@"foreign render resource");

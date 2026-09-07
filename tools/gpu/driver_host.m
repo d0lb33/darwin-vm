@@ -289,8 +289,13 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     NSUInteger bytes = DVMTextureAllocationBytes(width,height,depth,format,levels);
     if (bytes > (storage==MTLStorageModePrivate?DVM_PRIVATE_TEXTURE_BYTES:DVM_TEXTURE_BYTES))
         return HostError(seq, EINVAL, @"texture exceeds storage-mode byte limit");
-    if (bytes > kMaxTextures - host.textureBytes)
-        return HostError(seq, ENOSPC, @"texture memory cap exceeded");
+    if (bytes > kMaxTextures - host.textureBytes) {
+        NSMutableDictionary *reply=[HostError(seq, ENOSPC, @"texture memory cap exceeded") mutableCopy];
+        reply[@"requestedLogicalBytes"]=@(bytes);
+        reply[@"liveLogicalBytes"]=@(host.textureBytes);
+        reply[@"ordinaryResourceBudgetBytes"]=@(kMaxTextures);
+        return reply;
+    }
     MTLTextureDescriptor *descriptor =
         [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:pixel
                                                            width:(NSUInteger)width
@@ -450,6 +455,7 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
             @"buffers" : @(buffers),
             @"objects" : @(host.entries.count),
             @"resourceBytes" : @(host.textureBytes+host.residentBytes+host.importedBytes),
+            @"ordinaryLogicalBytes" : @(host.textureBytes),
             @"residentWorkloads":@(host.residentBytes?1:0),
             @"stagedRenderBytes":@(host.renderStage.length),@"stagedRenderTransactions":@(host.renderStage?1:0),
             @"importedBytes":@(host.importedBytes),@"importedAllocations":@(host.imports.count)

@@ -9,11 +9,15 @@ int main(void){@autoreleasepool{
     DVMHost *host=[DVMHost new];host.device=MTLCreateSystemDefaultDevice();host.queue=[host.device newCommandQueue];host.entries=[NSMutableDictionary dictionary];
     __block uint64_t seq=0;__block unsigned bufferWrites=0;
     __block BOOL dropPurgeabilityReply=NO;
+    __block BOOL throwPurgeabilityReply=NO;
     DVMMetalRPC rpc=^NSDictionary *(NSDictionary *request,NSError **outError){
         NSDictionary *reply=nil;@autoreleasepool{@synchronized(host){
             if([request[@"op"] isEqual:@"writeRenderBuffer"])bufferWrites++;
             reply=ProcessRequest(host,++seq,request);
         }}
+        if(throwPurgeabilityReply&&[request[@"op"] isEqual:@"resourcePurgeable"]){
+            throwPurgeabilityReply=NO;[NSException raise:@"InjectedTransportException" format:@"native state changed before exception"];
+        }
         if(dropPurgeabilityReply&&[request[@"op"] isEqual:@"resourcePurgeable"]){
             dropPurgeabilityReply=NO;if(outError)*outError=[NSError errorWithDomain:@"lost-purgeability-reply" code:5 userInfo:nil];return nil;
         }
@@ -53,6 +57,24 @@ int main(void){@autoreleasepool{
         fprintf(stderr,"NATIVE_PURGEABILITY_PROFILE type=%lu bytes=%lu after_empty=%lu\n",(unsigned long)td.textureType,(unsigned long)bytes,(unsigned long)current);
         memset(initial.mutableBytes,0xa7,bytes);[texture replaceRegion:region mipmapLevel:0 slice:0 withBytes:initial.bytes bytesPerRow:row bytesPerImage:row*td.height];
         [texture getBytes:actual.mutableBytes bytesPerRow:row bytesPerImage:row*td.height fromRegion:region mipmapLevel:0 slice:0];assert([actual isEqual:initial]);
+    }
+    // Native views may report NonVolatile while the private root is Volatile.
+    // The root, not that view hint, must gate both frontend and backend reuse.
+    @autoreleasepool{
+        MTLTextureDescriptor *vd=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:115 width:64 height:48 mipmapped:YES];vd.mipmapLevelCount=4;vd.storageMode=MTLStorageModePrivate;vd.usage=5;
+        id<MTLTexture> root=[device newTextureWithDescriptor:vd],view=[root newTextureViewWithPixelFormat:115];assert(view);
+        assert([root setPurgeableState:3]==2);
+        assert([view setPurgeableState:1]==2);
+        assert(refused(^{(void)[view newTextureViewWithPixelFormat:115];}));
+        NSNumber *handle=[(id)view valueForKey:@"handle"];
+        assert(![rpc(@{@"op":@"textureView",@"texture":handle,@"format":@115,@"type":@2,@"level":@0,@"levels":@1,@"slice":@0,@"slices":@1},NULL)[@"ok"] boolValue]);
+        MTLPurgeableState prior=[root setPurgeableState:2];assert(prior==3||prior==4);
+        assert([view newTextureViewWithPixelFormat:115]);
+        throwPurgeabilityReply=YES;assert(refused(^{[view setPurgeableState:3];}));
+        uint64_t before=seq;
+        assert(refused(^{[root setPurgeableState:2];}));
+        assert(refused(^{(void)[view newTextureViewWithPixelFormat:115];}));
+        assert(seq==before); // Uncertain root blocks even an attempted recovery RPC.
     }
     dropPurgeabilityReply=YES;assert(refused(^{[buffer setPurgeableState:4];}));
     assert(refused(^{(void)buffer.contents;}));assert(refused(^{[alias setPurgeableState:2];}));
