@@ -23,6 +23,7 @@ def main():
     p.add_argument('--manifest', type=Path, required=True)
     p.add_argument('--stage', type=Path, required=True)
     p.add_argument('--tag', required=True)
+    p.add_argument('--mmio-restore',action='store_true',help='supply owned RAM/registration for the three-range managed transport DT; no GPU worker or commands')
     a = p.parse_args()
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40:
         p.error('invalid tag')
@@ -39,6 +40,25 @@ def main():
         '-b', m['disk']['path'], str(disk)], check=True)
     env = {k: v for k, v in os.environ.items() if not k.startswith(('DARWIN_', 'GXFSTAT_', 'DVM_'))}
     env.update(m['qemu_env'])
+    if a.mmio_restore:
+        if any(k.startswith('DARWIN_GPU_') for k in env):
+            raise ValueError('restore manifest carries an uncontrolled GPU backend')
+        # The installed system's DT may already contain dvm-gpu-shm. QEMU
+        # requires its paired RAM even though the restore shell never opens it.
+        # Mode 1 is the idle local echo device; no host Metal worker is needed.
+        shared=out/'shared-ram.bin'
+        fd=os.open(shared,os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
+        try:os.ftruncate(fd,16*1024*1024)
+        finally:os.close(fd)
+        env['DARWIN_GPU_SHM_PATH']=str(shared)
+        # This guest's three-range DT includes the kernel-only registration
+        # aperture. Keep that exact layout and pair its DRAM mirror as well.
+        managed=out/'managed-ram.bin'
+        fd=os.open(managed,os.O_CREAT|os.O_EXCL|os.O_RDWR,0o600)
+        try:os.ftruncate(fd,12*1024*1024*1024)
+        finally:os.close(fd)
+        env['DARWIN_GPU_MANAGED_RAM_PATH']=str(managed)
+        env['DARWIN_GPU_MANAGED_PAGES_PATH']=str(out/'managed-pages.bin')
     # The restore shell owns its console; native HID pings belong to system boots.
     env.update(DVM_QEMU=m['qemu_argv'][0], DARWIN_INPUT_UART='0',
         DARWIN_TOUCH_EVENTS=str(out/'events.jsonl'))

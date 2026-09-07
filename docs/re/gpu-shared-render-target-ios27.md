@@ -1,5 +1,9 @@
 # Transport-owned render target: backend prerequisite
 
+Follow-up: [exact-guest shared QuartzCore rendering](gpu-shared-quartzcore-ios27.md)
+now verifies three displayed frames. This document retains the earlier
+host-only evidence and its then-untested guest integration plan.
+
 2026-09-07, continuing `gpu-client-storage-scenes-ios27.md`.
 This milestone adds the host resource and synchronization contract for ordinary
 render commands over the existing registered page pool. It does **not** yet

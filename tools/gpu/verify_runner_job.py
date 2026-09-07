@@ -34,7 +34,10 @@ def verify(path):
     for row in records:
         if 'upload_file' in row and hashlib.sha256((p/row['upload_file']).read_bytes()).hexdigest()!=row['upload_sha256']:
             raise ValueError('upload capture changed')
-    evidence=verify_records(p,lines[:end+1],records,job.get('frames',1),job.get('scene',0))
+    if job.get('shared_surface'):
+        from shared_consumer_verify import verify_records as verify_shared
+        evidence=verify_shared(p,lines[:end+1],records,job['frames'])
+    else:evidence=verify_records(p,lines[:end+1],records,job.get('frames',1),job.get('scene',0))
     return dict(job=job['job'],guest_pid=result['pid'],audit_crc_verified=True,consumer=evidence)
 
 

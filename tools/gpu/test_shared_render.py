@@ -3,12 +3,15 @@
 Native wait reports below are synthetic. No guest/DCP acceptance is claimed.
 """
 import json
+import os
 import select
 import struct
+import subprocess
 import time
 import unittest
 from managed_pages import read_resource, LENGTH, PAGE
 import test_managed_driver as managed_fixture
+from test_driver_host import BUILD
 
 
 class SharedRenderTests(unittest.TestCase):
@@ -17,6 +20,16 @@ class SharedRenderTests(unittest.TestCase):
     rpc = managed_fixture.ManagedTests.rpc
     manifest = managed_fixture.ManagedTests.manifest
     canaries = managed_fixture.ManagedTests.canaries
+
+    def test_owned_surface_frontend(self):
+        env={k:v for k,v in os.environ.items() if not k.startswith('DVM_DRIVER_')}
+        env.update(DVM_DRIVER_PRESENT_RAM=str(self.out/'shared-ram.bin'),
+                   DVM_DRIVER_MANAGED_RAM=str(self.out/'managed-ram.bin'),
+                   DVM_DRIVER_MANAGED_PAGES=str(self.out/'managed-pages.bin'))
+        result=subprocess.run([str(BUILD/'test_owned_surface_frontend')],env=env,capture_output=True,text=True,timeout=15)
+        (BUILD/'owned-surface-frontend.stderr').write_text(result.stderr)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('PASS owned IOSurface frontend:',result.stderr)
 
     def create(self, **changes):
         fields = dict(width=1179, height=2556, row=4864, format=80, usage=5, bytes=LENGTH)

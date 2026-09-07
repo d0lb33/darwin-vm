@@ -24,6 +24,8 @@ static void reject(NSString *s) {
 @property(nonatomic,strong) NSDictionary *negotiatedContract;
 @property(nonatomic,strong) NSMutableDictionary *linearAlignments;
 @property(nonatomic,strong) NSError *lastSubmissionError;
+@property(nonatomic,copy) DVMMetalMappingProvider mappingProvider;
+@property(nonatomic,strong) id<DVMMetalOwnedMapping> ownedMapping;
 - (NSDictionary *)contractCapabilities;
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err;
 - (void)retire:(NSNumber *)handle;
@@ -74,6 +76,8 @@ static void reject(NSString *s) {
 @property(nonatomic) MTLTextureUsage usage;
 @property(nonatomic,strong) DVMBuffer *backingBuffer;
 @property(nonatomic) NSUInteger backingOffset,backingRow;
+@property(nonatomic,strong) id surfaceObject;
+@property(nonatomic,strong) id<DVMMetalOwnedMapping> surfaceMapping;
 - (NSUInteger)row;
 - (NSData *)read;
 @end
@@ -307,12 +311,22 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
                                  iosurface:(IOSurfaceRef)s
                                      plane:(NSUInteger)plane {
-    // Shared IOSurface backing/coherence is not implemented by copied storage.
-    // Refuse this path until both initial contents and GPU writes are coherent.
-    (void)d;
-    (void)s;
-    (void)plane;
-    return nil;
+    if(!s||!d||plane||!self.mappingProvider||d.textureType!=MTLTextureType2D||d.width!=DVM_PRESENT_WIDTH||
+       d.height!=DVM_PRESENT_HEIGHT||d.depth!=1||d.arrayLength!=1||d.mipmapLevelCount!=1||d.sampleCount!=1||
+       d.pixelFormat!=MTLPixelFormatBGRA8Unorm||d.usage!=(MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead)||
+       d.storageMode!=MTLStorageModeShared||!DVMResourceOptionsValid(d.resourceOptions)||
+       ([(id)d respondsToSelector:@selector(protectionOptions)]&&[(id<DVMProtectionMetadata>)d protectionOptions]))return nil;
+    id<DVMMetalOwnedMapping> mapping=DVMGetOwnedMetalMapping(self,NULL);
+    if(!mapping||IOSurfaceGetBaseAddress(s)!=mapping.bytes||IOSurfaceGetAllocSize(s)!=mapping.length||
+       IOSurfaceGetWidth(s)!=d.width||IOSurfaceGetHeight(s)!=d.height||IOSurfaceGetBytesPerRow(s)!=DVM_PRESENT_ROW||
+       IOSurfaceGetBytesPerElement(s)!=4||IOSurfaceGetPixelFormat(s)!=0x42475241||IOSurfaceGetPlaneCount(s))return nil;
+    NSError *e=nil;NSDictionary *r=[self call:@{@"op":@"sharedRenderCreate",@"width":@(d.width),@"height":@(d.height),
+        @"row":@DVM_PRESENT_ROW,@"format":@(d.pixelFormat),@"usage":@(d.usage),@"bytes":@(mapping.length)} error:&e];
+    if(!r)return nil;
+    DVMTexture *t=[DVMTexture new];t.owner=self;t.handle=r[@"handle"];t.width=d.width;t.height=d.height;t.depth=1;
+    t.textureType=d.textureType;t.pixelFormat=d.pixelFormat;t.usage=d.usage;t.acceptedOptions=d.resourceOptions;
+    t.hostAllocatedSize=[r[@"allocatedSize"] unsignedIntegerValue];t.surfaceObject=(__bridge id)s;t.surfaceMapping=mapping;
+    return t;
 }
 - (id<MTLCommandQueue>)newCommandQueue {
     DVMQueue *q = [DVMQueue new];
@@ -417,7 +431,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (id<MTLBuffer>)buffer {return self.backingBuffer;}
 - (NSUInteger)bufferOffset {return self.backingOffset;}
 - (NSUInteger)bufferBytesPerRow {return self.backingRow;}
-- (IOSurfaceRef)iosurface {return NULL;}
+- (IOSurfaceRef)iosurface {return (__bridge IOSurfaceRef)self.surfaceObject;}
 - (NSUInteger)iosurfacePlane {return 0;}
 - (NSUInteger)mipmapLevelCount {
     return 1;
@@ -429,6 +443,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return 1;
 }
 - (void)check:(MTLRegion)r level:(NSUInteger)level row:(NSUInteger)row pointer:(const void *)p {
+    if(self.surfaceMapping)reject(@"owned IOSurface CPU access uses its lock and lease contract");
     if (!p || level || r.origin.x || r.origin.y || r.origin.z || r.size.width != _width ||
         r.size.height != _height || r.size.depth != self.depth || row < [self row] || row>DVM_TEXTURE_BYTES)
         reject(@"only full texture transfers supported");
@@ -457,6 +472,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     self.completedShadow=nil;
 }
 - (NSData *)read {
+    if(self.surfaceMapping)reject(@"owned IOSurface has no copied readback path");
     if(self.owner.submissionInFlight)reject(@"texture read while GPU work is in flight");
     if(self.completedShadow)return self.completedShadow;
     NSError *e = nil;
@@ -817,6 +833,44 @@ id<MTLDevice> DVMCreateMetalDevice(DVMMetalRPC rpc) {
 id<MTLDevice> DVMCreateBinaryMetalDevice(DVMMetalRPC rpc) {
     DVMDevice *d=(DVMDevice *)DVMCreateMetalDevice(rpc);
     d.binaryPayloads=YES;return d;
+}
+
+id<MTLDevice> DVMCreateSharedMetalDevice(DVMMetalRPC rpc,DVMMetalMappingProvider provider) {
+    if(!provider)return nil;
+    DVMDevice *d=(id)DVMCreateBinaryMetalDevice(rpc);d.mappingProvider=provider;return d;
+}
+id<DVMMetalOwnedMapping> DVMGetOwnedMetalMapping(id<MTLDevice> device,NSError **outError) {
+    if(outError)*outError=nil;
+    if(![(id)device isKindOfClass:DVMDevice.class]){if(outError)*outError=error(@"foreign mapping device");return nil;}
+    DVMDevice *d=(id)device;
+    @synchronized(d){
+        if(d.ownedMapping)return d.ownedMapping;
+        NSError *e=nil;id<DVMMetalOwnedMapping> mapping=d.mappingProvider?d.mappingProvider(&e):nil;
+        if(!mapping||![mapping conformsToProtocol:@protocol(DVMMetalOwnedMapping)]||mapping.mappingVersion!=1||
+           !mapping.bytes||(uintptr_t)mapping.bytes%DVM_MANAGED_PAGE_BYTES||mapping.length!=DVM_PRESENT_BUFFER_BYTES){
+            if(outError)*outError=e?:error(@"mapping provider/version/extent contract");return nil;
+        }
+        d.ownedMapping=mapping;return mapping;
+    }
+}
+static NSDictionary *DVMSharedTextureOperation(id<MTLTexture> texture,uint64_t epoch,NSString *op,NSDictionary *fields) {
+    if(![(id)texture isKindOfClass:DVMTexture.class]||!((DVMTexture *)texture).surfaceMapping)reject(@"shared texture ownership");
+    DVMTexture *t=(id)texture;NSError *e=nil;
+    NSMutableDictionary *request=[fields mutableCopy];request[@"op"]=op;request[@"handle"]=t.handle;request[@"epoch"]=@(epoch);
+    NSDictionary *reply=[t.owner call:request error:&e];
+    if(!reply||t.owner.lastSubmissionError)reject((e?:t.owner.lastSubmissionError).description?:@"shared texture state");
+    // Serial RPC completion precedes this CPU-visible boundary. The actual
+    // IOSurface lock/unlock and native display wait belong to its consumer.
+    __atomic_thread_fence(__ATOMIC_SEQ_CST);return reply;
+}
+NSDictionary *DVMSharedTextureAcquire(id<MTLTexture> texture,uint64_t epoch) {
+    return DVMSharedTextureOperation(texture,epoch,@"sharedRenderAcquire",[NSDictionary dictionary]);
+}
+NSDictionary *DVMSharedTextureSeal(id<MTLTexture> texture,uint64_t epoch) {
+    return DVMSharedTextureOperation(texture,epoch,@"sharedRenderSeal",[NSDictionary dictionary]);
+}
+NSDictionary *DVMSharedTextureRetire(id<MTLTexture> texture,uint64_t epoch,uint32_t swap,int waitResult) {
+    return DVMSharedTextureOperation(texture,epoch,@"sharedRenderRetire",@{@"swap":@(swap),@"waitMode":@1,@"waitResult":@(waitResult)});
 }
 
 // Narrow resident-workload extension. This is not an implementation of general

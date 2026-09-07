@@ -1,0 +1,63 @@
+"""Reject false GPU, ownership, pixel and native-presentation acceptance."""
+import copy
+import hashlib
+from pathlib import Path
+import tempfile
+import unittest
+from shared_consumer_verify import verify_records,verify_scanout_export,BYTES,WIDTH,HEIGHT,ROW
+
+
+class SharedConsumerVerification(unittest.TestCase):
+    def setUp(self):
+        self.tmp=tempfile.TemporaryDirectory();self.out=Path(self.tmp.name)
+        self.data=bytearray(759*16384)
+        for y in range(HEIGHT):self.data[y*ROW:y*ROW+WIDTH*4]=bytes([255,0,0,255])*WIDTH
+        self.data[:16]=b''.join(x.to_bytes(4,'little') for x in (0xff44564d,0xff505253,0xff424c52,0xff000003))
+        (self.out/'managed-final.bgra').write_bytes(self.data)
+        self.lines=['GPU_LOAD_CA_SHARED_SETUP us=1500 width=1179 height=2556 row=4864 surface=42 frames=3']
+        self.records=[]
+        def add(op,request,reply):self.records.append(dict(seq=len(self.records)+1,op=op,request=request,reply=dict(reply,ok=True)))
+        add('library',dict(sha256='8860e4a17d89783da06429a302db0bc61b2939963f202c0c6ad31189a1021364'),dict(handle=1))
+        add('sharedRenderCreate',{},dict(handle=2))
+        display=[]
+        for i in range(1,4):
+            add('sharedRenderAcquire',dict(handle=2,epoch=i),{})
+            add('renderSubmit',dict(commands=[dict(target=2)]),dict(status=4,draws=5))
+            add('sharedRenderSeal',dict(handle=2,epoch=i),dict(completedWrites=1))
+            add('sharedRenderRetire',dict(handle=2,epoch=i,swap=i+10,waitMode=1,waitResult=0),{})
+            self.lines.append(f'GPU_LOAD_CA_SHARED_FRAME frame={i} swap={i+10} completed_writes=1 render_us=2000 display_us=1000 total_us=3000')
+            display.append(f'iomfb: gpu-present frame={i} swap={i+10} dva=0x1234 monotonic_ns={100000*i}\nD594 nested completed, status 0x0\n')
+        add('stats',{},dict(live=dict(objects=0,resourceBytes=0)))
+        self.lines.extend([f'GPU_LOAD_CA_SHARED_FINAL frames=3 bad_pixels=0 sha={hashlib.sha256(self.data[:BYTES]).hexdigest()} verification_reads_in_batch=0','GPU_LOAD_CA_SHARED_POWER_RESET rc=0','GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0'])
+        self.display=''.join(display);(self.out/'display.log').write_text(self.display)
+
+    def tearDown(self):self.tmp.cleanup()
+
+    def test_complete_fixture_and_independent_scanout(self):
+        result=verify_records(self.out,self.lines,self.records,3)
+        self.assertTrue(result['verified']);self.assertFalse(result['final_scanout_export_checked'])
+        (self.out/'last-presented.bgra').write_bytes(self.data[:BYTES])
+        self.assertTrue(verify_scanout_export(self.out,self.out)['verified'])
+        wrong=bytearray(self.data[:BYTES]);wrong[-4]^=1
+        (self.out/'last-presented.bgra').write_bytes(wrong)
+        with self.assertRaisesRegex(ValueError,'actual final DCP'):verify_scanout_export(self.out,self.out)
+
+    def test_false_completion_wrong_target_and_early_retirement(self):
+        for mutate in (lambda r:r[3]['reply'].update(status=3),lambda r:r[3]['request']['commands'][0].update(target=9),
+                       lambda r:r[4]['reply'].update(completedWrites=0),lambda r:r[5]['request'].update(waitMode=0),
+                       lambda r:r[5]['request'].update(epoch=2),lambda r:r[-1]['reply']['live'].update(objects=1)):
+            records=copy.deepcopy(self.records);mutate(records)
+            with self.assertRaises(ValueError):verify_records(self.out,self.lines,records,3)
+
+    def test_matching_forged_hash_cannot_replace_pixel_oracle(self):
+        self.data[100]^=1;(self.out/'managed-final.bgra').write_bytes(self.data)
+        lines=list(self.lines);lines[-3]=f'GPU_LOAD_CA_SHARED_FINAL frames=3 bad_pixels=0 sha={hashlib.sha256(self.data[:BYTES]).hexdigest()} verification_reads_in_batch=0'
+        with self.assertRaisesRegex(ValueError,'pixel oracle'):verify_records(self.out,lines,self.records,3)
+
+    def test_missing_native_frame_and_completion(self):
+        for bad in (self.display.replace('gpu-present frame=2','other frame=2'),self.display.replace('D594 nested completed, status 0x0','D594 failed')):
+            (self.out/'display.log').write_text(bad)
+            with self.assertRaises(ValueError):verify_records(self.out,self.lines,self.records,3)
+
+
+if __name__=='__main__':unittest.main()

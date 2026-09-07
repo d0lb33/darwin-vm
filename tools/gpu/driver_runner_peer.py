@@ -83,7 +83,8 @@ class RunnerPeer(MMIOPeer):
             path.rename(directory/'queued.json')
             self.current = dict(job=job, payload=payload, out=directory,
                                 first_record=len(self.records), first_audit=self.audit_seen,
-                                started=time.monotonic(),first_serial=(self.out/'serial.log').stat().st_size)
+                                started=time.monotonic(),first_serial=(self.out/'serial.log').stat().st_size,
+                                first_display=(self.out/'stderr.log').stat().st_size)
             return dict(action='stage',job=job['job'],bytes=len(payload),sha256=job['sha256'],test=job.get('test','builtin'),mode=job.get('mode','data'),development=job.get('development',False),
                         info=base64.b64encode(info).decode(),resources=base64.b64encode(resources).decode())
         if op == 'runnerFetch':
@@ -123,13 +124,21 @@ class RunnerPeer(MMIOPeer):
             for r in records:
                 if 'upload_file' in r:shutil.copyfile(self.out/r['upload_file'],directory/r['upload_file'])
             (directory/'shared-ram.bin').write_bytes(self.ram[:])
+            if c['job'].get('shared_surface'):
+                from managed_pages import read_resource
+                if (self.out/'managed-pages.bin').exists():
+                    (directory/'managed-final.bgra').write_bytes(read_resource(self.out))
+                display,_=capture_uart_interval(self.out/'stderr.log',c['first_display'])
+                (directory/'display.log').write_bytes(display)
             result=dict(c['result'],host_elapsed_seconds=c['ended']-c['started'],
                         expected=c['job'].get('expected','observe'),verified=False,loading_evidence=loading)
             if result['spawn']==0 and result['exit']==0 and result['signal']==0:
                 from consumer_verify import verify_records
+                if c['job'].get('shared_surface'):
+                    from shared_consumer_verify import verify_records as verify_shared
                 child=[x['line'] for x in audits]
                 end=child.index('GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0')
-                result['consumer']=verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
+                result['consumer']=verify_shared(directory,child[:end+1],records,c['job']['frames']) if c['job'].get('shared_surface') else verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
                 result['verified']=True
             else:
                 result['failure_evidence']=[x['line'] for x in audits if 'ERROR' in x['line'] or 'FAULT' in x['line']]

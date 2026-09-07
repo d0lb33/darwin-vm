@@ -90,6 +90,10 @@ static void memoryBudget(void) {
 }
 #ifdef DVM_DRIVER_MMIO
 #include "driver_mmio_transport.inc"
+#ifdef DVM_SERVICE_POOL_CONTRACT
+#include "present_layout.h"
+#include "driver_owned_mapping.inc"
+#endif
 #else
 enum { Page = 4096, Max = 2 * 1024 * 1024, Raw = 64 * 1024 * 1024 };
 @interface Namespace : NSObject
@@ -441,9 +445,16 @@ int main(int argc, char **argv) {
         if (!create)
             fail("factory");
         @autoreleasepool {
-            id<MTLDevice> device = create(^NSDictionary *(NSDictionary *r, NSError **error) {
+            DVMMetalRPC rpc=^NSDictionary *(NSDictionary *r, NSError **error) {
                 return [ns call:r error:error];
-            });
+            };
+            id<MTLDevice> device=nil;
+#if defined(DVM_DRIVER_MMIO) && defined(DVM_SERVICE_POOL_CONTRACT)
+            DVMCreateSharedMetalDeviceFn sharedCreate=dlsym(handle,"DVMCreateSharedMetalDevice");
+            if(sharedCreate)device=sharedCreate(rpc,^id<DVMMetalOwnedMapping>(NSError **error){return DVMMapDriverPool(ns,error);});
+            else
+#endif
+            device=create(rpc);
             if (![device conformsToProtocol:@protocol(MTLDevice)])
                 fail("device-protocol");
             fprintf(stderr, "GPU_LOAD_DRIVER_STAGE device-created\n");

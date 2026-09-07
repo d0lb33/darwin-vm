@@ -9,7 +9,9 @@
 #ifndef DVM_CA_FRAMES
 #define DVM_CA_FRAMES 1
 #endif
-#if DVM_CA_FRAMES > 1
+#if defined(DVM_CA_SHARED)
+#include "consumer_shared_probe.inc"
+#elif DVM_CA_FRAMES > 1
 #include "consumer_sequence_probe.inc"
 #else
 static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {

@@ -44,6 +44,9 @@ def main():
                 stub=a.out/'stubs/usr/lib/libobjc.tbd';text=stub.read_text()
                 added=[s for s in symbols if s.startswith('_objc_') and '"'+s+'"' not in text]
                 text=text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added));stub.write_text(text)
+                stub=a.out/'stubs/System/Library/Frameworks/IOSurface.framework/IOSurface.tbd';text=stub.read_text()
+                added=[s for s in symbols if s.startswith('_IOSurfaceGet') and '"'+s+'"' not in text]
+                stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))
                 subprocess.run(['xcrun','clang',*guest,'-F',str(a.out/'stubs/System/Library/Frameworks'),'-L',str(a.out/'stubs/usr/lib'),
                     '-dynamiclib','-Wl,-install_name,/usr/local/libexec/DVMProxy.bundle/DVMProxy',str(a.out/'driver_guest.o'),
                     '-framework','Foundation','-framework','CoreFoundation','-framework','IOSurface','-framework','Metal','-lobjc',
