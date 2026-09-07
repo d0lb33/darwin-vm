@@ -50,24 +50,35 @@ def main():
     ap.add_argument("--hits", type=int, default=1)
     ap.add_argument("--bt", type=int, default=0, help="walk this many frame-pointer frames (fp -> [fp], lr at [fp+8])")
     ap.add_argument("--timeout", type=float, default=120)
+    ap.add_argument("--umem", type=int, default=0,
+                    help="dump this many bytes before/after the deepest user-space (< 0x1000000000) lr in the backtrace")
+    ap.add_argument("--max-per-pc", type=int, default=0,
+                    help="after this many stops at one pc, remove that breakpoint (0 = never)")
     a = ap.parse_args()
     remote = Remote(a.port)
     remote.sock.settimeout(a.timeout)
     for pc in a.pc:
         assert remote.command("Z1,%x,4" % pc) == "OK", "breakpoint refused"
     hits = 0
+    per_pc = {}
+    t0 = time.time()
     try:
         while hits < a.hits:
             remote.send("c")
             remote.receive()
             regs = struct.unpack_from("<33Q", bytes.fromhex(remote.command("g")))
             pc = regs[32]
-            print("=== stop at pc=0x%x (hit %d)" % (pc, hits + 1))
+            print("=== stop at pc=0x%x (hit %d) t=%.3f" % (pc, hits + 1, time.time() - t0))
+            per_pc[pc] = per_pc.get(pc, 0) + 1
+            if a.max_per_pc and per_pc[pc] == a.max_per_pc:
+                reply = remote.command("z1,%x,4" % pc)
+                print("  (breakpoint at 0x%x removed after %d stops: reply %r)" % (pc, a.max_per_pc, reply))
             for i in range(0, 31, 4):
                 print("  " + " ".join("x%-2d=%016x" % (j, regs[j]) for j in range(i, min(i + 4, 31))))
             print("  sp=%016x pc=%016x" % (regs[31], pc))
             if a.bt:
                 fp = regs[29]
+                user_lr = 0
                 print("  bt: lr=0x%x" % (regs[30] & 0x0000ffffffffffff))
                 for depth in range(a.bt):
                     if not fp or fp & 7:
@@ -77,8 +88,18 @@ def main():
                     except RuntimeError:
                         break
                     next_fp, lr = struct.unpack("<QQ", frame)
-                    print("      #%d fp=0x%x lr=0x%x" % (depth, fp, lr & 0x0000ffffffffffff))
+                    lr &= 0x0000ffffffffffff
+                    print("      #%d fp=0x%x lr=0x%x" % (depth, fp, lr))
+                    if lr and lr < 0x1000000000 and not user_lr:
+                        user_lr = lr
                     fp = next_fp
+                if a.umem and user_lr:
+                    base = user_lr - a.umem
+                    try:
+                        print("  [user code around lr 0x%x]" % user_lr)
+                        hexdump(base, read_mem(remote, base, 2 * a.umem))
+                    except RuntimeError as e:
+                        print("  (user memory read failed: %s)" % e)
             for spec in a.mem:
                 # REG followed by any sequence of +OFF (add) and * (deref),
                 # then an optional :LEN, e.g. x1+0x50:*+0x98:*:0x40
@@ -103,9 +124,14 @@ def main():
                     print("  [%s]" % label, e)
             hits += 1
             if pc in a.pc:
-                assert remote.command("z1,%x,4" % pc) == "OK"
+                # A stop can still arrive for a breakpoint --max-per-pc already
+                # removed (another vCPU had hit it), so tolerate a failed remove
+                # and never re-insert a removed one.
+                removed = a.max_per_pc and per_pc.get(pc, 0) >= a.max_per_pc
+                remote.command("z1,%x,4" % pc)
                 remote.command("s")
-                assert remote.command("Z1,%x,4" % pc) == "OK"
+                if not removed:
+                    assert remote.command("Z1,%x,4" % pc) == "OK"
             else:
                 print("  (stop was not at a requested breakpoint)")
                 break
