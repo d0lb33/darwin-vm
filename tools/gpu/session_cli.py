@@ -16,6 +16,7 @@ per-test deadlines are separate. A total session cap exists only for
 `--regression`, which is the automated form.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -139,6 +140,7 @@ class Session:
         # the UART. BBRELOAD_SESSION3 ran 300 s and 3,854 presentations without
         # ever matching a registration because this buffer did not exist.
         self.audit_tail = ''
+        self.witnesses = set()
         self.uart = None
         self.proc = None
         self.home = None
@@ -450,14 +452,31 @@ class Session:
                       status=self.peer.status(), guest=self.peer.guest_status(),
                       display=dict(presentations=self.display.presentations, completions=self.display.completions),
                       input=read_json(self.out/'input-status.json', {}))
+        # QEMU exports the retained RGhA witness once per VM, on the first
+        # stop (darwin_iomfb.c gpu_present_stopped: rgha_witness.exported plus
+        # fopen "wx"). A later capture therefore sees the FIRST capture's
+        # source next to a newer console, which is not a pixel failure. Detect
+        # that and withhold the verdict rather than report a false mismatch.
         for source in ('last-scanout.a408', 'last-scanout.rgha', 'last-scanout.bgra'):
             if (self.out/source).exists():
                 shutil.copyfile(self.out/source, directory/source)
+        witness = hashlib.sha256((directory/'last-scanout.rgha').read_bytes()).hexdigest() \
+            if (directory/'last-scanout.rgha').exists() else None
+        record['retained_source_sha256'] = witness
+        stale = witness is not None and witness in self.witnesses
+        self.witnesses.add(witness) if witness else None
         (directory/'shared-ram.bin').write_bytes(self.peer.ram[:])
         entry = self.peer.current()
         if entry:
             self.peer.generation_evidence(dict(entry, last_record=len(self.peer.records),
                                                last_audit=self.peer.audit_seen), directory/'generation')
+        if stale:
+            record['scanout'] = dict(exit=None, stale_retained_source=True, sha256=witness,
+                                     note='QEMU exports the retained RGhA witness once per VM; this '
+                                          'capture reuses an earlier capture\'s source, so no pixel '
+                                          'verdict is available. Verify pixels in one capture per VM.')
+            atomic_json(directory/'capture.json', record)
+            return record
         if all((directory/n).exists() for n in ('last-scanout.a408', 'last-scanout.rgha', 'last-scanout.bgra', 'scanout.ppm')):
             verifier = str(Path(__file__).with_name('verify_rgha_scanout.py'))
             check = subprocess.run([verifier_interpreter(), verifier, str(directory)],

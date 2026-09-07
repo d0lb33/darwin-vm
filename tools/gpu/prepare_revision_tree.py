@@ -17,9 +17,10 @@ import subprocess
 import sys
 
 SUFFIXES = ('.m', '.h', '.inc', '.py')
-# The overlay is measured against this branch's root commit, not HEAD, so a
-# later commit cannot silently move guest sources into the pinned tree.
-BASE_COMMIT = 'ec9d38a83dfd36791cbb4f83ad3ebfbc41cd6de5'
+# The overlay is measured against the tested GPU commit this branch merged, not
+# HEAD, so a later commit cannot silently move guest sources into the pinned
+# tree. Everything outside the overlay comes from the snapshot instead.
+BASE_COMMIT = '4a1f25ede66a7c7922c74d7a0899690adbcec13a'
 
 
 def sha(path):

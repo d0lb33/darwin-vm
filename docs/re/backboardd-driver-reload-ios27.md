@@ -305,16 +305,70 @@ state by rebuilding and reinstalling costs 6.9 + 8.8 + 33.4 + 96.5 s, about
 revision, 4x to 18x. The spread in the restart figure is launchd respawn
 timing, not our work: quiescence itself is 0.081-0.141 s.
 
-## 9. Limitations, and what is still a hypothesis
+## 9. V28: two cycles in one VM, both replacements verified
 
-* **One cycle, not a repeat.** Acceptance step 7 is unmet. Every session so far
-  ends at 220-290 s on the driver's own `texture memory cap exceeded` ->
-  `GPU_LOAD_SYSTEM_UNCAUGHT name=NSInvalidArgumentException reason=DVM Metal:
-  render operation budget`, an allocation-budget wall that belongs to the
-  compositor driver, not to the restart mechanism. It killed generation 2
-  while cycle 2 was being issued. The budget appears to be per generation
-  (generation 1 ran 96 s clean, generation 2 about 85 s), so a promptly issued
-  second restart should get a fresh one; that is untested.
+After merging the tested GPU development limits (root `4a1f25e`, QEMU
+`5282e4e`), the compositor no longer walks into the allocation wall that
+truncated every earlier session, and the second cycle completes. The guest
+snapshot is the V28 package's own `guest/` build directory and the backend is
+its matched `host/driver_host`, so no V28 guest ever runs against an older
+backend. The pinned QEMU is that package's binary; its new transition and
+input timing diagnostics are gated on `DARWIN_DCP_TRANSITION_TRACE_DIR` and
+`DARWIN_INPUT_TIMING`, neither of which these runs set.
+
+`BBRELOAD_SESSION9`, one VM, no reboot:
+
+| | generation 1 | generation 2 | generation 3 |
+|---|---|---|---|
+| backboardd PID | 73 | 340 | 424 |
+| revision / class | 1 / `DVMDevice` | 2 / `DVMRevision2Device` | 3 / `DVMRevision3Device` |
+| package digest | built in | `16d2480f…` | `ea596f32…` |
+| restart total | — | 13.601 s | **0.526 s** |
+| quiesce | — | 0.179 s | 0.062 s |
+| imports / retired / quarantined | — | 2 / 2 / **0** | 2 / 2 / **0** |
+| relinquished | — | yes | yes |
+| submissions / presentations / completions | — | 10 / 9 / 9 | 15 / 15 / 15 |
+| Home dispatch, ack, later frame | — | passed, 0 timeouts | passed, 0 timeouts |
+
+Delivered pixels after the **second** replacement: `display_errors 0`,
+`conversion_errors 0`, `source_to_console_verified true`, 1179x2556 RGhA,
+820,243 non-zero RGB components. `BBRELOAD_SESSION8` is an independent
+repetition (73 -> 338 -> 486, restarts 25.569 s and 0.639 s, same ownership
+result, 1213 presentations, VM healthy at 351 s).
+
+**No stale-handle or pinned-page accumulation across cycles.** The registry
+directory after two cycles holds `.pages` **and** `.retired` for surfaces 1-4
+and only `.pages` for generation 3's live 5 and 6. `quarantine` is empty,
+`ownership_failure` is null, `reuse` stays true, and exactly one worker
+replacement occurred per boundary.
+
+### One capture per VM
+
+`darwin_iomfb.c` `gpu_present_stopped` exports the retained RGhA witness once
+per VM: `rgha_witness.exported` latches and `iomfb_export` opens with `"wx"`.
+A second capture therefore pairs the **first** capture's frozen source with a
+newer console. `BBRELOAD_SESSION8` recorded 1,722,834 differing pixels that
+way, with `nonzero_rgb_components` byte-identical to its earlier capture --
+a measurement artifact, not a rendering failure. `capture` now hashes the
+retained source, reports `stale_retained_source` and withholds the verdict
+instead of failing. Verify pixels in exactly one capture per VM, positioned
+after the replacement that matters.
+
+## 10. Limitations, and what is still a hypothesis
+
+* **Two cycles, not sustained use.** Two replacements in one VM are verified;
+  nothing here establishes behaviour over many cycles, long uptime or
+  concurrent producers. Before V28 every session ended at 220-290 s on the
+  driver's `texture memory cap exceeded` -> `GPU_LOAD_SYSTEM_UNCAUGHT ...
+  render operation budget`; that wall was the compositor driver's, not the
+  restart mechanism's, and the merged limits removed it.
+* **Pixel verification is one generation per VM**, by QEMU's retained-witness
+  design. Replacement #1 was verified in `BBRELOAD_SESSION6` and replacement
+  #2 in `BBRELOAD_SESSION9`; no single VM has verified both.
+* **The slow Home transition is unaddressed here.** The merged evidence records
+  a first unmistakable transition 1.405 s after input with a 648 ms frame gap
+  during icon movement. Nothing in this work measures or improves it, and the
+  Home checks above prove dispatch, ack and a later frame -- not responsiveness.
 * **Retirement has only ever been observed succeeding.** `quarantined=0` in
   every cycle. The quarantine path, the reuse stop and the ownership failures
   are covered by host regressions, not by a guest run that actually failed to
@@ -323,9 +377,9 @@ timing, not our work: quiescence itself is 0.081-0.141 s.
   is written after the aliasing worker process is gone, which proves the host
   side. Nothing here proves the native display had finished with a surface at
   that instant; the successor simply presented its own frames afterwards.
-* **launchd clean-exit recovery is observed, not characterised.** Three clean
-  `exit(0)` restarts were recovered, at 3.98 s, and 35.06 s. No throttling
-  model is claimed and no failure mode was explored.
+* **launchd clean-exit recovery is observed, not characterised.** Seven clean
+  `exit(0)` restarts were recovered, with successor spawn between 0.338 s and
+  35.064 s. No throttling model is claimed and no failure mode was explored.
 * This is a development loading route: a privileged test loader, an immutable
   xART fixture and an opt-in kernel selector. It is not global Metal discovery,
   not a production signing policy, and not in-place replacement inside a live
