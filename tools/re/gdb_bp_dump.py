@@ -48,6 +48,7 @@ def main():
     ap.add_argument("--pc", type=lambda v: int(v, 0), action="append", required=True)
     ap.add_argument("--mem", action="append", default=[])
     ap.add_argument("--hits", type=int, default=1)
+    ap.add_argument("--bt", type=int, default=0, help="walk this many frame-pointer frames (fp -> [fp], lr at [fp+8])")
     ap.add_argument("--timeout", type=float, default=120)
     a = ap.parse_args()
     remote = Remote(a.port)
@@ -65,6 +66,19 @@ def main():
             for i in range(0, 31, 4):
                 print("  " + " ".join("x%-2d=%016x" % (j, regs[j]) for j in range(i, min(i + 4, 31))))
             print("  sp=%016x pc=%016x" % (regs[31], pc))
+            if a.bt:
+                fp = regs[29]
+                print("  bt: lr=0x%x" % (regs[30] & 0x0000ffffffffffff))
+                for depth in range(a.bt):
+                    if not fp or fp & 7:
+                        break
+                    try:
+                        frame = read_mem(remote, fp, 16)
+                    except RuntimeError:
+                        break
+                    next_fp, lr = struct.unpack("<QQ", frame)
+                    print("      #%d fp=0x%x lr=0x%x" % (depth, fp, lr & 0x0000ffffffffffff))
+                    fp = next_fp
             for spec in a.mem:
                 # REG followed by any sequence of +OFF (add) and * (deref),
                 # then an optional :LEN, e.g. x1+0x50:*+0x98:*:0x40

@@ -232,15 +232,18 @@ path.
    (~13% together). The first two need an ASID-tagged softmmu TLB or a
    cheaper jump-cache invalidation, both upstream-sized changes; the third
    is a QEMU core change (`cpus.c`/`cputlb.c`).
-2. **DCP sleep/reboot loop.** The guest prints `IOMFB AP:
-   use_psd_dcp_power2: 0`: the IOMFB power manager wants PMGR's Power
-   State Domain (PSD) service (`Using PSD services for power management`,
-   `ApplePMGRFunctionResetPSDService`) and falls back to the RTKit
-   sleep/wake path when physical ApplePMGR is absent (it is, see
-   `multicpu.md`). The DT `dcp` node carries `power-gates 0x12d`,
-   `ignore-gating`, `idle-ctrl-check`, and `iop-dcp-nub/user-power-managed
-   = 1`. Emulating the PSD service is the hardware-faithful fix; it has not
-   been started and needs the user's go-ahead.
+2. **DCP sleep/reboot loop: still open, three hypotheses eliminated.**
+   PMGR is now modelled (`native-pmgr.md`) and `use_psd_dcp_power2` stays
+   0 because the H17P pipeline's platform traits hard-code it for
+   iPhone17,3 (a bare `mov w0, #0` at `AppleMobileDispH17P-DCP+0x3288`,
+   captured live). Apple's own `iomfb_IdleDetectorIndex_PowerGateFrontEnd_enabled=0`
+   boot-arg changes nothing (`SYS_NOGATE1`: 114 reboots / 300 s), and
+   answering the AP's `A385` poll with 1 changes nothing either
+   (`SYS_A385_1`: 110 reboots, 47,832 polls). Per cycle the AP polls
+   `A385` six or seven times, sends `A500` (4 bytes in), puts the eleven
+   AFK endpoints into state 2 and requests IOP power `0x201`; the kernel's
+   `set_power_state(0)` log carries `powerCallbackDcp=1`. The remaining
+   lead is the meaning of `A500`/`A385` and what a real DCP answers there.
 3. **AMX.** Every SIGILL crash above is the same missing instruction set.
    Options: emulate AMX (state, ~22 instruction families per corsix/amx,
    plus the lazy-enable trap XNU expects), or first find how userspace
