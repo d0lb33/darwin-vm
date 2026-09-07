@@ -89,6 +89,33 @@ PMGR is the default since 2026-09-06 (see the validation section below):
 - The DCP sleep loop that made PMGR boots look slow is fixed in the IOMFB
   model (`iomfb-power-path.md`), not here.
 
+## Validation of the default (2026-09-06, late evening)
+
+Same host, one guest at a time, same `system.qcow2`; the previous inputs
+were booted from their `*.pre-pmgr-*` copies through a manifest that points
+at them.
+
+| | previous package (patched kernel, `DARWIN_SMP_PV`, 19:01 build) | new default (stock kernel, PMGR, current build) |
+|---|---|---|
+| launcher | `boot_native_smc.py`, ~200 s | `run.sh --nographic`, ~400 s |
+| DCP reboots (`coprocessor booted`) | 64 | 2 (both real display-off cycles) |
+| frames presented | 1,137 (continuous; the AP never believes the display is on) | 27, then the display sleeps; a home press through `tools/input/relay.py` wakes it |
+| panics | 0 | 0 |
+| restore shell (`probe.sh`, PMGR tree, `-smp 6`) | n/a | reached, 0 panics (`RESTORE_PMGR_DEFAULT1`) |
+
+First-frame time with the documented bounded check
+(`warm_boot_probe.py --stop-on 'iomfb: presented '`): previous package
+112.4 s (`validation/SMC_FAST_CHECK`); new default 99.9 s, 0 panics
+(`validation/SMC_PMGR_DEFAULT_CHECK`, copied from `/tmp/dvm`).
+
+Open, and not caused by either package: since about 20:00 on 2026-09-06
+the lock-screen clock and the whole lock-screen layer render with a
+perspective shear (large digits sliding off the right edge) on **both**
+packages, while `SYS_AMX3`/`SYS_AMX4` on the same disk at 18:00-19:30
+rendered it straight. Same disk, same launcher family, both builds, so it
+is guest-side state or timing, not the kernel, the PMGR model, or the IOMFB
+power path. Not yet diagnosed.
+
 Not done:
 
 - Guest perf-state control runs against stand-in tables; CLPC/thermal
