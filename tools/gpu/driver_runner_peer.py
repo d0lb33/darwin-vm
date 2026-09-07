@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import struct
 import subprocess
+import sys
 import time
 
 from driver_mmio_peer import MMIOPeer
@@ -83,6 +84,12 @@ class RunnerPeer(MMIOPeer):
             (directory/'worker.json').write_text(json.dumps(dict(path=str(worker),pid=self.proc.pid,
                 sha256=hashlib.sha256(worker.read_bytes()).hexdigest(),bootstrap=bootstrap),indent=2)+'\n')
             shutil.copytree(source,directory/'DVMProxy.bundle')
+            if job.get('uikit_reference'):
+                reference=job['uikit_reference']
+                for name,key in (('gpu.bgra','gpu_sha256'),('manifest.json','manifest_sha256'),('result.log','log_sha256')):
+                    data=(Path(reference['directory'])/name).read_bytes()
+                    if hashlib.sha256(data).hexdigest()!=reference[key]:raise ValueError('native reference changed after queueing')
+                    (directory/('reference-'+name)).write_bytes(data)
             (directory/'job.json').write_text(json.dumps(job,indent=2)+'\n')
             path.rename(directory/'queued.json')
             self.current = dict(job=job, payload=payload, out=directory,
@@ -140,17 +147,19 @@ class RunnerPeer(MMIOPeer):
                         expected=c['job'].get('expected','observe'),shared_surface=c['job'].get('shared_surface',False),verified=False,loading_evidence=loading)
             if result['spawn']==0 and result['exit']==0 and result['signal']==0:
                 try:
-                    from consumer_verify import verify_records
-                    if c['job'].get('shared_surface'):
-                        from shared_consumer_verify import verify_records as verify_shared
-                    child=[x['line'] for x in audits]
-                    end=child.index('GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0')
-                    result['consumer']=verify_shared(directory,child[:end+1],records,c['job']['frames'],c['job'].get('hz',0),c['job'].get('scene',0)) if c['job'].get('shared_surface') else verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
-                    if c['job'].get('surface_handoff'):
-                        from shared_consumer_verify import verify_handoff
-                        result['handoff']=verify_handoff(directory,child,c['job']['job'],result['pid'])
+                    # Each job gets a fresh, bounded verifier process. This
+                    # avoids stale imported coverage after host-only revisions.
+                    # Raw results remain unverified until all checks pass.
+                    (directory/'result.json').write_text(json.dumps(result,indent=2)+'\n')
+                    checked=subprocess.run([sys.executable,str(Path(__file__).with_name('verify_runner_job.py')),str(directory)],
+                                           capture_output=True,text=True,timeout=30)
+                    if checked.returncode:raise ValueError('job verifier: '+checked.stderr[-3000:])
+                    evidence=json.loads(checked.stdout)
+                    if evidence.get('consumer',{}).get('verified') is not True:raise ValueError('job verifier did not accept consumer')
+                    result['consumer']=evidence['consumer']
+                    if c['job'].get('surface_handoff'):result['handoff']=evidence['handoff']
                     result['verified']=True
-                except (ValueError,KeyError,IndexError,TypeError,OSError) as error:
+                except (ValueError,KeyError,IndexError,TypeError,OSError,subprocess.TimeoutExpired) as error:
                     # Keep the guest exit and raw evidence even if host acceptance
                     # rejects it. A failed shared job still forbids pool reuse;
                     # an offscreen diagnostic can be followed by a fresh process.

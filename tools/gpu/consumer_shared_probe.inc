@@ -1,6 +1,6 @@
 // Exact-guest CARenderer -> owned IOSurface -> native IOMFB. Frame marker
 // pixels are ordinary CALayers, never CPU paint or a driver scene special case.
-#import <IOSurface/IOSurface.h>
+#import <IOSurface/IOSurfaceRef.h>
 #import <CommonCrypto/CommonDigest.h>
 #include <time.h>
 #include <mach/mach.h>
@@ -14,6 +14,10 @@ static void sharedColor(CALayer *layer,CGColorSpaceRef space,uint32_t bgra){
     CGFloat values[]={((bgra>>16)&255)/255.,((bgra>>8)&255)/255.,(bgra&255)/255.,((bgra>>24)&255)/255.};
     CGColorRef color=CGColorCreate(space,values);layer.backgroundColor=color;CGColorRelease(color);
 }
+#ifdef DVM_CA_UIKIT
+#include "consumer_uikit_support.inc"
+#include "consumer_uikit_display_scene.inc"
+#else
 #include "consumer_shared_scene.inc"
 static unsigned sharedPixels(IOSurfaceRef surface,unsigned frame){
     uint32_t marker[]={0xff44564d,0xff505253,0xff424c52,0xff000000|frame};
@@ -37,6 +41,7 @@ static unsigned sharedPixels(IOSurfaceRef surface,unsigned frame){
     }
     return bad;
 }
+#endif
 static void sharedMemory(id<MTLDevice> device,unsigned frame){
     task_vm_info_data_t info={0};mach_msg_type_number_t count=TASK_VM_INFO_COUNT;
     kern_return_t kr=task_info(mach_task_self(),TASK_VM_INFO,(task_info_t)&info,&count);
@@ -66,11 +71,22 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         if(!texture||texture.iosurface!=surface)fail("shared-texture-import");
         CFRelease(surface);surface=texture.iosurface;
         CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-        stage="renderer";renderer=[CARenderer rendererWithMTLTexture:texture options:@{kCARendererMetalCommandQueue:[device newCommandQueue],kCARendererColorSpace:(__bridge id)space}];
+        #ifdef DVM_CA_UIKIT
+        NSDictionary *rendererOptions=@{kCARendererMetalCommandQueue:[device newCommandQueue],kCARendererColorSpace:(__bridge id)space,@"kCARendererFlags":@2};
+#else
+        NSDictionary *rendererOptions=@{kCARendererMetalCommandQueue:[device newCommandQueue],kCARendererColorSpace:(__bridge id)space};
+#endif
+        stage="renderer";renderer=[CARenderer rendererWithMTLTexture:texture options:rendererOptions];
         if(!renderer)fail("shared-renderer");
         [CATransaction begin];[CATransaction setDisableActions:YES];
+        #ifdef DVM_CA_UIKIT
+        UIView *view=DVMUIKitScene(space,320,480);[view layoutIfNeeded];UIKitDisplay(view.layer);
+        UIKitInspect(view.layer,"after-display",0);
+        CALayer *root=DVMUIKitDisplayScene(view,space);
+#else
         CALayer *root=[CALayer layer];root.frame=CGRectMake(0,0,DVM_PRESENT_WIDTH,DVM_PRESENT_HEIGHT);
         CALayer *moving=sharedSceneCreate(root,space);
+#endif
         NSMutableArray *markers=[NSMutableArray array];
         for(unsigned i=0;i<4;i++){CALayer *m=[CALayer layer];m.frame=CGRectMake(i,0,1,1);[root addSublayer:m];[markers addObject:m];}
         renderer.layer=root;renderer.bounds=root.frame;[CATransaction commit];
@@ -98,7 +114,11 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
             double t0=sharedNow();stage="acquire";if(IOSurfaceLock(surface,0,NULL))fail("shared-lock");DVMSharedTextureAcquire(texture,frame);
             double acquired=sharedNow();
             stage="layer-update";[CATransaction begin];[CATransaction setDisableActions:YES];
+#ifndef DVM_CA_UIKIT
             sharedSceneUpdate(root,moving,space,frame);
+#elif defined(DVM_CA_UIKIT_ANIMATE)
+            DVMUIKitDisplayUpdate(view,frame);
+#endif
             uint32_t words[]={0xff44564d,0xff505253,0xff424c52,0xff000000|frame};
             for(unsigned i=0;i<4;i++)sharedColor(markers[i],space,words[i]);[CATransaction commit];
             double updated=sharedNow();
@@ -118,12 +138,24 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
             if(frame==2||frame%128==0||frame==DVM_CA_FRAMES)sharedMemory(device,frame);
         }}
         stage="final-pixels";if(IOSurfaceLock(surface,kIOSurfaceLockReadOnly,NULL))fail("shared-final-lock");
+        #ifdef DVM_CA_UIKIT
+        // Full-frame acceptance belongs to the independently produced native
+        // reference. Hash and ownership alone are not pixel correctness.
+        uint8_t digest[32];char sha[65];
+#else
         unsigned bad=sharedPixels(surface,DVM_CA_FRAMES);uint8_t digest[32];char sha[65];
+#endif
         CC_SHA256(IOSurfaceGetBaseAddress(surface),DVM_PRESENT_BYTES,digest);for(unsigned i=0;i<32;i++)snprintf(sha+2*i,3,"%02x",digest[i]);
         if(IOSurfaceUnlock(surface,kIOSurfaceLockReadOnly,NULL))fail("shared-final-unlock");
+        #ifdef DVM_CA_UIKIT
+        fprintf(stderr,"GPU_LOAD_CA_SHARED_FINAL frames=%u reference=external-native status=pending sha=%s verification_reads_in_batch=0\n",DVM_CA_FRAMES,sha);
+#else
         fprintf(stderr,"GPU_LOAD_CA_SHARED_FINAL frames=%u bad_pixels=%u sha=%s verification_reads_in_batch=0\n",DVM_CA_FRAMES,bad,sha);
+        #endif
         if(power(fb,0))fail("shared-display-power-reset");
         fprintf(stderr,"GPU_LOAD_CA_SHARED_POWER_RESET rc=0\n");CGColorSpaceRelease(space);
+        #ifndef DVM_CA_UIKIT
         if(bad)fail("shared-pixels");
+#endif
     } @catch(NSException *e){fprintf(stderr,"GPU_LOAD_ERROR shared_stage=%s exception=%s reason=%.300s\n",stage,e.name.UTF8String,e.reason.UTF8String);exit(1);}
 }

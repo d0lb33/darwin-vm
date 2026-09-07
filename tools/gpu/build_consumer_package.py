@@ -16,15 +16,19 @@ p.add_argument('--shared-surface',action='store_true',help='owned IOSurface CARe
 p.add_argument('--regions',action='store_true',help='append a public region-transfer probe after the single red CALayer control')
 p.add_argument('--renderer-flags',type=lambda s:int(s,0),choices=(0,2),default=0,help='bounded exact-guest CARenderer coordinate-contract experiment')
 p.add_argument('--orientation',action='store_true',help='asymmetric plain CALayer image CPU/GPU control')
-p.add_argument('--uikit',action='store_true',help='actual guest UIKit view tree and independent CPU reference; offscreen diagnostic')
+p.add_argument('--uikit',action='store_true',help='actual UIKit view tree; offscreen or owned shared display target')
 p.add_argument('--uikit-external-reference',action='store_true',help='retire after UIKit capture; pixel acceptance requires independent native-reference analysis')
+p.add_argument('--uikit-animate',action='store_true',help='alternate UIKit card geometry and transparency in a displayed batch')
 p.add_argument('--uikit-trace',action='store_true',help='observe original backing-store conversion in the isolated UIKit process')
 a=p.parse_args()
 if a.renderer_flags and not (a.orientation or a.uikit):p.error('renderer flags require an orientation or UIKit diagnostic')
 if a.orientation and (a.uikit or a.frames!=1 or a.shared_surface or a.regions or a.scene):p.error('orientation requires --frames 1, offscreen, no other scene mode')
-if a.uikit_trace and not a.uikit:p.error('UIKit tracing requires --uikit')
+if a.uikit_animate and not (a.uikit and a.shared_surface):p.error('UIKit animation requires displayed UIKit')
+if a.uikit_trace and (not a.uikit or a.shared_surface):p.error('UIKit tracing requires the offscreen UIKit probe')
+if a.uikit and a.shared_surface and a.renderer_flags!=2:p.error('displayed UIKit uses the verified renderer coordinate flags 2')
 if a.uikit_external_reference and not a.uikit:p.error('external UIKit reference requires --uikit')
-if a.uikit and (a.frames!=1 or a.shared_surface or a.regions or a.scene):p.error('UIKit requires --frames 1, offscreen, no other scene mode')
+if a.uikit and (a.regions or a.scene or (not a.shared_surface and a.frames!=1)):p.error('UIKit requires one offscreen frame or a shared batch, no other scene mode')
+if a.uikit and a.shared_surface and not a.uikit_external_reference:p.error('displayed UIKit requires external native pixel verification')
 if a.regions and (a.frames!=1 or a.shared_surface):p.error('region probe requires --frames 1 without --shared-surface')
 if a.frames!=1 and not 3<=a.frames<=4096:p.error('frames must be 1 or 3..4096')
 if a.hz and a.frames==1:p.error('pacing requires a sequence')
@@ -36,7 +40,7 @@ sdk=subprocess.check_output(['xcrun','--sdk','iphoneos' if a.uikit else 'macosx'
 flags=['-target','arm64-apple-ios27.0','-isysroot',sdk,'-Wno-incompatible-sysroot',
        '-fobjc-arc','-fobjc-arc-exceptions','-O1','-Wall','-Wextra','-Werror',
        '-Wno-deprecated-declarations','-fno-objc-msgsend-selector-stubs']
-uikit_headers=(['-DDVM_ORIENTATION_GUEST'] if a.orientation else [])+(['-DDVM_CA_UIKIT'] if a.uikit else [])+(['-DDVM_CA_UIKIT_TRACE'] if a.uikit_trace else [])+(['-DDVM_CA_UIKIT_EXTERNAL_REFERENCE'] if a.uikit_external_reference else [])
+uikit_headers=(['-DDVM_ORIENTATION_GUEST'] if a.orientation else [])+(['-DDVM_CA_UIKIT'] if a.uikit else [])+(['-DDVM_CA_UIKIT_ANIMATE'] if a.uikit_animate else [])+(['-DDVM_CA_UIKIT_TRACE'] if a.uikit_trace else [])+(['-DDVM_CA_UIKIT_EXTERNAL_REFERENCE'] if a.uikit_external_reference else [])
 subprocess.run(['xcrun','clang',*flags,*uikit_headers,f'-DDVM_CA_RENDERER_FLAGS={a.renderer_flags}',*(['-DDVM_CA_SHARED'] if a.shared_surface else []),*(['-DDVM_CA_REGIONS'] if a.regions else []),f'-DDVM_CA_FRAMES={a.frames}',f'-DDVM_CA_HZ={a.hz}',f'-DDVM_CA_SCENE={a.scene}','-c',str(src/'consumer_package.m'),'-o',str(a.out/'consumer_package.o')],check=True)
 symbols=subprocess.check_output(['nm','-u',str(a.out/'consumer_package.o')],text=True).split()
 stub=a.out/'stubs/usr/lib/libobjc.tbd';text=stub.read_text()
@@ -80,12 +84,12 @@ revision['consumer_package_relinked']=True
 imports=a.out/'consumer-package.nm-u';imports.write_bytes(subprocess.check_output(['nm','-u',str(binary)]))
 (a.out/'DVMProxy.nm-u').write_bytes(imports.read_bytes())
 subprocess.run(['python3',str(src/'verify_guest_imports.py'),'--output',str(a.out/'consumer-package-imports.tsv'),str(imports)],check=True)
-record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,uikit=a.uikit,uikit_trace=a.uikit_trace,uikit_external_reference=a.uikit_external_reference,orientation=a.orientation,renderer_flags=a.renderer_flags,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,uikit=a.uikit,uikit_animate=a.uikit_animate,uikit_trace=a.uikit_trace,uikit_external_reference=a.uikit_external_reference,orientation=a.orientation,renderer_flags=a.renderer_flags,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
             helper_sha256=hashlib.sha256((a.out/'dvm-gpu-load').read_bytes()).hexdigest(),
             scope='test export compiled; guest execution untested')
 if record['helper_sha256']!=hashlib.sha256((a.base/'dvm-gpu-load').read_bytes()).hexdigest():
     raise ValueError('package unexpectedly changed the pinned helper')
-for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc','consumer_uikit_scene.inc','test_layer_orientation.m'):
+for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc','consumer_uikit_support.inc','consumer_uikit_display_scene.inc','consumer_uikit_scene.inc','test_layer_orientation.m'):
     (a.out/name).write_bytes((src/name).read_bytes())
 (a.out/'consumer-package.json').write_text(json.dumps(record,indent=2)+'\n')
 print(json.dumps(record))

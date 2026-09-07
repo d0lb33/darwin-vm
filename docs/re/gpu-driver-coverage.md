@@ -27,11 +27,11 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Command encoding | Direct indexed/nonindexed draws, 31 buffer slots, 16 fragment textures/samplers; bounded FIFO of 32 command buffers on one execution queue | Exact changing scenes and 64×64 group opacity with private intermediate targets; host queued GPU dependency and cancellation tests | Multiple execution queues, indirect commands, fragment buffer writes and general barriers remain unsupported |
 | Compute | Existing luma/blur and bounded compute submission | Exact compute/copy controls and managed blur | Pipeline allowlist remains a development restriction; replace with general validated reflection before claiming broad compute |
 | Resources | Dirty buffer spans, partial 2D/3D transfers, 6 texture formats (A8 sampled only), read-only linear views, private GPU textures and opaque guest process metadata | Exact 2D transfer/control and private intermediate allocation; host GPU dependency, linear/3D transfers, private CPU-access rejection | General IOSurface import/planes, heaps, memoryless storage, private blit transfers; texture axes 4096, private images 16 MiB, copied images 1 MiB |
-| Presentation | Owned shared-page IOSurface render target with native retirement and fresh-process handoff | Exact displayed alpha, clip/transform and image CARenderer batches; actual DCP bytes, display/input recovery | Exact 1,024-frame screen group-opacity path now passes; general surface registration and system-compositor adoption unknown |
+| Presentation | Owned shared-page IOSurface render target with native retirement and fresh-process handoff | Actual UIKit at 1179×2556: first DCP byte comparison and 1,024 changing frames with final pixels, per-frame native completion, retirement and software lock-screen recovery | General surface registration, UIKit window interaction and system-compositor adoption unknown |
 | Synchronization | Serial RPC, bounded FIFO, completion callbacks, strong resource retention; failed shared jobs prohibit reuse | Exact consumer completion and native retirement; host predecessor GPU-write visibility and dependent failure cancellation | Multiple execution queues, events/fences, reset; timestamp clock translation |
 | Checkpoint | Active GPU migration blocked | Copied-pixel historical checkpoints only | Live host resources and executing commands cannot be checkpointed |
 | Iteration | Fresh-process supervisor, signed package staging, incremental build and captured-submission replay tools; opt-in test-kernel RX mapping exception | Exact guest installed controls; boot-trusted driver staged on Data executes actual CARenderer with verified pixels; 27-request host replay | Two code-distinct runtime revisions now pass real guest CARenderer in one uninstrumented boot using native OOP-JIT signatures plus opt-in xART fixture; global loading and checkpoints remain outside scope |
-| Performance | Separate setup, frame work, native presentation and pacing measurements | 1,024 displayed image frames average 60.028 fps, p95 work 12.475 ms; 44 absolute misses and maximum native gap 91.922 ms | Smooth native Liquid Glass/scrolling remains unproven; average throughput is not smooth pacing |
+| Performance | Separate setup, frame work, native presentation and pacing measurements | 1,024 changing displayed UIKit frames average 59.998 fps, p95 work 16.781 ms; 218 absolute misses, maximum native gap 34.177 ms; no live GPU resource growth | Smooth native Liquid Glass/scrolling remains unproven; average throughput is not smooth pacing |
 
 ## Current bounded experiments
 
@@ -68,9 +68,13 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
    V11 framebuffer reads remove the reproduced Catalyst fallback corruption;
    native/forwarded changing host frames now match exactly. Plain backend
    replay matches all 206 requests; shader-validation replay stops at six
-   one-byte differences and remains a strict failure. Next: this UIKit scene
-   on the owned shared display surface, then sustained changing frames.
-   Displayed UIKit, system adoption and Liquid Glass remain untested. See
+   one-byte differences and remains a strict failure. The same UIKit scene now
+   passes actual display byte comparison and 1,024 changing frames with final
+   pixels/ownership/native completion. A native Power wake restores the visible
+   software lock screen; the initial idle recovery timeout stays recorded.
+   Next: visual-effect/backdrop composition and related interfaces. System
+   adoption, native window interaction and Liquid Glass remain untested. See
+   [displayed UIKit and pacing](gpu-uikit-display-ios27.md),
    [framebuffer and UIKit acceptance](gpu-framebuffer-feedback-ios27.md) and
    [earlier UIKit evidence](gpu-uikit-ios27.md).
 

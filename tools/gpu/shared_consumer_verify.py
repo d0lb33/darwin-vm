@@ -77,12 +77,18 @@ def verify_records(directory, lines, records, count, hz=0, scene=None):
     if stats['op']!='stats' or stats['reply']['live']['objects'] or stats['reply']['live']['resourceBytes']:
         raise ValueError('shared resource retirement')
     final=[fields(x) for x in lines if x.startswith('GPU_LOAD_CA_SHARED_FINAL ')]
-    if len(final)!=1 or final[0]['frames']!=str(count) or final[0]['bad_pixels']!='0' or final[0]['verification_reads_in_batch']!='0':
+    external=json.loads((directory/'job.json').read_text()).get('uikit_reference') if (directory/'job.json').exists() else None
+    if len(final)!=1 or final[0]['frames']!=str(count) or (not external and final[0].get('bad_pixels')!='0') or final[0]['verification_reads_in_batch']!='0':
         raise ValueError('shared final pixel witness')
     pixels=(directory/'managed-final.bgra').read_bytes()
     if len(pixels)!=759*16384 or hashlib.sha256(pixels[:BYTES]).hexdigest()!=final[0]['sha']:
         raise ValueError('shared backing/guest hash mismatch')
-    verify_pixels(pixels,count,scene)
+    pixel_reference=None
+    if external:
+        if final[0].get('reference')!='external-native' or final[0].get('status')!='pending':raise ValueError('missing external reference marker')
+        from verify_uikit_display import verify_reference
+        pixel_reference=verify_reference(directory,lines,records,count,pixels)
+    else:verify_pixels(pixels,count,scene)
     log=(directory/'display.log').read_text(errors='replace')
     witnesses=re.findall(r'iomfb: gpu-present frame=(\d+) swap=(\d+) dva=(0x[0-9a-f]+) monotonic_ns=(\d+)',log)
     if [(int(w[0]),int(w[1])) for w in witnesses]!=[(int(f['frame']),int(f['swap'])) for f in frames]:
@@ -93,6 +99,7 @@ def verify_records(directory, lines, records, count, hz=0, scene=None):
     result=dict(scope='exact-guest-CARenderer-owned-IOSurface-native-scanout-events',verified=True,frames=count,scene=scene,
                 bytes=BYTES,sha256=final[0]['sha'],setup_us=float(setup[0]['us']),timings=frames,final_scanout_export_checked=False,
                 caveat='compare final stopped-VM scanout export separately; display/input recovery is a separate check')
+    if pixel_reference:result['pixel_reference']=pixel_reference
     if measured:
         result['pacing']=verify_pacing(frames,hz,[int(w[3])/1000 for w in witnesses])
         if setup[0].get('profile')=='1':

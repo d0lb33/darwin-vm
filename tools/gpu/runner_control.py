@@ -21,6 +21,7 @@ def main():
     p.add_argument('--frames',type=int,default=1,help='required frame count for package-scene verification')
     p.add_argument('--scene',type=int,choices=range(5),default=0,help='0 moving, 1 alpha, 2 clip/transform, 3 image, 4 group opacity')
     p.add_argument('--shared-surface',action='store_true',help='require shared CARenderer/surface/native scanout evidence')
+    p.add_argument('--uikit-reference',type=Path,help='native full-screen reference directory; explicit UIKit pixel acceptance')
     p.add_argument('--surface-handoff',action='store_true',help='also require supervisor/child Mach-port alias witnesses')
     p.add_argument('--hz',type=int,choices=(0,30,60),default=0,help='required shared-surface pacing rate; 0 means unpaced')
     p.add_argument('--mode',choices=('data','installed','system'),default='data',help='staging location; system mode remounts only the disposable guest root writable')
@@ -48,6 +49,11 @@ def main():
     job=int(time.time_ns()//1000)
     result=dict(job=job,bundle=str(bundle),sha256=digest,signature=signature,expected=a.expected,test=a.test,frames=a.frames,scene=a.scene,shared_surface=a.shared_surface,surface_handoff=a.surface_handoff,hz=a.hz,mode=a.mode,development=a.development,
                 queued_monotonic=time.monotonic(),scope='host signature validation; guest loading is untested until job completes')
+    if a.uikit_reference:
+        if not a.shared_surface or a.scene:p.error('UIKit reference requires shared surface, no numbered CALayer scene')
+        folder=a.uikit_reference.resolve();meta=json.loads((folder/'manifest.json').read_text())
+        if meta.get('display_frame')!=a.frames or meta.get('forwarded') or meta.get('exit')!=0:p.error('native reference frame/mode mismatch')
+        result['uikit_reference']=dict(directory=str(folder),**{key:hashlib.sha256((folder/name).read_bytes()).hexdigest() for name,key in (('gpu.bgra','gpu_sha256'),('manifest.json','manifest_sha256'),('result.log','log_sha256'))})
     if a.worker:result['worker']=str(a.worker.resolve())
     temp=inbox/f'{job:020d}.tmp';temp.write_text(json.dumps(result,indent=2)+'\n')
     os.rename(temp,inbox/f'{job:020d}.json');print(json.dumps(dict(job=job,sha256=digest)))

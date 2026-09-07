@@ -11,10 +11,10 @@
 #endif
 #if defined(DVM_ORIENTATION_GUEST)
 #include "test_layer_orientation.m"
-#elif defined(DVM_CA_UIKIT)
-#include "consumer_uikit_probe.inc"
 #elif defined(DVM_CA_SHARED)
 #include "consumer_shared_probe.inc"
+#elif defined(DVM_CA_UIKIT)
+#include "consumer_uikit_probe.inc"
 #elif DVM_CA_FRAMES > 1
 #include "consumer_sequence_probe.inc"
 #else

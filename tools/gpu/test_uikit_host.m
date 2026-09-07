@@ -6,6 +6,7 @@
 #import <QuartzCore/CATransaction.h>
 #include "consumer_uikit_scene.inc"
 #include "consumer_uikit_raster_scene.inc"
+#include "consumer_uikit_display_scene.inc"
 #include <stdio.h>
 #include <unistd.h>
 #import <objc/runtime.h>
@@ -118,17 +119,30 @@ int main(int argc,const char **argv){@autoreleasepool{
         [view layoutIfNeeded];display(view.layer);
     }
     [CATransaction commit];[CATransaction flush];
-    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:320 height:480 mipmapped:NO];
+    BOOL displayed=getenv("DVM_UIKIT_DISPLAY_FRAME")!=NULL;
+    unsigned width=displayed?1179:320,height=displayed?2556:480;
+    CALayer *root=displayed?DVMUIKitDisplayScene(view,space):view.layer;
+    if(getenv("DVM_UIKIT_DISPLAY_ANIMATE"))DVMUIKitDisplayUpdate(view,(unsigned)atoi(getenv("DVM_UIKIT_DISPLAY_FRAME")));
+    if(displayed){
+        unsigned frame=(unsigned)atoi(getenv("DVM_UIKIT_DISPLAY_FRAME"));
+        uint32_t words[]={0xff44564d,0xff505253,0xff424c52,0xff000000|frame};
+        for(unsigned i=0;i<4;i++){
+            CALayer *marker=[CALayer layer];marker.frame=CGRectMake(i,0,1,1);
+            CGFloat c[]={((words[i]>>16)&255)/255.,((words[i]>>8)&255)/255.,(words[i]&255)/255.,1};
+            CGColorRef color=CGColorCreate(space,c);marker.backgroundColor=color;CGColorRelease(color);[root addSublayer:marker];
+        }
+    }
+    MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
     d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
     id<MTLTexture> target=[device newTextureWithDescriptor:d];require(target!=nil,"target");
     CARenderer *renderer=[CARenderer rendererWithMTLTexture:target options:@{kCARendererMetalCommandQueue:queue,kCARendererColorSpace:(__bridge id)space,@"kCARendererFlags":@2}];
     require(renderer!=nil,"renderer");
-    [CATransaction begin];[CATransaction setDisableActions:YES];renderer.layer=view.layer;renderer.bounds=view.bounds;
+    [CATransaction begin];[CATransaction setDisableActions:YES];renderer.layer=root;renderer.bounds=root.bounds;
     [CATransaction commit];[CATransaction flush];
     fprintf(stderr,"UIKIT_HOST_CONTENTS flipped=%u\n",view.layer.contentsAreFlipped);
     unsigned frames=getenv("DVM_UIKIT_HOST_FRAMES")?(unsigned)atoi(getenv("DVM_UIKIT_HOST_FRAMES")):1;
     require(frames==1||frames==3,"frame bound");
-    NSMutableData *gpu=[NSMutableData dataWithLength:320*480*4],*cpu=[gpu mutableCopy];
+    NSMutableData *gpu=[NSMutableData dataWithLength:width*height*4],*cpu=[gpu mutableCopy];
     NSString *out=@(argv[1]);
     CFTimeInterval frameTime=CACurrentMediaTime();
     for(unsigned frame=0;frame<frames;frame++){
@@ -138,19 +152,19 @@ int main(int argc,const char **argv){@autoreleasepool{
         card.alpha=frame%2?.7:1;
     }
     [CATransaction commit];[CATransaction flush];
-    [renderer beginFrameAtTime:frameTime+frame/60.0 timeStamp:NULL];[renderer addUpdateRect:view.bounds];[renderer render];[renderer endFrame];
+    [renderer beginFrameAtTime:frameTime+frame/60.0 timeStamp:NULL];[renderer addUpdateRect:root.bounds];[renderer render];[renderer endFrame];
     id<MTLCommandBuffer> fence=[queue commandBuffer];[fence commit];[fence waitUntilCompleted];
     require(fence.status==MTLCommandBufferStatusCompleted,"completion");
-    [target getBytes:gpu.mutableBytes bytesPerRow:1280 fromRegion:MTLRegionMake2D(0,0,320,480) mipmapLevel:0];
+    [target getBytes:gpu.mutableBytes bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
     require([gpu writeToFile:[out stringByAppendingPathComponent:[NSString stringWithFormat:@"gpu-frame-%u.bgra",frame]] atomically:YES],"frame output");
     fprintf(stderr,"UIKIT_HOST_FRAME index=%u completed=1 model_opacity=%.3f time_offset=%.9f\n",frame,view.layer.opacity,frame/60.0);
     }
-    CGContextRef context=CGBitmapContextCreate(cpu.mutableBytes,320,480,8,1280,space,kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little);
-    CGContextTranslateCTM(context,0,480);CGContextScaleCTM(context,1,-1);[view.layer renderInContext:context];
+    CGContextRef context=CGBitmapContextCreate(cpu.mutableBytes,width,height,8,width*4,space,kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little);
+    CGContextTranslateCTM(context,0,height);CGContextScaleCTM(context,1,-1);[root renderInContext:context];
     require([gpu writeToFile:[out stringByAppendingPathComponent:@"gpu.bgra"] atomically:YES],"GPU output");
     require([cpu writeToFile:[out stringByAppendingPathComponent:@"cpu.bgra"] atomically:YES],"CPU output");
     unsigned different=0,maxError=0;uint64_t totalError=0;const uint8_t *a=gpu.bytes,*b=cpu.bytes;
-    for(unsigned i=0;i<320*480*4;i++){unsigned delta=abs((int)a[i]-(int)b[i]);different+=delta>2;maxError=MAX(maxError,delta);totalError+=delta;}
+    for(unsigned i=0;i<width*height*4;i++){unsigned delta=abs((int)a[i]-(int)b[i]);different+=delta>2;maxError=MAX(maxError,delta);totalError+=delta;}
     fprintf(stderr,"UIKIT_HOST_COMPARE different=%u max=%u total=%llu scope=host-catalyst-only\n",different,maxError,(unsigned long long)totalError);
     if(getenv("DVM_UIKIT_NATIVE_AIR"))require(nativeLibraryCalls>0,"native AIR control was exercised");
     renderer.layer=nil;renderer=nil;CGContextRelease(context);CGColorSpaceRelease(space);

@@ -18,6 +18,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('out',type=Path)
     p.add_argument('--frames',type=int,choices=(1,3),default=1)
+    p.add_argument('--display-animate',action='store_true',help='native reference for alternating card geometry/transparency')
+    p.add_argument('--display-frame',type=int,help='native 1179x2556 display-layout reference with this final frame marker')
     p.add_argument('--animate',action='store_true',help='move the card and change its opacity on the middle frame')
     p.add_argument('--guest-rasters',type=Path,help='native composition using captured guest A8 glyph inputs; still host evidence')
     p.add_argument('--diagnostic-unsplit',action='store_true')
@@ -32,6 +34,8 @@ def main():
     if a.native_contract and a.forwarded_library:p.error('native contract requires a native control')
     if a.native_query and not a.native_contract:p.error('native query requires native contract')
     if a.native_pipeline_delay_us and a.forwarded_library:p.error('native pipeline delay requires native control')
+    if a.display_animate and a.display_frame is None:p.error('display animation requires display frame')
+    if a.display_frame is not None and (not 3<=a.display_frame<=1024 or a.frames!=1 or a.forwarded_library or a.animate):p.error('display reference requires native single image, frame 3..1024')
     if a.animate and a.frames!=3:p.error('animated control requires three frames')
     a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
     src=Path(__file__).resolve().parent
@@ -44,6 +48,10 @@ def main():
     for k in ('DVM_DRIVER_LIBRARY','DVM_REHEARSAL_AIR','DVM_UIKIT_DIAGNOSTIC_UNSPLIT','DVM_UIKIT_NATIVE_AIR','DVM_UIKIT_NATIVE_CONTRACT','DVM_UIKIT_NATIVE_QUERIES','DVM_UIKIT_NATIVE_PIPELINE_DELAY_US'):env.pop(k,None)
     env['DVM_UIKIT_HOST_FRAMES']=str(a.frames)
     env.pop('DVM_UIKIT_HOST_ANIMATE',None)
+    env.pop('DVM_UIKIT_DISPLAY_FRAME',None)
+    env.pop('DVM_UIKIT_DISPLAY_ANIMATE',None)
+    if a.display_animate:env['DVM_UIKIT_DISPLAY_ANIMATE']='1'
+    if a.display_frame is not None:env['DVM_UIKIT_DISPLAY_FRAME']=str(a.display_frame)
     env.pop('DVM_UIKIT_GUEST_RASTERS',None)
     if a.animate:env['DVM_UIKIT_HOST_ANIMATE']='1'
     if a.diagnostic_unsplit:env['DVM_UIKIT_DIAGNOSTIC_UNSPLIT']='1'
@@ -56,6 +64,10 @@ def main():
     metadata=dict(frames=a.frames,diagnostic_unsplit=a.diagnostic_unsplit,scope='host-catalyst-rehearsal-not-exact-guest',forwarded=bool(a.forwarded_library))
     metadata['frame_time_step_seconds']=1/60
     metadata['animate']=a.animate
+    metadata['display_frame']=a.display_frame
+    metadata['display_animate']=a.display_animate
+    metadata['width']=1179 if a.display_frame is not None else 320
+    metadata['height']=2556 if a.display_frame is not None else 480
     if a.guest_rasters:
         folder=a.guest_rasters.resolve();inputs=json.loads((folder/'inputs.json').read_text())
         if inputs.get('scope')!='exact-guest-generated-glyph-inputs-not-rendered-output' or len(inputs.get('labels',[]))!=3:raise ValueError('guest raster provenance')
@@ -111,7 +123,7 @@ def main():
         metadata['exit']=r.returncode
         r.check_returncode()
         for name in ('gpu','cpu'):
-            data=(a.out/(name+'.bgra')).read_bytes();write_png(a.out/(name+'.png'),data)
+            data=(a.out/(name+'.bgra')).read_bytes();write_png(a.out/(name+'.png'),data,metadata['width'],metadata['height'])
             metadata[name+'_sha256']=hashlib.sha256(data).hexdigest()
     finally:
         metadata['execution_seconds']=time.monotonic()-started

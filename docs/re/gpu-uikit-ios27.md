@@ -374,4 +374,6 @@ native composition of its own glyph inputs within one byte per channel and
 retires its resources. Its original CPU comparison remains failed, and the
 earlier failed guest processes remain failed. This is offscreen UIKit, not
 displayed UIKit or system-wide acceleration. The next acceptance target is
-the actual UIKit consumer on the existing owned display surface.
+the actual UIKit consumer on the existing owned display surface. That milestone
+subsequently passes: see [displayed UIKit and 1,024-frame pacing](gpu-uikit-display-ios27.md),
+including the actual DCP capture and separate software lock-screen recovery.
