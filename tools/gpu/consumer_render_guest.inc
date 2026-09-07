@@ -124,6 +124,7 @@ static id<MTLRenderCommandEncoder> DVMNewRenderEncoder(DVMCommand *command,MTLRe
     if(![(id)a.texture isKindOfClass:DVMTexture.class]||a.texture.device!=command.device||a.texture.textureType!=MTLTextureType2D||a.level>=a.texture.mipmapLevelCount||a.slice||a.depthPlane||a.resolveTexture||d.depthAttachment.texture||d.stencilAttachment.texture)
         reject(@"render pass outside single owned color target contract");
     for(unsigned i=1;i<8;i++)if(d.colorAttachments[i].texture)reject(@"multiple color attachments");
+    if(command.commands.count>=DVM_ORDERED_COMMANDS)reject(@"ordered command count exceeds transport contract");
     [command.resources addObject:a.texture];
     NSMutableArray *ops=[NSMutableArray array];
     [command.commands addObject:@{@"kind":@"render",@"target":[(DVMTexture *)a.texture handle],@"level":@(a.level),@"load":@(a.loadAction),@"store":@(a.storeAction),@"clear":@[@(a.clearColor.red),@(a.clearColor.green),@(a.clearColor.blue),@(a.clearColor.alpha)],@"operations":ops}];

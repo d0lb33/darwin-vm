@@ -59,8 +59,8 @@
 - (void)endEncoding {if(self.ended)reject(@"duplicate blit end");self.ended=YES;self.command.openEncoders--;}
 @end
 static id<MTLBlitCommandEncoder> DVMNewBlitEncoder(DVMCommand *command) {
-    [command encoding];if(command.openEncoders||command.commands.count>=32)reject(@"blit command state/budget");
-    for(NSDictionary *pass in command.commands)if(!pass[@"kind"])reject(@"compute/blit mixing unsupported");
+    [command encoding];if(command.openEncoders||command.commands.count>=DVM_ORDERED_COMMANDS)reject(@"blit command state/budget");
+    for(NSDictionary *pass in command.commands)if(!pass[@"kind"])reject(@"legacy compute/blit packet mixing unsupported");
     DVMBlitEncoder *encoder=[DVMBlitEncoder new];encoder.command=command;encoder.operations=[NSMutableArray array];
     [command.commands addObject:@{@"kind":@"blit",@"operations":encoder.operations}];command.openEncoders++;
     return encoder;

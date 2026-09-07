@@ -16,7 +16,7 @@ int main(void){@autoreleasepool{
         "vertex float4 v(uint i[[vertex_id]]){float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return float4(p[i],0,1);}\n"
         "fragment float4 paint(float4 p[[position]],constant uint2 &op[[buffer(0)]]){uint n=op.x;uint2 q=uint2(p.xy);"
         "float3 rgb=float3((q.x+n)%251u,(q.y+3*n)%251u,(q.x+q.y+7*n)%251u);return float4(op.y?(rgb-128.0f)/16.0f:rgb/255.0f,1);}\n"
-        "fragment float4 copyPixel(float4 p[[position]],texture2d<float,access::read> t[[texture(0)]],constant uint2 &opts[[buffer(0)]]){uint lod=opts.y;uint2 extent=uint2(t.get_width(lod),t.get_height(lod));float4 c=t.read(uint2(p.xy)%extent,lod);if(opts.x)c.rgb=(c.rgb*16.0f+128.0f)/255.0f;return c;}";
+        "fragment float4 copyPixel(float4 p[[position]],texture2d<float,access::read> t[[texture(0)]],constant uint4 &opts[[buffer(0)]]){uint lod=opts.y;uint2 extent=uint2(t.get_width(lod),t.get_height(lod));float4 c=t.read((uint2(p.xy)+opts.zw)%extent,lod);if(opts.x)c.rgb=(c.rgb*16.0f+128.0f)/255.0f;return c;}";
     id<MTLLibrary> native=[host.device newLibraryWithSource:source options:nil error:&error];
     require(native!=nil,error.description.UTF8String);
     __block uint64_t seq=0;__block unsigned staged=0;
@@ -38,11 +38,12 @@ int main(void){@autoreleasepool{
         for(NSNumber *formatValue in @[@70,@80,@115]){
             MTLPixelFormat format=formatValue.unsignedIntegerValue;
             MTLTextureDescriptor *td=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:67 height:39 mipmapped:NO];
+            if(format==115){td.width=1216;td.height=2560;}
             td.storageMode=MTLStorageModePrivate;td.usage=65541;td.mipmapLevelCount=4;
             id<MTLTexture> intermediate=[device newTextureWithDescriptor:td];require(intermediate!=nil,"private allocation");
             require(intermediate.usage==65541&&intermediate.storageMode==MTLStorageModePrivate&&intermediate.mipmapLevelCount==4,"private metadata");
             MTLPixelFormat outputFormat=format==115?MTLPixelFormatBGRA8Unorm:format;
-            td.storageMode=MTLStorageModeShared;td.usage=5;td.pixelFormat=outputFormat;td.mipmapLevelCount=1;
+            td.width=67;td.height=39;td.storageMode=MTLStorageModeShared;td.usage=5;td.pixelFormat=outputFormat;td.mipmapLevelCount=1;
             id<MTLTexture> target=[device newTextureWithDescriptor:td];require(target!=nil,"output allocation");
             NSMutableArray *pipelines=[NSMutableArray array];
             for(NSString *name in @[@"paint",@"copyPixel"]){
@@ -67,7 +68,7 @@ int main(void){@autoreleasepool{
                             [encoder setFragmentBytes:padding length:sizeof(padding) atIndex:30];
                         }
                     }
-                    uint32_t hdr=format==115,values[]={frame,hdr},readOptions[]={hdr,frame%4};
+                    uint32_t hdr=format==115,values[]={frame,hdr},readOptions[]={hdr,frame%4,format==115&&(frame&1)?(uint32_t)(intermediate.width>>(frame%4))-67:0,format==115&&(frame&2)?(uint32_t)(intermediate.height>>(frame%4))-39:0};
                     if(passIndex){[encoder setFragmentTexture:intermediate atIndex:0];[encoder setFragmentBytes:readOptions length:sizeof(readOptions) atIndex:0];}
                     else [encoder setFragmentBytes:values length:sizeof(values) atIndex:0];
                     [encoder drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[encoder endEncoding];
@@ -75,7 +76,7 @@ int main(void){@autoreleasepool{
                 [command commit];[command waitUntilCompleted];require(command.status==MTLCommandBufferStatusCompleted,command.error.description.UTF8String);
                 uint8_t actual[67*39*4];[target getBytes:actual bytesPerRow:67*4 fromRegion:MTLRegionMake2D(0,0,67,39) mipmapLevel:0];
                 for(unsigned y=0;y<39;y++)for(unsigned x=0;x<67;x++){
-                    unsigned px=x,py=y;px%=67>>(frame%4);py%=39>>(frame%4);
+                    unsigned level=frame%4;unsigned px=x+(format==115&&(frame&1)?(intermediate.width>>level)-67:0),py=y+(format==115&&(frame&2)?(intermediate.height>>level)-39:0);px%=intermediate.width>>level;py%=intermediate.height>>level;
                     uint8_t rgba[]={(px+frame)%251,(py+3*frame)%251,(px+py+7*frame)%251,255};
                     for(unsigned c=0;c<4;c++)require(actual[(y*67+x)*4+c]==rgba[(outputFormat==80&&c<3)?2-c:c],"render then read exact pixels");
                 }
@@ -87,5 +88,5 @@ int main(void){@autoreleasepool{
     require([stats[@"live"][@"objects"] isEqual:@0]&&[stats[@"live"][@"resourceBytes"] isEqual:@0],"all resources retired");
     require([stats[@"renderDraws"] isEqual:@48]&&[stats[@"renderPasses"] isEqual:@48],"all planned work executed");
     require(staged==3,"three oversized frontend batches staged without changing GPU pass counts");
-    fprintf(stderr,"PASS private block writes: BGRA/RGBA/RGBA16F HDR, four rendered mip levels, eight reused frames each, exact pixels, completion and retirement\n");
+    fprintf(stderr,"PASS private block writes: BGRA/RGBA/RGBA16F HDR, 1216x2560 RGBA16F with edge samples, four rendered mip levels, eight reused frames each, exact pixels, completion and retirement\n");
 }}

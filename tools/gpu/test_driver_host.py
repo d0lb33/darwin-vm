@@ -17,6 +17,55 @@ AIR = Path('/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib')
 SHA = '8860e4a17d89783da06429a302db0bc61b2939963f202c0c6ad31189a1021364'
 
 class HostTests(unittest.TestCase):
+    def test_descriptor_compute_exact_air_and_atomic_rejection(self):
+        # Exact guest AIR on the host backend; this is not guest runtime evidence.
+        encode=lambda data:base64.b64encode(data).decode()
+        lib=self.rpc('library',length=AIR.stat().st_size,sha256=SHA)['handle']
+        functions=[self.rpc('function',library=lib,name=name,specialized='',constants=[])['handle']
+                   for name in ('compute_average_luma','compute_sum_luma')]
+        descriptor=dict(functionHandle=functions[0],maxThreads=0,multiple=False,requiredThreads=[0,0,0])
+        before=self.rpc('stats')['live']['objects']
+        for change in (dict(functionHandle=lib),dict(functionHandle=99999),dict(maxThreads=1025),
+                       dict(multiple=1),dict(requiredThreads=[0,1,0]),dict(requiredThreads=[33,33,1]),
+                       dict(maxThreads=32,requiredThreads=[8,8,1])):
+            self.assertFalse(self.rpc('computePipeline',**dict(descriptor,**change))['ok'],change)
+        self.assertEqual(self.rpc('stats')['live']['objects'],before)
+        pipelines=[]
+        for function in functions:
+            reply=self.rpc('computePipeline',**dict(descriptor,functionHandle=function))
+            self.assertTrue(reply['ok'],reply);self.assertTrue(reply['bindings']);pipelines.append(reply['handle'])
+        texture=self.rpc('texture',width=64,height=48,format=115,usage=5)['handle']
+        partial=self.rpc('buffer',length=96)['handle'];result=self.rpc('buffer',length=16)['handle']
+        uniform=encode(bytes.fromhex('0000000040003000010000000600000001000000'))
+        first=dict(kind='compute',pipeline=pipelines[0],textures=[[0,texture]],buffers=[dict(index=2,buffer=partial,offset=0)],
+                   bytes=[dict(index=0,data=uniform)],samplers=[],threadgroupMemory=[dict(index=0,length=1024)],groups=[1,6,1],threads=[8,8,1])
+        second=dict(kind='compute',pipeline=pipelines[1],textures=[],buffers=[dict(index=1,buffer=partial,offset=0),dict(index=2,buffer=result,offset=0)],
+                    bytes=[dict(index=0,data=uniform)],samplers=[],threadgroupMemory=[dict(index=0,length=128)],groups=[1,1,1],threads=[8,1,1])
+        clear=dict(kind='render',target=texture,load=2,store=1,clear=[1,.5,.25,1],operations=[])
+        original=bytes(64*48*8)
+        self.assertTrue(self.rpc('upload',texture=texture,row=512,data=encode(original))['ok'])
+        poison=dict(buffer=partial,data=encode(bytes([0xa5])*96))
+        bads=[dict(first,groups=[4097,1,1]),dict(first,threads=[1025,1,1]),dict(first,buffers=[]),
+              dict(first,bytes=[dict(index=0,data=encode(b'X'))]),dict(first,textures=[[0,99999]]),
+              dict(first,threadgroupMemory=[]),dict(first,threadgroupMemory=[dict(index=0,length=32784)]),
+              dict(first,buffers=[dict(index=2,buffer=partial,offset=96)]),dict(first,samplers=[[0,partial]])]
+        for bad in bads:
+            reply=self.rpc('renderSubmit',commands=[clear,bad],uploads=[poison],readbacks=[])
+            self.assertFalse(reply['ok'],reply)
+            self.assertEqual(self.rpc('stats')['submissions'],0)
+            self.assertEqual(base64.b64decode(self.rpc('read',buffer=partial)['data']),bytes(96))
+            self.assertEqual(base64.b64decode(self.rpc('read',texture=texture)['data']),original)
+        for frame in range(3):
+            clear['clear']=[1+frame,.5,.25,1]
+            reply=self.rpc('renderSubmit',commands=[clear,first,second],uploads=[],readbacks=[partial,result])
+            self.assertTrue(reply['ok'],reply);self.assertEqual(reply['status'],4)
+            self.assertEqual((reply['renderPasses'],reply['computePasses']),(1,2))
+            expected=[float(3072*(1+frame)),1536.,768.,3072.]
+            self.assertEqual(base64.b64decode(reply['buffers'][str(result)]),struct.pack('<4f',*expected))
+            self.assertEqual(base64.b64decode(reply['buffers'][str(partial)]),struct.pack('<4f',*[v/6 for v in expected])*6)
+        for handle in [lib,*functions,*pipelines,texture,partial,result]:self.assertTrue(self.rpc('release',handle=handle)['ok'])
+        self.assertEqual(self.rpc('stats')['live']['objects'],0)
+
     def test_negotiated_object_table_capacity_and_reuse(self):
         limit=self.rpc('capabilities')['contract']['maximumLiveObjects']
         self.assertEqual(limit,256)
@@ -219,7 +268,7 @@ class HostTests(unittest.TestCase):
         self.assertTrue(self.rpc('renderSubmit',commands=[clear],uploads=[],readbacks=[])['ok'])
         self.assertTrue(self.rpc('release',handle=t)['ok'])
         self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
-        self.assertFalse(self.rpc('texture',width=2048,height=2048,format=80,usage=5,storage=2,levels=2)['ok'])
+        self.assertFalse(self.rpc('texture',width=2048,height=2048,format=115,usage=5,storage=2,levels=2)['ok'])
 
     def test_staged_render_ownership_integrity_and_atomic_validation(self):
         target=self.rpc('texture',width=64,height=64,format=80,usage=5)['handle']
@@ -295,20 +344,21 @@ class HostTests(unittest.TestCase):
         self.assertEqual(4864%row_alignment,0)
         self.assertEqual(contract['queries']['minBufferNoCopyAlignmentBytes'],16384)
         self.assertEqual(contract['queries']['maxTextureWidth2D'],4096)
-        self.assertEqual(contract['privateTextureBytes'],16*1024*1024)
+        self.assertEqual(contract['privateTextureBytes'],32*1024*1024)
+        self.assertEqual(contract['ordinaryResourceBytes'],64*1024*1024)
         for storage in (0,1):
             self.assertFalse(self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=storage)['ok'])
         screen=self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=2)
         self.assertTrue(screen['ok']);self.assertEqual(screen['nativeStorageMode'],2)
         self.assertTrue(self.rpc('release',handle=screen['handle'])['ok'])
-        # Independent axis and byte limits, plus the 32 MiB live allocation cap.
+        # Independent axis and byte limits, plus the 64 MiB live allocation cap.
         self.assertFalse(self.rpc('texture',width=4097,height=1,format=80,usage=5,storage=2)['ok'])
-        self.assertFalse(self.rpc('texture',width=2048,height=2049,format=80,usage=5,storage=2)['ok'])
+        self.assertFalse(self.rpc('texture',width=2048,height=2049,format=115,usage=5,storage=2)['ok'])
         handles=[]
-        for _ in range(2):
+        for _ in range(4):
             r=self.rpc('texture',width=2048,height=2048,format=80,usage=5,storage=2)
             self.assertTrue(r['ok']);handles.append(r['handle'])
-        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],32*1024*1024)
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],64*1024*1024)
         self.assertFalse(self.rpc('texture',width=1,height=1,format=80,usage=5,storage=2)['ok'])
         self.assertTrue(self.rpc('release',handle=handles.pop())['ok'])
         tiny=self.rpc('texture',width=1,height=1,format=80,usage=5,storage=2)

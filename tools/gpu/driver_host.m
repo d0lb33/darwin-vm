@@ -19,7 +19,7 @@
 enum {
     kMaxFrame = 2 * 1024 * 1024,
     kMaxObjects = DVM_OBJECTS,
-    kMaxTextures = 32 * 1024 * 1024,
+    kMaxTextures = DVM_ORDINARY_RESOURCE_BYTES,
     kMaxDispatches = 32,
     kMaxDimension = DVM_TEXTURE_DIMENSION,
     kMaxLibrary = 16 * 1024 * 1024
@@ -49,7 +49,7 @@ enum {
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, DVMEntry *> *entries;
 @property(nonatomic) uint64_t nextHandle, lastSeq, creations, submissions;
-@property(nonatomic) NSUInteger renderPasses,renderDraws,blitPasses;
+@property(nonatomic) NSUInteger renderPasses,renderDraws,blitPasses,computePasses;
 @property(nonatomic) NSUInteger textureBytes,residentBytes;
 @property(nonatomic,strong) NSMutableDictionary<NSNumber *,DVMImportedPages *> *imports;
 @property(nonatomic) NSUInteger importedBytes;
@@ -422,7 +422,7 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
     for (DVMEntry *entry in host.entries.allValues) {
         if ([entry.kind isEqual:@"library"])
             libraries++;
-        else if ([entry.kind isEqual:@"pipeline"])
+        else if ([entry.kind isEqual:@"pipeline"]||[entry.kind isEqual:@"renderPipeline"]||[entry.kind isEqual:@"computePipeline"])
             pipelines++;
         else if ([entry.kind isEqual:@"texture"])
             textures++;
@@ -444,7 +444,7 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
             @"importedBytes":@(host.importedBytes),@"importedAllocations":@(host.imports.count)
         },
         @"creations" : @(host.creations),
-        @"submissions" : @(host.submissions),@"renderPasses":@(host.renderPasses),@"renderDraws":@(host.renderDraws),@"blitPasses":@(host.blitPasses)
+        @"submissions" : @(host.submissions),@"renderPasses":@(host.renderPasses),@"renderDraws":@(host.renderDraws),@"blitPasses":@(host.blitPasses),@"computePasses":@(host.computePasses)
     };
 }
 static NSDictionary *Buffer(DVMHost *host, uint64_t seq, NSDictionary *r) {
@@ -625,6 +625,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
         return HostError(seq, EINVAL, @"request lacks op");
     if([op hasPrefix:@"renderStage"])return RenderStage(host,seq,request);
     if(host.renderStage&&![op isEqual:@"stats"])return HostError(seq,EBUSY,@"incomplete render request transaction");
+    if([op isEqual:@"computePipeline"])return ComputePipeline(host,seq,request);
     if([op isEqual:@"writeTextureChunk"]||[op isEqual:@"abortTextureUpload"])return TextureChunk(host,seq,request);
     if([op isEqual:@"renderSubmit"]||[op isEqual:@"submit"]||[op isEqual:@"blurSubmit"])
         for(DVMEntry *e in host.entries.allValues)if(e.textureUpload)return HostError(seq,EBUSY,@"GPU submission during incomplete texture upload");

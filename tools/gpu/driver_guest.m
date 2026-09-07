@@ -107,6 +107,9 @@ static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMMetalRPC rpc){
 @property(nonatomic, strong) DVMFunction *function;
 @property(nonatomic) NSUInteger threadExecutionWidth;
 @property(nonatomic) NSUInteger maxTotalThreadsPerThreadgroup;
+@property(nonatomic) NSUInteger staticThreadgroupMemoryLength;
+@property(nonatomic) BOOL descriptorBased;
+@property(nonatomic) MTLSize requiredThreadsPerThreadgroup;
 @end
 @interface DVMTexture : DVMResource <MTLTexture>
 @property(nonatomic, strong) NSData *pendingUpload;
@@ -155,6 +158,7 @@ static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
 @property(nonatomic, strong) NSMutableDictionary *constants;
 @property(nonatomic, strong) NSMutableDictionary *buffers;
 @property(nonatomic, strong) NSMutableDictionary *scratch;
+@property(nonatomic, strong) NSMutableDictionary *samplers;
 @property(nonatomic) BOOL ended;
 @property(nonatomic, strong) NSArray *imageblock;
 @property(atomic, copy) NSString *label;
@@ -180,6 +184,7 @@ static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
 #include "consumer_render_guest.inc"
 #include "consumer_blit_guest.inc"
 #include "consumer_function_guest.inc"
+#include "consumer_compute_guest.inc"
 #include "imported_surface_guest.inc"
 @implementation DVMDevice
 - (BOOL)submissionInFlight {@synchronized(self){return self.pendingSubmissions!=0;}}
@@ -361,6 +366,12 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     o.maxTotalThreadsPerThreadgroup = [r[@"maxTotalThreadsPerThreadgroup"] unsignedIntegerValue];
     return o;
 }
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d error:(NSError **)err {
+    return DVMNewComputePipeline(self,d,0,NULL,err);
+}
+- (id<MTLComputePipelineState>)newComputePipelineStateWithDescriptor:(MTLComputePipelineDescriptor *)d options:(MTLPipelineOption)options reflection:(MTLComputePipelineReflection **)reflection error:(NSError **)err {
+    return DVMNewComputePipeline(self,d,options,reflection,err);
+}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
     if(!DVMTextureDescriptorValid(d)){
         DVMTextureRejection("descriptor",d,NULL,0);
@@ -476,6 +487,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 @end
 @implementation DVMPipeline
+- (BOOL)supportIndirectCommandBuffers {return NO;}
+- (MTLComputePipelineReflection *)reflection {return nil;}
 @end
 @implementation DVMBuffer
 - (void)prepareForPurgeability:(MTLPurgeableState)state {
@@ -732,6 +745,12 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     [self commit];[self waitUntilCompleted];
     return self.status==MTLCommandBufferStatusCompleted&&!self.error;
 }
+- (id<MTLComputeCommandEncoder>)computeCommandEncoderWithDispatchType:(MTLDispatchType)type {
+    // Exact QuartzCore 0x1844f44ac passes zero (serial). Concurrent dispatch
+    // needs a different synchronization contract and is not advertised.
+    if(type!=MTLDispatchTypeSerial)return nil;
+    return [self computeCommandEncoder];
+}
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
     [self encoding];
     if (_openEncoders)
@@ -743,6 +762,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     e.constants = [NSMutableDictionary dictionary];
     e.buffers = [NSMutableDictionary dictionary];
     e.scratch = [NSMutableDictionary dictionary];
+    e.samplers = [NSMutableDictionary dictionary];
     return e;
 }
 - (void)addCompletedHandler:(MTLCommandBufferHandler)handler {
@@ -930,9 +950,13 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (void)setTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i {
     [self check];
-    if (i >= DVM_COMPUTE_BINDINGS || ![t isKindOfClass:DVMTexture.class] || t.device != self.device)
+    if (i >= DVM_COMPUTE_BINDINGS || (t&&(![t isKindOfClass:DVMTexture.class] || t.device != self.device)))
         reject(@"foreign texture or index");
-    _textures[@(i)] = t;
+    if(t)_textures[@(i)] = t;else [_textures removeObjectForKey:@(i)];
+}
+- (void)setSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {
+    [self check];if(i>=DVM_COMPUTE_BINDINGS||(s&&(![(id)s isKindOfClass:DVMSampler.class]||s.device!=self.device)))reject(@"foreign compute sampler/index");
+    if(s)_samplers[@(i)]=s;else [_samplers removeObjectForKey:@(i)];
 }
 - (void)setBytes:(const void *)p length:(NSUInteger)n atIndex:(NSUInteger)i {
     [self check];
@@ -943,6 +967,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (void)setBuffer:(id<MTLBuffer>)b offset:(NSUInteger)offset atIndex:(NSUInteger)i {
     [self check];
+    if(!b&&i<DVM_COMPUTE_BINDINGS&&!offset){[_buffers removeObjectForKey:@(i)];[_constants removeObjectForKey:@(i)];return;}
     if (i >= DVM_COMPUTE_BINDINGS || ![b isKindOfClass:DVMBuffer.class] || b.device != self.device ||
         offset >= b.length || offset % DVM_BUFFER_BINDING_ALIGNMENT)
         reject(@"invalid buffer binding");
@@ -960,6 +985,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (void)dispatchThreadgroups:(MTLSize)g threadsPerThreadgroup:(MTLSize)t {
     [self check];
+    if(_pipeline.descriptorBased){
+        if(_imageblock)reject(@"imageblock compute requires a separate audited contract");
+        DVMRecordCompute(self,g,t);return;
+    }
+    if(_samplers.count)reject(@"legacy compute path has no sampler contract");
     if (!_pipeline || _command.commands.count >= 32 || !g.width || !g.height || g.depth != 1 ||
         g.width > 512 || g.height > 512 || !t.width || !t.height || t.depth != 1 || t.width > 32 ||
         t.height > 32 || t.width * t.height > _pipeline.maxTotalThreadsPerThreadgroup)

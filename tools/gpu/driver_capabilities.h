@@ -1,8 +1,12 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 22u
+#define DVM_CONTRACT_VERSION 25u
+#define DVM_COMPUTE_THREADS 1024u
+#define DVM_COMPUTE_MEMORY 32768u
+#define DVM_COMPUTE_INVOCATIONS (16u*1024u*1024u)
 #define DVM_OBJECTS 256u
+#define DVM_ORDERED_COMMANDS 64u
 #define DVM_RENDER_REQUEST_BYTES (2u*1024u*1024u)
 #define DVM_RENDER_REQUEST_CHUNK 32768u
 #define DVM_RENDER_DIRECT_BYTES 60000u
@@ -16,7 +20,10 @@
 #define DVM_TEXTURE_DIRECT_READ_BYTES (1024u*1024u)
 // Private images never cross the framed CPU-transfer channel. Keep their
 // allocation budget separate; total live ordinary/shared resources stay capped.
-#define DVM_PRIVATE_TEXTURE_BYTES (16u*1024u*1024u)
+#define DVM_PRIVATE_TEXTURE_BYTES (32u*1024u*1024u)
+// Observed 1216x2560 RGBA16F private compositor target is 24,903,680 bytes.
+// Permit bounded intermediates alongside it; imported DRAM is accounted apart.
+#define DVM_ORDINARY_RESOURCE_BYTES (64u*1024u*1024u)
 #define DVM_BUFFER_BINDING_ALIGNMENT 16u
 #define DVM_COMPUTE_BINDINGS 8u
 #define DVM_RENDER_BUFFERS 31u
@@ -123,7 +130,9 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-chunked-texture-allocations-v22",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-ordered-64-screen-compute-v25",
+        @"computeDescriptorVersion":@1,@"orderedComputeRenderBlit":@YES,@"orderedCommandLimit":@DVM_ORDERED_COMMANDS,@"computeReflectionArrays":@NO,
+        @"computeThreadsPerGroup":@DVM_COMPUTE_THREADS,@"computeThreadgroupBytes":@DVM_COMPUTE_MEMORY,@"computeInvocationsPerDispatch":@DVM_COMPUTE_INVOCATIONS,
         @"resourcePurgeabilityVersion":@1,@"resourcePurgeabilityStates":@[@1,@2,@3,@4],
         @"pinnedSurfacePurgeabilityStates":@[@1,@2],@"volatileResourceAccess":@"reacquire-nonvolatile-before-use",
         @"texture1DFormats":@[@23,@25,@55,@105],@"texture1DUsageMask":@1,@"texture1DStorageModes":@[@0],
@@ -137,7 +146,7 @@ static inline NSDictionary *DVMContractProfile(void) {
         @"queuedCommandBuffers":@DVM_QUEUED_COMMAND_BUFFERS,@"executionQueues":@1,@"maximumLiveObjects":@DVM_OBJECTS,
         @"queries":@{DVM_CAPABILITY_QUERIES(DVM_BOOL_VALUE,DVM_UINT_VALUE)},
         @"computeBindings":@DVM_COMPUTE_BINDINGS,@"inlineBytes":@DVM_INLINE_BYTES,
-        @"bufferBytes":@DVM_BUFFER_BYTES,@"textureBytes":@DVM_TEXTURE_BYTES,@"privateTextureBytes":@DVM_PRIVATE_TEXTURE_BYTES,@"textureUsageMask":@DVM_TEXTURE_USAGE_MASK,
+        @"bufferBytes":@DVM_BUFFER_BYTES,@"textureBytes":@DVM_TEXTURE_BYTES,@"privateTextureBytes":@DVM_PRIVATE_TEXTURE_BYTES,@"ordinaryResourceBytes":@DVM_ORDINARY_RESOURCE_BYTES,@"textureUsageMask":@DVM_TEXTURE_USAGE_MASK,
         @"renderEncoders":@YES,@"linearTextures":@YES,@"generalIOSurfaceTextureImport":@NO,
         @"resourceMetadataVersion":@2,@"resourceProcessAttribution":@"opaque-guest-pid32-unset-zero-host-execution-owner-unchanged",@"textureFormats":@[@1,@10,@23,@25,@30,@55,@70,@80,@105,@115,@554],@"textureFormatUsageOverrides":@{@"1":@1,@"23":@1,@"25":@1,@"55":@1,@"105":@1,@"554":@5},@"textureTypes":@[@0,@2,@7],@"texture3DUsageMask":@1,
         @"bufferStorageModes":@[@0,@1],@"textureStorageModes":@[@0,@1,@2],@"textureCompressionTypes":@[@0],@"protectedResources":@NO,@"heaps":@NO,
