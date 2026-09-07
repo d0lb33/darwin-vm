@@ -12,6 +12,7 @@ version = a.mount / 'System/Library/CoreServices/SystemVersion.plist'
 v = plistlib.loads(version.read_bytes())
 assert v['ProductBuildVersion'] == '24A5430a' and v['ProductVersion'] == '27.0', v
 paths = ['System/Library/Frameworks/QuartzCore.framework/default.metallib',
+         'System/Library/PrivateFrameworks/HDRProcessing.framework/default.metallib',
          'System/Library/PrivateFrameworks/RenderBox.framework/default.metallib',
          'System/Library/PrivateFrameworks/RenderBox.framework/archive.metallib']
 records = []

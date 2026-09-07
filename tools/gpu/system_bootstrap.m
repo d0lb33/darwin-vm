@@ -17,6 +17,9 @@ static void fail(const char *s) {[NSException raise:NSInternalInconsistencyExcep
 #define DVM_TEST_RUNNER 1
 #include "driver_mmio_transport.inc"
 #include "driver_owned_mapping.inc"
+#ifdef DVM_BOOT_RUNTIME_PROBE
+#include "system_revision_probe.inc"
+#endif
 
 static uint64_t systemRegistryID;
 static id<MTLDevice> systemDevice;
@@ -64,6 +67,9 @@ __attribute__((constructor)) static void DVMSystemBoot(void) {
             if(before){fprintf(stderr,"GPU_LOAD_SYSTEM_SKIP existing_device=%s\n",before.name.UTF8String);return;}
             void *iokit=dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",RTLD_NOW|RTLD_GLOBAL);
             Namespace *ns=openMMIO(iokit);
+#ifdef DVM_BOOT_RUNTIME_PROBE
+            DVMSystemRevisionProbe(ns);
+#endif
             io_registry_entry_t service=IORegistryEntryFromPath(0,"IOService:/AppleARMPE/arm-io@10F00000/AppleH17PPlatformIO/dvm-transport@E0000000");
             kern_return_t kr=service?IORegistryEntryGetRegistryEntryID(service,&systemRegistryID):kIOReturnNotFound;
             if(service)IOObjectRelease(service);

@@ -1,7 +1,7 @@
 // Linear textures alias a real host MTLBuffer. Alignment is negotiated for this
 // implemented allocation operation, never used to advertise a GPU family.
 static NSUInteger LinearAlignment(DVMHost *host,MTLPixelFormat format) {
-    if(!DVMFormatBytes(format))return 0;
+    if(!DVMFormatBytes(format)||DVM1DFormat(format))return 0;
     NSUInteger a=[host.device minimumLinearTextureAlignmentForPixelFormat:format];
     return a&&a<=4096&&!(a&(a-1))?MAX(a,16):0;
 }

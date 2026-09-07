@@ -1,7 +1,7 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 16u
+#define DVM_CONTRACT_VERSION 20u
 #define DVM_RENDER_REQUEST_BYTES (2u*1024u*1024u)
 #define DVM_RENDER_REQUEST_CHUNK 32768u
 #define DVM_RENDER_DIRECT_BYTES 60000u
@@ -32,14 +32,21 @@
 #define DVM_FRAGMENT_SAMPLERS 16u
 #define DVM_COLOR_ATTACHMENTS 1u
 static inline unsigned DVMFormatBytes(NSUInteger format) {
-    switch(format) {case 1:case 10:return 1;case 30:return 2;case 70:case 80:return 4;case 115:return 8;default:return 0;}
+    switch(format) {case 1:case 10:return 1;case 23:case 25:case 30:return 2;case 55:case 70:case 80:case 554:return 4;case 105:case 115:return 8;default:return 0;}
 }
+static inline BOOL DVM1DFormat(NSUInteger format) {return format==23||format==25||format==55||format==105;}
+static inline BOOL DVMColorFormat(NSUInteger format) {return format==10||format==30||format==70||format==80||format==115||format==554;}
 static inline unsigned DVMFormatUsageMask(NSUInteger format) {
     // A8 is an alpha-only sampled image in this profile. It is not a color
     // attachment or compute-write target. Other existing formats keep v8 usage.
-    return format==1?1:(DVMFormatBytes(format)?DVM_TEXTURE_USAGE_MASK:0);
+    return (format==1||DVM1DFormat(format))?1:format==554?5:(DVMFormatBytes(format)?DVM_TEXTURE_USAGE_MASK:0);
 }
 static inline BOOL DVMTextureUsageValid(NSUInteger format,NSUInteger storage,NSUInteger type,NSUInteger usage) {
+    // Exact backboardd HDRProcessing requests: shared integer and float LUTs.
+    // 1D is sampled/read only, with no array, mip, or linear-view claim.
+    if(type==MTLTextureType1D||DVM1DFormat(format))
+        return type==MTLTextureType1D&&DVM1DFormat(format)&&storage==MTLStorageModeShared&&usage==MTLTextureUsageShaderRead;
+    if(format==554&&type!=MTLTextureType2D)return NO;
     if(usage&DVM_TEXTURE_BLOCK_WRITES_ONLY) {
         // Observed QuartzCore allocation: render writes followed by sampling.
         // Compute writes and other private-bit combinations remain unvalidated.
@@ -51,7 +58,7 @@ static inline BOOL DVMTextureUsageValid(NSUInteger format,NSUInteger storage,NSU
 static inline BOOL DVMTextureLevelsValid(NSUInteger width,NSUInteger height,NSUInteger format,NSUInteger storage,NSUInteger type,NSUInteger levels){
     if(!width||!height||!levels)return NO;
     if(levels==1)return YES;
-    if(storage!=MTLStorageModePrivate||type!=MTLTextureType2D||(format!=70&&format!=80&&format!=115))return NO;
+    if(storage!=MTLStorageModePrivate||type!=MTLTextureType2D||!DVMColorFormat(format))return NO;
     NSUInteger maxLevels=1,extent=MAX(width,height);
     while(extent>1){extent>>=1;maxLevels++;}
     return levels<=maxLevels;
@@ -112,10 +119,12 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"private-disjoint-mip-and-half-float-render-v16",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-hdr-1d-sampled-luts-v20",
+        @"texture1DFormats":@[@23,@25,@55,@105],@"texture1DUsageMask":@1,@"texture1DStorageModes":@[@0],
+        @"blitEncoders":@YES,@"blitBufferAlignment":@4,@"blitIOSurfaceImport":@NO,@"blitTextureTypes":@[@2],
         @"privateColorTextureAdditionalUsages":@[@(DVM_TEXTURE_BLOCK_WRITES_ONLY|5u)],
-        @"privateColorTextureUsageFormats":@[@70,@80,@115],@"colorAttachmentFormats":@[@70,@80,@115],
-        @"private2DMipFormats":@[@70,@80,@115],@"maximumMipLevels":@13,@"mipRenderAttachments":@YES,@"privateMipReadWrite":@"application-guaranteed-disjoint-subresources-native-hazard-tracking",@"mipGeneration":@NO,@"textureViews":@NO,
+        @"privateColorTextureUsageFormats":@[@70,@80,@115],@"colorAttachmentFormats":@[@10,@30,@70,@80,@115,@554],
+        @"private2DMipFormats":@[@10,@30,@70,@80,@115,@554],@"maximumMipLevels":@13,@"mipRenderAttachments":@YES,@"privateMipReadWrite":@"application-guaranteed-disjoint-subresources-native-hazard-tracking",@"mipGeneration":@YES,@"mipGenerationFormats":@[@10,@30,@70,@80,@115,@554],@"textureViews":@NO,
         @"renderRequestBytes":@DVM_RENDER_REQUEST_BYTES,@"renderRequestChunkBytes":@DVM_RENDER_REQUEST_CHUNK,@"renderRequestTransactions":@1,
         @"framebufferRead":@"current-fragment-single-color-attachment-ordered-programmable-blending",
         @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureUploadTransactions":@1,
@@ -124,7 +133,7 @@ static inline NSDictionary *DVMContractProfile(void) {
         @"computeBindings":@DVM_COMPUTE_BINDINGS,@"inlineBytes":@DVM_INLINE_BYTES,
         @"bufferBytes":@DVM_BUFFER_BYTES,@"textureBytes":@DVM_TEXTURE_BYTES,@"privateTextureBytes":@DVM_PRIVATE_TEXTURE_BYTES,@"textureUsageMask":@DVM_TEXTURE_USAGE_MASK,
         @"renderEncoders":@YES,@"linearTextures":@YES,@"generalIOSurfaceTextureImport":@NO,
-        @"resourceMetadataVersion":@2,@"resourceProcessAttribution":@"opaque-guest-pid32-unset-zero-host-execution-owner-unchanged",@"textureFormats":@[@1,@10,@30,@70,@80,@115],@"textureFormatUsageOverrides":@{@"1":@1},@"textureTypes":@[@2,@7],@"texture3DUsageMask":@1,
+        @"resourceMetadataVersion":@2,@"resourceProcessAttribution":@"opaque-guest-pid32-unset-zero-host-execution-owner-unchanged",@"textureFormats":@[@1,@10,@23,@25,@30,@55,@70,@80,@105,@115,@554],@"textureFormatUsageOverrides":@{@"1":@1,@"23":@1,@"25":@1,@"55":@1,@"105":@1,@"554":@5},@"textureTypes":@[@0,@2,@7],@"texture3DUsageMask":@1,
         @"bufferStorageModes":@[@0,@1],@"textureStorageModes":@[@0,@1,@2],@"textureCompressionTypes":@[@0],@"protectedResources":@NO,@"heaps":@NO,
         @"clientBufferStorage":@"retained-guest-pages-upload-before-submit-writeback-before-completion",
         @"renderTimestampDomain":@"host-mach-absolute-seconds",

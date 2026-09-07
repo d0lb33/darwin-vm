@@ -10,7 +10,9 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('manifest',type=Path);p.add_argument('--worker',type=Path,required=True)
     p.add_argument('--library',type=Path,required=True);p.add_argument('--tag',required=True)
+    p.add_argument('--library-cache',type=Path,help='explicit content-addressed exact-guest AIR directory')
     p.add_argument('--seconds',type=int,default=300)
+    p.add_argument('--runtime-probe',action='store_true',help='reuse runner inbox/package transport for the bounded backboardd loading probe')
     a=p.parse_args()
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag)>40 or not 30<=a.seconds<=600:p.error('invalid tag/deadline')
     m=json.loads(a.manifest.read_text());verify_backing_chain(m['disk']['backing_chain'])
@@ -18,7 +20,11 @@ def main():
         if sha256(Path(name))!=item['sha256']:raise ValueError('changed pinned input '+name)
     if not m.get('guest_installation',{}).get('scope','').startswith('backboardd-only boot registration'):raise ValueError('requires owned compositor installation')
     out=Path('/tmp/dvm')/a.tag;out.mkdir(exist_ok=False)
-    peer=MMIOPeer(out,a.worker,a.library,boot=True);peer.runner=True
+    if a.runtime_probe:
+        from driver_runner_peer import RunnerPeer
+        peer=RunnerPeer(out,a.worker,a.library,boot=True,library_cache=a.library_cache)
+    else:peer=MMIOPeer(out,a.worker,a.library,boot=True,library_cache=a.library_cache)
+    peer.runner=True
     if not peer.managed:raise ValueError('requires current managed mode-3 worker')
     subprocess.run(['qemu-img','create','-f','qcow2','-F','qcow2','-b',m['disk']['path'],str(out/'disk.qcow2')],check=True)
     argv=list(m['qemu_argv']);argv[argv.index('-drive')+1]=f'if=none,id=ans,file={out}/disk.qcow2,format=qcow2'
@@ -57,12 +63,15 @@ def main():
                 if 'GPU_LOAD_SYSTEM_REGISTERED' in combined:report['registered']=True
                 if failure_at is None and any(s in combined for s in ('GPU_LOAD_SYSTEM_MISSING','GPU_LOAD_SYSTEM_UNCAUGHT','GPU_LOAD_SYSTEM_EXCEPTION','GPU_LOAD_TEXTURE_REJECT','panic(cpu','GPU_LOAD_ERROR')):
                     failure_at=time.monotonic();report['stop_reason']='first failed boot/compositor contract';report['failure_context']=combined[-32768:]
+                if failure_at is None and peer.records and not peer.records[-1]['reply'].get('ok',False):
+                    failure_at=time.monotonic();report['stop_reason']='first rejected compositor host request';report['failed_request']=peer.records[-1]
                 # Do not serve a replacement compositor after the owner has
                 # failed. Retained host resources have no restart contract.
                 if failure_at:break
                 # Native presentation and actual backend render replies are
                 # recorded separately. Neither alone verifies final pixels.
-                report['render_submissions']=sum(r['op']=='renderSubmit' and r['reply'].get('ok',False) and bool(r['reply'].get('passes')) for r in peer.records)
+                report['render_submissions']=sum(r['reply'].get('ok',False) and bool(r['reply'].get('renderPasses',r['reply'].get('passes') if r['op']=='renderSubmit' else 0)) for r in peer.records)
+                report['blit_submissions']=sum(r['reply'].get('ok',False) and bool(r['reply'].get('blitPasses')) for r in peer.records)
                 if report['registered'] and report['render_submissions'] and 'iomfb: presented ' in errtail:
                     report['stop_reason']='registered compositor submitted render work and native display presented';break
                 readers=([uart] if uart else [])+([peer.sock] if peer.sock else [])

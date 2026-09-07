@@ -152,6 +152,7 @@ static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
 
 #include "consumer_state_guest.inc"
 #include "consumer_render_guest.inc"
+#include "consumer_blit_guest.inc"
 #include "consumer_function_guest.inc"
 @implementation DVMDevice
 - (BOOL)submissionInFlight {@synchronized(self){return self.pendingSubmissions!=0;}}
@@ -272,7 +273,17 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     o.functionNames = r[@"functionNames"];
     return o;
 }
+- (id<MTLLibrary>)newLibraryWithFile:(NSString *)path error:(NSError **)err {
+    if (![path isKindOfClass:NSString.class] || !path.length) {
+        if (err) *err = error(@"library file path is empty or invalid");
+        return nil;
+    }
+    return [self newLibraryWithURL:[NSURL fileURLWithPath:path] error:err];
+}
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)err {
+    int (*report)(FILE *,const char *,...)=dlsym(RTLD_DEFAULT,"DVMReport");
+    if(!report)report=fprintf;
+    report(stderr,"GPU_LOAD_LIBRARY_REQUEST path=%.280s\n",url.path.UTF8String?:"(nil)");
 #ifdef DVM_CA_REHEARSAL
 #if TARGET_OS_IPHONE && !TARGET_OS_MACCATALYST
 #error Host rehearsal substitution must never be in an iOS driver
@@ -500,6 +511,9 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     [self replaceRegion:r mipmapLevel:level slice:0 withBytes:p bytesPerRow:row bytesPerImage:row*r.size.height];
 }
 - (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)p bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
+    // Native 1D transfers have no row/image stride. Normalize only our CPU
+    // shadow layout; the wire continues to carry the complete tight image.
+    if(self.textureType==MTLTextureType1D){row=r.size.width*DVMFormatBytes(self.pixelFormat);image=row;}
     [self check:r level:level row:row pointer:p];
     if(!image)image=row*r.size.height;
     if(slice||image<row*r.size.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
@@ -566,6 +580,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     [self getBytes:p bytesPerRow:row bytesPerImage:row*r.size.height fromRegion:r mipmapLevel:level slice:0];
 }
 - (void)getBytes:(void *)p bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image fromRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice {
+    if(self.textureType==MTLTextureType1D){row=r.size.width*DVMFormatBytes(self.pixelFormat);image=row;}
     [self check:r level:level row:row pointer:p];
     if(!image)image=row*r.size.height;
     if(slice||image<row*r.size.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
@@ -614,6 +629,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 @end
 @implementation DVMCommand
+- (id<MTLBlitCommandEncoder>)blitCommandEncoder {return DVMNewBlitEncoder(self);}
 - (void)setResponsibleTaskIDs:(const uint32_t *)ids count:(uint32_t)count {
     // Exact MTLIOAccelCommandBuffer at 0x1a55a1334 copies count x 4 bytes
     // (ldr/str w at +0x80/+0x84). Preserve guest attribution, never use it

@@ -19,6 +19,7 @@ def instruction_sections(b):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('base',type=Path);p.add_argument('backboardd',type=Path);p.add_argument('out',type=Path)
+    p.add_argument('--runtime-probe',action='store_true',help='bounded arm64e runtime loading probe inside backboardd; does not replace/unload the boot driver')
     a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
     source=Path(__file__).resolve().parent;repo=source.parents[1];start=time.monotonic()
     shutil.copytree(a.base/'stubs',a.out/'stubs')
@@ -29,6 +30,7 @@ def main():
     sdk=subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip()
     flags=['-target','arm64e-apple-ios27.0','-isysroot',sdk,'-Wno-incompatible-sysroot','-fobjc-arc','-fobjc-arc-exceptions',
            '-O1','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-Wno-protocol','-Wno-objc-protocol-property-synthesis','-fno-objc-msgsend-selector-stubs']
+    if a.runtime_probe:flags.append('-DDVM_BOOT_RUNTIME_PROBE')
     commands=[]
     def run(cmd,**kw):commands.append(cmd);return subprocess.run(cmd,check=True,**kw)
     obj=a.out/'system_bootstrap.o'
@@ -37,6 +39,7 @@ def main():
     additions={
       'usr/lib/libobjc.tbd':[s for s in symbols if s.startswith('_objc_') or s.startswith('_class_') or s.startswith('_sel_')],
       'usr/lib/libSystem.tbd':['_getprogname'],
+      'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL'],
     }
     for rel,names in additions.items():
         f=a.out/'stubs'/rel;t=f.read_text();names=[s for s in names if '"'+s+'"' not in t]
@@ -68,6 +71,9 @@ def main():
     target=a.out/'backboardd';target.write_bytes(b);target.chmod(0o755)
     result=run(['codesign','-d','--entitlements',':-',str(a.backboardd)],capture_output=True)
     entitlements=plistlib.loads(result.stdout);entitlements['platform-application']=True;entitlements['org.darwin-vm.transport']=True
+    if a.runtime_probe:
+        entitlements.update({'org.darwin-vm.development-loader':True,'get-task-allow':True,'com.apple.private.oop-jit.loader':'previews'})
+        entitlements['com.apple.security.exception.files.absolute-path.read-write']=['/private/var/tmp/dvm-gpu-runner/']
     key='com.apple.security.exception.iokit-user-client-class'
     entitlements[key]=list(dict.fromkeys(entitlements.get(key,[])+['IOKitDiagnosticsClient']))
     ep=a.out/'backboardd.entitlements.plist';ep.write_bytes(plistlib.dumps(entitlements))
@@ -93,6 +99,7 @@ def main():
     for f in source.iterdir():
         if f.suffix in ('.m','.h','.inc','.py'):shutil.copyfile(f,a.out/f.name)
     (a.out/'build.json').write_text(json.dumps(dict(commands=commands,seconds=time.monotonic()-start,
+        runtime_probe=a.runtime_probe,
         before_sha256=sha(before),after_sha256=sha(target),plugin_sha256=sha(binary),
         dependency=install,header_edit=dict(offset=off,bytes=length),
         scope='backboardd boot dependency and dedicated transport entitlement; no kernel, guest cache, SPTM or TXM edits'),indent=2)+'\n')

@@ -26,6 +26,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('trial',type=Path);p.add_argument('--worker',type=Path,required=True)
     p.add_argument('--library',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--library-cache',type=Path,help='explicit content-addressed guest AIR directory')
+    p.add_argument('--expect-repaired-seq',type=int,help='one previously rejected request must now succeed; all other replies still match')
     p.add_argument('--host-rehearsal',action='store_true',help='replay a run_uikit_host.py capture; never label it as guest evidence')
     a=p.parse_args();a.out.mkdir(exist_ok=False)
     if a.host_rehearsal:
@@ -35,7 +37,8 @@ def main():
     rows=[json.loads(x) for x in (a.trial/('requests.jsonl' if a.host_rehearsal else 'driver-host.jsonl')).read_text().splitlines()]
     env={k:v for k,v in os.environ.items() if not k.startswith('DVM_DRIVER_')}
     env['DVM_DRIVER_LIBRARY']=str(a.library.resolve())
-    started=time.monotonic();passed=False;count=0
+    if a.library_cache:env['DVM_DRIVER_LIBRARY_CACHE']=str(a.library_cache.resolve())
+    started=time.monotonic();passed=False;count=0;repaired=False
     # The outer command can enforce an observation deadline. This worker never
     # touches a VM, and its process identity is recorded before the first call.
     with (a.out/'worker.log').open('wb') as log:
@@ -60,9 +63,13 @@ def main():
                 # resource counts and error contracts must still agree.
                 ignore={'gpu_start','gpu_end','kernel_start','kernel_end','gpu_us'}
                 matched={k:v for k,v in actual.items() if k not in ignore}=={k:v for k,v in expected.items() if k not in ignore}
+                if request['seq']==a.expect_repaired_seq:
+                    matched=expected.get('ok') is False and actual.get('ok') is True
+                    repaired=matched
                 with (a.out/'replies.jsonl').open('a') as f:f.write(json.dumps(dict(seq=request['seq'],op=row['op'],matched=matched,reply=actual))+'\n')
                 if not matched:raise ValueError(f'reply contract differs at seq {request["seq"]} ({row["op"]})')
                 count+=1
+            if a.expect_repaired_seq is not None and not repaired:raise ValueError('expected repaired sequence was not observed')
             passed=True
         finally:
             worker.stdin.close()
@@ -72,7 +79,7 @@ def main():
             passed=passed and worker.returncode==0
             result=dict(scope='captured-host-rehearsal-backend-replay-not-guest-evidence' if a.host_rehearsal else 'captured-guest-submission-host-replay-not-new-guest-execution',passed=passed,
                         validation_environment={k:env[k] for k in ('MTL_DEBUG_LAYER','MTL_SHADER_VALIDATION') if k in env},
-                        requests=count,worker_exit=worker.returncode,seconds=time.monotonic()-started)
+                        requests=count,repaired_sequence=a.expect_repaired_seq if repaired else None,worker_exit=worker.returncode,seconds=time.monotonic()-started)
             (a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
             if worker.returncode:raise RuntimeError('replay worker did not exit cleanly')
 

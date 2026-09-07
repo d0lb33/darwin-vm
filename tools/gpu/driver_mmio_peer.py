@@ -24,7 +24,7 @@ RAM_SIZE=0x1000000
 MAGIC=0x44564d31
 
 class MMIOPeer(DriverPeer):
-    def __init__(self,out,worker,library,boot=False):
+    def __init__(self,out,worker,library,boot=False,library_cache=None):
         self.out=Path(out);self.started=time.monotonic();self.records=[];self.seen=set()
         self.ready_since=None;self.ready_identity=None;self.ready_acks=0
         self.released=False;self.released_at=None;self.buffer=b'';self.rx=b'';self.sock=None
@@ -50,6 +50,17 @@ class MMIOPeer(DriverPeer):
             env['DVM_DRIVER_MANAGED_RAM']=str(self.out/'managed-ram.bin')
             env['DVM_DRIVER_MANAGED_PAGES']=str(self.out/'managed-pages.bin')
         env.update(DVM_DRIVER_LIBRARY=str(self.library),DVM_DRIVER_BOOTSTRAP='1')
+        env.pop('DVM_DRIVER_LIBRARY_CACHE',None)
+        if library_cache is not None:
+            cache=Path(library_cache).resolve()
+            manifest=(cache/'manifest.json').read_bytes()
+            for item in json.loads(manifest)['libraries']:
+                digest=item['sha256']
+                if len(digest)!=64 or any(c not in '0123456789abcdef' for c in digest):raise ValueError('library cache digest')
+                data=(cache/(digest+'.metallib')).read_bytes()
+                if len(data)!=item['bytes'] or hashlib.sha256(data).hexdigest()!=digest:raise ValueError('library cache input changed')
+            (self.out/'library-cache.json').write_bytes(manifest)
+            env['DVM_DRIVER_LIBRARY_CACHE']=str(cache)
         self.worker_env=env.copy()
         self.proc=subprocess.Popen([str(self.worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,env=env)
         (self.out/'driver-inputs.json').write_text(json.dumps(dict(worker=str(self.worker),worker_sha256=hashlib.sha256(self.worker.read_bytes()).hexdigest(),library=str(self.library),air_sha256=AIR_SHA,transport='shared-ram-mmio'),indent=2)+'\n')

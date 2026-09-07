@@ -20,6 +20,8 @@ def main():
     # create a backboardd process. This path is in its existing home directory.
     jobs[bb]['StandardOutputPath']='/private/var/mobile/dvm-system-metal.log'
     jobs[bb]['StandardErrorPath']='/private/var/mobile/dvm-system-metal.log'
+    runtime=json.loads((a.build/'build.json').read_text()).get('runtime_probe',False)
+    if runtime:jobs[bb].setdefault('EnvironmentVariables',{})['DVM_RUNNER_DEVELOPMENT']='1'
     (a.out/'launchd.plist').write_bytes(plistlib.dumps(cache,fmt=plistlib.FMT_BINARY,sort_keys=False))
     script='''#!/bin/sh
 set -eu
@@ -42,6 +44,10 @@ test "$(cksum < /mnt1/System/Library/xpc/launchd.plist)" = "$(cksum < /libexec/c
 sync
 echo GPU_LOAD_INSTALLED
 '''
+    if runtime:
+        # Existing kernel path gate is exact. Only this disposable Data child
+        # grants mobile ownership of the staging directory; baseline unchanged.
+        script=script.replace('sync\necho GPU_LOAD_INSTALLED','mount_apfs /dev/disk1s2 /mnt2\nmkdir -p /mnt2/tmp/dvm-gpu-runner\nchown 501:501 /mnt2/tmp/dvm-gpu-runner\nchmod 700 /mnt2/tmp/dvm-gpu-runner\nsync\necho GPU_LOAD_INSTALLED')
     (a.out/'gpu-load-install.sh').write_text(script)
     subprocess.run(['bash','-n',str(a.out/'gpu-load-install.sh')],check=True)
     image=a.out/'ramdisk.dmg';shutil.copyfile(repo/'firmware/ramdisk.dmg',image)

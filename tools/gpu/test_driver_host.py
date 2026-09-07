@@ -17,6 +17,41 @@ AIR = Path('/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib')
 SHA = '8860e4a17d89783da06429a302db0bc61b2939963f202c0c6ad31189a1021364'
 
 class HostTests(unittest.TestCase):
+    def test_integer_1d_lut_extent_usage_and_transfer(self):
+        fields=dict(width=3072,height=1,depth=1,type=0,format=23,storage=0,usage=1,levels=1)
+        result=self.rpc('texture',**fields);self.assertTrue(result['ok'],result)
+        handle=result['handle'];pixels=struct.pack('<3072H',*[i*17 for i in range(3072)])
+        self.assertTrue(self.rpc('upload',texture=handle,row=len(pixels),data=base64.b64encode(pixels).decode())['ok'])
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=handle)['data']),pixels)
+        for change in (dict(height=2),dict(depth=2),dict(type=1),dict(type=2),dict(format=80),dict(levels=2),dict(storage=1),dict(storage=2),dict(usage=5),dict(width=4097)):
+            self.assertFalse(self.rpc('texture',**dict(fields,**change))['ok'],change)
+        self.assertEqual(self.rpc('linearLayout',format=23)['description'],'unsupported linear format/alignment')
+        self.assertTrue(self.rpc('release',handle=handle)['ok'])
+
+    def test_ordered_blit_mipmaps_and_atomic_rejection(self):
+        src=self.rpc('texture',width=16,height=16,format=80,usage=5,storage=2,levels=5)['handle']
+        dst=self.rpc('texture',width=8,height=8,format=80,usage=5)['handle']
+        clear=dict(kind='render',target=src,load=2,store=1,clear=[1,0,0,1],operations=[])
+        copy=['copyTexture',src,1,[0,0],[8,8],dst,0,[0,0]]
+        blit=dict(kind='blit',operations=[['copyTexture',src,0,[0,0],[8,8],src,0,[8,8]],['mips',src],copy])
+        result=self.rpc('renderSubmit',commands=[clear,blit],uploads=[],readbacks=[])
+        self.assertTrue(result['ok'],result)
+        self.assertEqual((result['renderPasses'],result['blitPasses']),(1,1))
+        expected=bytes([0,0,255,255])*64
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=dst)['data']),expected)
+        before=self.rpc('stats')['submissions']
+        for bad in (['copyTexture',src,9,[0,0],[8,8],dst,0,[0,0]],
+                    ['copyTexture',src,1,[0,0],[9,8],dst,0,[0,0]],
+                    ['copyTexture',src,0,[0,0],[8,8],src,0,[0,0]],
+                    ['copyTexture',True,0,[0,0],[8,8],dst,0,[0,0]],
+                    ['mips',dst], ['fillBuffer',src,0,64,3]):
+            # A valid earlier clear must remain unexecuted too.
+            clear['clear']=[0,1,0,1]
+            result=self.rpc('renderSubmit',commands=[clear,dict(kind='blit',operations=[bad])],uploads=[],readbacks=[])
+            self.assertFalse(result['ok'],bad)
+        self.assertEqual(self.rpc('stats')['submissions'],before)
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=dst)['data']),expected)
+
     def setUp(self):
         self.p = subprocess.Popen([str(BUILD/'driver_host')], stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, env={**os.environ, 'DVM_DRIVER_LIBRARY':str(AIR)})
@@ -45,6 +80,22 @@ class HostTests(unittest.TestCase):
         p=self.rpc('pipeline',library=lib['handle'],function='compute_sum_luma');self.assertTrue(p['ok'])
         self.assertFalse(self.rpc('submit',commands=[dict(pipeline=p['handle'],textures=[],bytes=[],groups=[1,1,1],threads=[8,1,1])])['ok'])
         self.assertEqual(self.rpc('stats')['submissions'],0)
+    def test_library_cache_identity_and_corruption(self):
+        self.tearDown()
+        with tempfile.TemporaryDirectory() as directory:
+            cache=Path(directory);entry=cache/(SHA+'.metallib');entry.write_bytes(AIR.read_bytes())
+            self.p=subprocess.Popen([str(BUILD/'driver_host')],stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,stderr=subprocess.PIPE,env={**os.environ,
+                    'DVM_DRIVER_LIBRARY_CACHE':directory,'DVM_DRIVER_LIBRARY':str(cache/'absent')})
+            result=self.rpc('library',length=AIR.stat().st_size,sha256=SHA)
+            self.assertTrue(result['ok'],result)
+            self.assertTrue(result['functionNames'])
+            self.assertFalse(self.rpc('library',length=AIR.stat().st_size,sha256=SHA.upper())['ok'])
+            self.assertFalse(self.rpc('library',length=AIR.stat().st_size,sha256='../'+'0'*61)['ok'])
+            self.assertFalse(self.rpc('library',length=AIR.stat().st_size+1,sha256=SHA)['ok'])
+            entry.write_bytes(b'corrupt')
+            self.assertFalse(self.rpc('library',length=AIR.stat().st_size,sha256=SHA)['ok'])
+            self.assertFalse(self.rpc('library',length=AIR.stat().st_size,sha256='0'*64)['ok'])
     def test_full_buffer_transfer(self):
         b=self.rpc('buffer',length=96)['handle'];data=bytes(range(96))
         self.assertFalse(self.rpc('upload',buffer=b,data=base64.b64encode(data[:-1]).decode())['ok'])
@@ -66,7 +117,7 @@ class HostTests(unittest.TestCase):
         contract=self.rpc('capabilities')['contract']
         self.assertEqual(contract['privateColorTextureAdditionalUsages'],[65541])
         self.assertEqual(contract['privateColorTextureUsageFormats'],[70,80,115])
-        self.assertEqual(contract['colorAttachmentFormats'],[70,80,115])
+        self.assertEqual(contract['colorAttachmentFormats'],[10,30,70,80,115,554])
         for fmt in (70,80,115):
             t=self.rpc('texture',width=67,height=39,format=fmt,usage=65541,storage=2)
             self.assertTrue(t['ok']);self.assertEqual(t['nativeStorageMode'],2)
@@ -82,7 +133,7 @@ class HostTests(unittest.TestCase):
 
     def test_private_mip_extent_budget_and_invalid_target_level(self):
         fields=dict(width=67,height=39,format=80,usage=5,storage=2,levels=4)
-        for bad in (dict(levels=0),dict(levels=8),dict(storage=0),dict(storage=1),dict(format=10),dict(type=7,depth=2)):
+        for bad in (dict(levels=0),dict(levels=8),dict(storage=0),dict(storage=1),dict(format=1,usage=1),dict(type=7,depth=2)):
             self.assertFalse(self.rpc('texture',**dict(fields,**bad))['ok'])
         t=self.rpc('texture',**fields)['handle']
         expected=sum(max(1,67>>i)*max(1,39>>i)*4 for i in range(4))

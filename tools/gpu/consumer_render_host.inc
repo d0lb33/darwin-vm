@@ -5,6 +5,7 @@ static BOOL RenderNumbers(id raw,NSUInteger count) {
     return YES;
 }
 static BOOL RenderUInt(id raw,uint64_t max) {uint64_t n;return Number(raw,&n)&&n<=max;}
+#include "consumer_blit_host.inc"
 static BOOL RenderBindingsFit(DVMEntry *pipeline,NSDictionary *vertex,NSDictionary *fragment,NSDictionary *textures,NSDictionary *samplers,NSMutableSet *written) {
     for(NSArray *need in pipeline.object[@"bindings"]){
         NSUInteger stage=[need[0] unsignedIntegerValue],type=[need[1] unsignedIntegerValue];id index=need[2];
@@ -33,7 +34,7 @@ static NSDictionary *RenderPipeline(DVMHost *host,uint64_t seq,NSDictionary *r) 
     id<MTLFunction> f=[r[@"fragmentHandle"] unsignedLongLongValue]?Entry(host,r[@"fragmentHandle"],@"function").object:[fl.object newFunctionWithName:r[@"fragment"]];
     if(!v||!f||v.functionType!=MTLFunctionTypeVertex||f.functionType!=MTLFunctionTypeFragment)return HostError(seq,EINVAL,@"render function stages");
     NSArray *c=r[@"color"],*attrs=r[@"attributes"],*layouts=r[@"layouts"];
-    if(!RenderNumbers(c,9)||(![c[0] isEqual:@80]&&![c[0] isEqual:@70]&&![c[0] isEqual:@115])||[c[1] unsignedIntValue]>1||
+    if(!RenderNumbers(c,9)||!RenderUInt(c[0],554)||!DVMColorFormat([c[0] unsignedIntegerValue])||[c[1] unsignedIntValue]>1||
        !RenderUInt(c[2],18)||!RenderUInt(c[3],18)||!RenderUInt(c[4],4)||!RenderUInt(c[5],18)||!RenderUInt(c[6],18)||!RenderUInt(c[7],4)||!RenderUInt(c[8],15)||
        ![r[@"depth"] isEqual:@0]||![r[@"stencil"] isEqual:@0]||![attrs isKindOfClass:NSArray.class]||attrs.count>DVM_RENDER_BUFFERS||![layouts isKindOfClass:NSArray.class]||layouts.count>DVM_RENDER_BUFFERS)
         return HostError(seq,ENOTSUP,@"render attachment/layout contract");
@@ -64,7 +65,7 @@ static NSDictionary *RenderPipeline(DVMHost *host,uint64_t seq,NSDictionary *r) 
         if(arg.index>=(arg.type==MTLArgumentTypeBuffer?DVM_RENDER_BUFFERS:arg.type==MTLArgumentTypeTexture?DVM_FRAGMENT_TEXTURES:DVM_FRAGMENT_SAMPLERS)||arg.arrayLength>1||(arg.access!=MTLArgumentAccessReadOnly&&!writableBuffer)||
            (arg.type!=MTLArgumentTypeBuffer&&arg.type!=MTLArgumentTypeTexture&&arg.type!=MTLArgumentTypeSampler)||
            (!stage&&arg.type!=MTLArgumentTypeBuffer)||
-           (arg.type==MTLArgumentTypeTexture&&arg.textureType!=MTLTextureType2D&&arg.textureType!=MTLTextureType3D))return HostError(seq,ENOTSUP,[NSString stringWithFormat:@"shader binding outside render contract: stage=%u name=%@ index=%lu type=%lu access=%lu array=%lu textureType=%lu",stage,arg.name,(unsigned long)arg.index,(unsigned long)arg.type,(unsigned long)arg.access,(unsigned long)arg.arrayLength,(unsigned long)(arg.type==MTLArgumentTypeTexture?arg.textureType:0)]);
+           (arg.type==MTLArgumentTypeTexture&&arg.textureType!=MTLTextureType1D&&arg.textureType!=MTLTextureType2D&&arg.textureType!=MTLTextureType3D))return HostError(seq,ENOTSUP,[NSString stringWithFormat:@"shader binding outside render contract: stage=%u name=%@ index=%lu type=%lu access=%lu array=%lu textureType=%lu",stage,arg.name,(unsigned long)arg.index,(unsigned long)arg.type,(unsigned long)arg.access,(unsigned long)arg.arrayLength,(unsigned long)(arg.type==MTLArgumentTypeTexture?arg.textureType:0)]);
         [bindings addObject:@[@(stage),@(arg.type),@(arg.index),@(arg.type==MTLArgumentTypeBuffer?arg.bufferDataSize:0),@(arg.access),@(arg.type==MTLArgumentTypeTexture?arg.textureType:0)]];
     }
     DVMEntry *entry;if(!Add(host,@"renderPipeline",@{@"state":p,@"layouts":layouts,@"format":c[0],@"bindings":bindings},&entry))return HostError(seq,ENOSPC,@"render state table");
@@ -98,7 +99,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     for(id h in readbacks){DVMEntry *e=Entry(host,h,@"buffer");if(!e||[seen containsObject:h]||e.textureBytes>DVM_BUFFER_BYTES-totalRead)return HostError(seq,EINVAL,@"render readback extent");[seen addObject:h];totalRead+=e.textureBytes;[reads addObject:e];}
     // Encode into an uncommitted command buffer. Validate every pass before any
     // upload or commit, so a bad later operation cannot execute an earlier pass.
-    id<MTLCommandBuffer> cb=[host.queue commandBuffer];NSUInteger draws=0;
+    id<MTLCommandBuffer> cb=[host.queue commandBuffer];NSUInteger draws=0,renderPasses=0,blitPasses=0;
 #ifdef DVM_RENDER_DIAGNOSTIC
     NSMutableArray *debugCaptures=[NSMutableArray array];NSUInteger debugPass=0;
 #endif
@@ -113,7 +114,12 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
         }
     }
     for(NSDictionary *pass in passes){
+        if([pass isKindOfClass:NSDictionary.class]&&[pass[@"kind"] isEqual:@"blit"]){
+            NSString *failure=EncodeBlit(host,cb,pass,written);if(failure)return HostError(seq,EINVAL,failure);
+            blitPasses++;continue;
+        }
         if(![pass isKindOfClass:NSDictionary.class]||![pass[@"kind"] isEqual:@"render"])return HostError(seq,EINVAL,@"mixed render batch");
+        renderPasses++;
         DVMEntry *target=Entry(host,pass[@"target"],@"texture");NSArray *clear=pass[@"clear"],*ops=pass[@"operations"];
         if(target.sharedRender){if(target.sharedRender.state!=DVMSharedAcquired)return HostError(seq,EBUSY,@"shared render target is not acquired");[sharedTargets addObject:target.sharedRender];}
         if(!target||[(id<MTLTexture>)target.object textureType]!=MTLTextureType2D||!([(id<MTLTexture>)target.object usage]&MTLTextureUsageRenderTarget)||!RenderUInt(pass[@"load"],2)||!RenderUInt(pass[@"store"],1)||!RenderNumbers(clear,4)||![ops isKindOfClass:NSArray.class]||ops.count>256)return HostError(seq,EINVAL,@"render pass descriptor");
@@ -210,17 +216,18 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     NSUInteger totalWritten=0;
     for(NSNumber *handle in written){DVMEntry *b=Entry(host,handle,@"buffer");if(!b||b.textureBytes>DVM_BUFFER_BYTES-totalWritten)return HostError(seq,ENOTSUP,@"render writeback budget");totalWritten+=b.textureBytes;}
     if(preflight)return @{@"ok":@YES,@"serialIndices":@(serialIndices),@"writtenBuffers":[[written allObjects] sortedArrayUsingSelector:@selector(compare:)]};
-    for(NSArray *transfer in transfers){DVMEntry *e=transfer[0];NSData *data=transfer[1];if([e.kind isEqual:@"buffer"])memcpy([(id<MTLBuffer>)e.object contents],data.bytes,data.length);else [(id<MTLTexture>)e.object replaceRegion:MTLRegionMake3D(0,0,0,e.width,e.height,[(id<MTLTexture>)e.object depth]) mipmapLevel:0 slice:0 withBytes:data.bytes bytesPerRow:e.row bytesPerImage:e.row*e.height];}
+    for(NSArray *transfer in transfers){DVMEntry *e=transfer[0];NSData *data=transfer[1];if([e.kind isEqual:@"buffer"])memcpy([(id<MTLBuffer>)e.object contents],data.bytes,data.length);else ReplaceTextureBytes(e.object,data.bytes,e.row);}
     [cb commit];[cb waitUntilCompleted];host.submissions++;
     if(cb.status!=MTLCommandBufferStatusCompleted){for(DVMSharedRender *shared in sharedTargets)shared.state=DVMSharedFailed;return NSErrorReply(seq,cb.error,@"render GPU completion");}
 #ifdef DVM_RENDER_DIAGNOSTIC
     DVMDebugSave(debugCaptures);
 #endif
     for(DVMSharedRender *shared in sharedTargets)shared.completedWrites++;
-    host.renderPasses+=passes.count;host.renderDraws+=draws;
+    host.renderPasses+=renderPasses;host.renderDraws+=draws;host.blitPasses+=blitPasses;
     NSMutableDictionary *result=[NSMutableDictionary dictionary];for(DVMEntry *e in reads)result[@(e.handle).stringValue]=[[NSData dataWithBytes:[(id<MTLBuffer>)e.object contents] length:e.textureBytes] base64EncodedStringWithOptions:0];
     fprintf(stderr,"DVM_DRIVER_RENDER seq=%llu passes=%lu draws=%lu status=%lu gpu_us=%.3f\n",(unsigned long long)seq,(unsigned long)passes.count,(unsigned long)draws,(unsigned long)cb.status,(cb.GPUEndTime-cb.GPUStartTime)*1e6);
     return @{@"seq":@(seq),@"ok":@YES,@"status":@(cb.status),@"buffers":result,@"passes":@(passes.count),@"draws":@(draws),@"gpu_us":@((cb.GPUEndTime-cb.GPUStartTime)*1e6),
+        @"renderPasses":@(renderPasses),@"blitPasses":@(blitPasses),
         @"writtenBuffers":[[written allObjects] sortedArrayUsingSelector:@selector(compare:)],@"gpu_start":@(cb.GPUStartTime),@"gpu_end":@(cb.GPUEndTime),@"kernel_start":@(cb.kernelStartTime),@"kernel_end":@(cb.kernelEndTime)};
 }
 static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
@@ -239,6 +246,7 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
     // encoded state and wait before inspecting GPU-produced index bytes.
     NSMutableArray *parts=[NSMutableArray array];
     for(NSDictionary *pass in r[@"commands"]){
+        if([pass[@"kind"] isEqual:@"blit"]){[parts addObject:pass];continue;}
         NSMutableArray *state=[NSMutableArray array],*passParts=[NSMutableArray array];
         for(NSArray *op in pass[@"operations"]){
             if([op[0] isEqual:@"draw"]||[op[0] isEqual:@"indexed"]){
@@ -252,7 +260,7 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
         [parts addObjectsFromArray:passParts];
     }
     NSDictionary *last=nil;double gpuUs=0;id gpuStart=nil,kernelStart=nil;
-    uint64_t initialPasses=host.renderPasses,initialDraws=host.renderDraws,initialSubmissions=host.submissions;
+    uint64_t initialPasses=host.renderPasses,initialBlits=host.blitPasses,initialDraws=host.renderDraws,initialSubmissions=host.submissions;
     for(NSUInteger i=0;i<parts.count;i++){
         NSMutableDictionary *part=[r mutableCopy];part[@"commands"]=@[parts[i]];
         part[@"uploads"]=i?@[]:r[@"uploads"];part[@"readbacks"]=i+1==parts.count?r[@"readbacks"]:@[];
@@ -266,8 +274,10 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
         if(!i){gpuStart=last[@"gpu_start"];kernelStart=last[@"kernel_start"];}
         gpuUs+=[last[@"gpu_us"] doubleValue];
     }
-    host.renderPasses=initialPasses+[r[@"commands"] count];
+    NSUInteger renderCount=0;for(NSDictionary *pass in r[@"commands"])renderCount+=[pass[@"kind"] isEqual:@"render"];
+    host.renderPasses=initialPasses+renderCount;
     NSMutableDictionary *result=[last mutableCopy];result[@"passes"]=@([r[@"commands"] count]);
+    result[@"renderPasses"]=@(renderCount);result[@"blitPasses"]=@(host.blitPasses-initialBlits);
     result[@"draws"]=@(host.renderDraws-initialDraws);result[@"writtenBuffers"]=check[@"writtenBuffers"];
     result[@"gpu_us"]=@(gpuUs);result[@"gpu_start"]=gpuStart;result[@"kernel_start"]=kernelStart;
     result[@"nativeCommandBuffers"]=@(parts.count);return result;

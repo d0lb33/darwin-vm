@@ -46,7 +46,7 @@ enum {
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
 @property(nonatomic, strong) NSMutableDictionary<NSNumber *, DVMEntry *> *entries;
 @property(nonatomic) uint64_t nextHandle, lastSeq, creations, submissions;
-@property(nonatomic) NSUInteger renderPasses,renderDraws;
+@property(nonatomic) NSUInteger renderPasses,renderDraws,blitPasses;
 @property(nonatomic) NSUInteger textureBytes,residentBytes;
 @property(nonatomic,strong) NSMutableData *renderStage;
 @property(nonatomic,copy) NSString *renderStageSHA;
@@ -174,19 +174,26 @@ static NSDictionary *Library(DVMHost *host, uint64_t seq, NSDictionary *request)
         !Number(request[@"length"], &wantedLength))
         return HostError(seq, EINVAL, @"library requires sha256 and length");
     NSCharacterSet *hex = [NSCharacterSet characterSetWithCharactersInString:@"0123456789abcdef"];
-    if ([[wanted lowercaseString] rangeOfCharacterFromSet:[hex invertedSet]].location != NSNotFound)
+    if ([wanted rangeOfCharacterFromSet:[hex invertedSet]].location != NSNotFound)
         return HostError(seq, EINVAL, @"sha256 must be lowercase hexadecimal");
+    if (!wantedLength || wantedLength > kMaxLibrary)
+        return HostError(seq, EINVAL, @"library length exceeds contract");
+    // Guest paths never select host files. Additional exact-guest AIR is
+    // explicitly provisioned by digest; still rehash bytes before native load.
+    const char *cache = getenv("DVM_DRIVER_LIBRARY_CACHE");
     const char *path = getenv("DVM_DRIVER_LIBRARY");
-    if (!path || !*path)
-        return HostError(seq, ENOENT, @"DVM_DRIVER_LIBRARY is unset");
-    NSData *bytes = [NSData dataWithContentsOfFile:@(path)
-                                           options:NSDataReadingMappedIfSafe
-                                             error:NULL];
+    NSData *bytes = nil;
+    if (cache && *cache) {
+        NSString *candidate = [@(cache) stringByAppendingPathComponent:[wanted stringByAppendingString:@".metallib"]];
+        bytes = [NSData dataWithContentsOfFile:candidate options:NSDataReadingMappedIfSafe error:NULL];
+    }
+    if (!bytes && path && *path)
+        bytes = [NSData dataWithContentsOfFile:@(path) options:NSDataReadingMappedIfSafe error:NULL];
     if (!bytes)
-        return HostError(seq, ENOENT, @"DVM_DRIVER_LIBRARY cannot be read");
+        return HostError(seq, ENOENT, @"requested AIR unavailable in configured host libraries");
     if (bytes.length > kMaxLibrary || bytes.length != wantedLength ||
         ![[HexDigest(bytes) lowercaseString] isEqualToString:wanted])
-        return HostError(seq, EILSEQ, @"DVM_DRIVER_LIBRARY does not match requested AIR");
+        return HostError(seq, EILSEQ, @"configured host library does not match requested AIR length/SHA256");
     NSError *error = nil;
     dispatch_data_t data =
         dispatch_data_create(bytes.bytes, bytes.length, nil, DISPATCH_DATA_DESTRUCTOR_DEFAULT);
@@ -249,7 +256,8 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     if(!Number(request[@"storage"]?:@0,&storage)||storage>MTLStorageModePrivate)
         return HostError(seq,EINVAL,@"unsupported texture storage mode");
     if(!Number(request[@"depth"]?:@1,&depth)||!depth||depth>kMaxDimension||!Number(request[@"type"]?:@2,&type)||
-       (type!=MTLTextureType2D&&type!=MTLTextureType3D)||(type==MTLTextureType2D&&depth!=1)||
+       (type!=MTLTextureType1D&&type!=MTLTextureType2D&&type!=MTLTextureType3D)||(type!=MTLTextureType3D&&depth!=1)||
+       (type==MTLTextureType1D&&height!=1)||
        (type==MTLTextureType3D&&usage!=MTLTextureUsageShaderRead))return HostError(seq,EINVAL,@"texture type/depth/usage contract");
     MTLPixelFormat pixel;
     NSUInteger bpp;
@@ -289,6 +297,11 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     host.textureBytes += bytes;
     return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(entry.handle), @"row" : @(entry.row), @"allocatedSize":@(texture.allocatedSize),@"nativeStorageMode":@(texture.storageMode)};
 }
+static void ReplaceTextureBytes(id<MTLTexture> texture,const void *bytes,NSUInteger row) {
+    BOOL oneD=texture.textureType==MTLTextureType1D;
+    [texture replaceRegion:MTLRegionMake3D(0,0,0,texture.width,texture.height,texture.depth)
+        mipmapLevel:0 slice:0 withBytes:bytes bytesPerRow:oneD?0:row bytesPerImage:oneD?0:row*texture.height];
+}
 static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) {
     DVMEntry *entry = Entry(host, request[@"texture"], @"texture");
     uint64_t row;
@@ -306,11 +319,7 @@ static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) 
     if (!entry || entry.sharedRender || entry.textureUpload || [(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
         data.length != row * entry.height * [(id<MTLTexture>)entry.object depth])
         return HostError(seq, EINVAL, @"upload must contain one complete texture");
-    MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
-    [(id<MTLTexture>)entry.object replaceRegion:region
-                                    mipmapLevel:0 slice:0
-                                      withBytes:data.bytes
-                                    bytesPerRow:(NSUInteger)row bytesPerImage:row*entry.height];
+    ReplaceTextureBytes(entry.object,data.bytes,row);
     return @{@"seq" : @(seq), @"ok" : @YES};
 }
 static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *request) {
@@ -333,8 +342,9 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
         return HostError(seq,EINVAL,@"texture read range");
     NSMutableData *data = [NSMutableData dataWithLength:entry.textureBytes];
     MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
+    BOOL oneD=[(id<MTLTexture>)entry.object textureType]==MTLTextureType1D;
     [(id<MTLTexture>)entry.object getBytes:data.mutableBytes
-                               bytesPerRow:entry.row bytesPerImage:entry.row*entry.height
+                               bytesPerRow:oneD?0:entry.row bytesPerImage:oneD?0:entry.row*entry.height
                                 fromRegion:region
                                mipmapLevel:0 slice:0];
     return @{
@@ -366,7 +376,7 @@ static NSDictionary *TextureChunk(DVMHost *host,uint64_t seq,NSDictionary *r){
     [e.textureUpload appendData:data];BOOL complete=e.textureUpload.length==e.textureBytes;
     if(complete){
         id<MTLTexture> texture=e.object;
-        [texture replaceRegion:MTLRegionMake3D(0,0,0,e.width,e.height,texture.depth) mipmapLevel:0 slice:0 withBytes:e.textureUpload.bytes bytesPerRow:e.row bytesPerImage:e.row*e.height];
+        ReplaceTextureBytes(texture,e.textureUpload.bytes,e.row);
         e.textureUpload=nil;
     }
     return @{@"seq":@(seq),@"ok":@YES,@"token":@(e.textureUploadToken),@"accepted":@(offset+data.length),@"complete":@(complete)};
@@ -413,7 +423,7 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
             @"stagedRenderBytes":@(host.renderStage.length),@"stagedRenderTransactions":@(host.renderStage?1:0)
         },
         @"creations" : @(host.creations),
-        @"submissions" : @(host.submissions),@"renderPasses":@(host.renderPasses),@"renderDraws":@(host.renderDraws)
+        @"submissions" : @(host.submissions),@"renderPasses":@(host.renderPasses),@"renderDraws":@(host.renderDraws),@"blitPasses":@(host.blitPasses)
     };
 }
 static NSDictionary *Buffer(DVMHost *host, uint64_t seq, NSDictionary *r) {
@@ -534,8 +544,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         if ([entry.kind isEqual:@"buffer"])
             memcpy([(id<MTLBuffer>)entry.object contents], data.bytes, data.length);
         else
-            [(id<MTLTexture>)entry.object replaceRegion:MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth])
-                mipmapLevel:0 slice:0 withBytes:data.bytes bytesPerRow:entry.row bytesPerImage:entry.row*entry.height];
+            ReplaceTextureBytes(entry.object,data.bytes,entry.row);
     }
     id<MTLCommandBuffer> cb = [host.queue commandBuffer];
     for (NSDictionary *v in validated) {
@@ -617,6 +626,21 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
             id<MTLTexture> probe=[host.device newTextureWithDescriptor:d];
             if(!probe||probe.usage!=d.usage||probe.storageMode!=d.storageMode)
                 return HostError(seq,ENOTSUP,@"host cannot honor private block-write color textures");
+        }
+        for(NSNumber *format in @[@10,@30,@554]){
+            MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format.unsignedIntegerValue width:16 height:16 mipmapped:YES];
+            d.storageMode=MTLStorageModePrivate;d.usage=5;
+            id<MTLTexture> probe=[host.device newTextureWithDescriptor:d];
+            if(!probe||probe.pixelFormat!=d.pixelFormat||probe.mipmapLevelCount!=d.mipmapLevelCount)
+                return HostError(seq,ENOTSUP,@"host cannot honor QuartzCore warmup color/mipmap formats");
+        }
+        for(NSNumber *format in @[@23,@25,@55,@105]){
+            MTLTextureDescriptor *lut=[MTLTextureDescriptor new];lut.textureType=MTLTextureType1D;
+            lut.pixelFormat=format.unsignedIntegerValue;lut.width=DVM_TEXTURE_DIMENSION;lut.height=lut.depth=1;
+            lut.storageMode=MTLStorageModeShared;lut.usage=MTLTextureUsageShaderRead;
+            id<MTLTexture> lutProbe=[host.device newTextureWithDescriptor:lut];
+            if(!lutProbe||lutProbe.textureType!=lut.textureType||lutProbe.pixelFormat!=lut.pixelFormat)
+                return HostError(seq,ENOTSUP,@"host cannot honor sampled 1D LUT profile");
         }
         return @{@"seq":@(seq),@"ok":@YES,@"contract":DVMContractProfile()};
     }
