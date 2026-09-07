@@ -20,7 +20,8 @@ def main():
     # create a backboardd process. This path is in its existing home directory.
     jobs[bb]['StandardOutputPath']='/private/var/mobile/dvm-system-metal.log'
     jobs[bb]['StandardErrorPath']='/private/var/mobile/dvm-system-metal.log'
-    runtime=json.loads((a.build/'build.json').read_text()).get('runtime_probe',False)
+    build=json.loads((a.build/'build.json').read_text())
+    runtime=build.get('runtime_probe',False) or build.get('session_reload',False)
     if runtime:jobs[bb].setdefault('EnvironmentVariables',{})['DVM_RUNNER_DEVELOPMENT']='1'
     (a.out/'launchd.plist').write_bytes(plistlib.dumps(cache,fmt=plistlib.FMT_BINARY,sort_keys=False))
     script='''#!/bin/sh
@@ -47,7 +48,19 @@ echo GPU_LOAD_INSTALLED
     if runtime:
         # Existing kernel path gate is exact. Only this disposable Data child
         # grants mobile ownership of the staging directory; baseline unchanged.
-        script=script.replace('sync\necho GPU_LOAD_INSTALLED','mount_apfs /dev/disk1s2 /mnt2\nmkdir -p /mnt2/tmp/dvm-gpu-runner\nchown 501:501 /mnt2/tmp/dvm-gpu-runner\nchmod 700 /mnt2/tmp/dvm-gpu-runner\nsync\necho GPU_LOAD_INSTALLED')
+        # CA_SYSTEM_LOAD_GUEST1 died on mkdir errno 2 with no evidence about
+        # which volume this was. Prove the mount is the Data volume and that
+        # the staging root exists here, in the install log, not a later boot.
+        stage='\n'.join(['mount_apfs /dev/disk1s2 /mnt2','test -d /mnt2/mobile',
+            'mkdir -p /mnt2/tmp/dvm-gpu-runner','chown 501:501 /mnt2/tmp/dvm-gpu-runner',
+            'chmod 700 /mnt2/tmp/dvm-gpu-runner','test -d /mnt2/tmp/dvm-gpu-runner',
+            # backboardd runs as mobile and may not see /private/var/tmp entries
+            # under its platform sandbox; prepare its home candidate as well.
+            'mkdir -p /mnt2/mobile/dvm-gpu-runner','chown 501:501 /mnt2/mobile/dvm-gpu-runner',
+            'chmod 700 /mnt2/mobile/dvm-gpu-runner','test -d /mnt2/mobile/dvm-gpu-runner',
+            'ls -ld /mnt2 /mnt2/tmp /mnt2/tmp/dvm-gpu-runner /mnt2/mobile/dvm-gpu-runner','echo GPU_LOAD_STAGE_ROOT_READY',
+            'sync','echo GPU_LOAD_INSTALLED'])
+        script=script.replace('sync\necho GPU_LOAD_INSTALLED',stage)
     (a.out/'gpu-load-install.sh').write_text(script)
     subprocess.run(['bash','-n',str(a.out/'gpu-load-install.sh')],check=True)
     image=a.out/'ramdisk.dmg';shutil.copyfile(repo/'firmware/ramdisk.dmg',image)

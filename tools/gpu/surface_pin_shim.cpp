@@ -29,7 +29,7 @@ extern "C" IOReturn dvm_surface_pin(IOUserClient *client,uint32_t selector,IOExt
     // Never expose the stock diagnostic methods through our transport nub.
     if(selector!=0x44565300
 #ifdef DVM_SURFACE_REGISTRY
-       &&selector!=0x44565301&&selector!=0x44565302
+       &&selector!=0x44565301&&selector!=0x44565302&&selector!=0x44565303
 #endif
        )return kIOReturnUnsupported;
     bool entitlement=false;
