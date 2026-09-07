@@ -127,6 +127,13 @@ larger objective and separate acceptance categories.
 
 ## Next loading experiment: scoped kernel development support
 
+**Update:** the [kernel development-loader experiments](gpu-development-loader-ios27.md)
+now prove stock TXM approval with the scoped service and helper `get-task-allow`.
+Staged revisions still fail signature validation, and trusted Data bundles still
+fail executable mapping. Four ordinary exact-guest GPU controls passed across
+two sessions. Investigate those remaining file-policy callbacks next; do not
+repeat the earlier process-flags-only experiment.
+
 The user authorized an opt-in kernel addition for testing on isolated boot
 artifacts. Stop searching for a remount/entitlement-only shortcut. The required
 contract is executable mapping of one staged, host-validated driver revision in

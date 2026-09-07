@@ -144,7 +144,13 @@ static Namespace *openMMIO(void *lib) {
     if(sigaction(SIGBUS,&action,NULL))fail("mmio-signal-handler");
     fprintf(stderr,"GPU_LOAD_DRIVER_MMIO_ADDRESSES memcpy=%p\n",dlsym(RTLD_DEFAULT,"memcpy"));
     Namespace *ns=[Namespace new];ns.closeClient=p_IOServiceClose;ns.unmap=p_IOConnectUnmapMemory64;
-    io_connect_t client=0;kern_return_t kr=p_IOServiceOpen(service,mach_task_self(),DVM_GPU_OPEN_TYPE,&client);
+    uint32_t openType=DVM_GPU_OPEN_TYPE;
+#ifdef DVM_TEST_RUNNER
+    const char *development=getenv("DVM_RUNNER_DEVELOPMENT");
+    if(development&&!strcmp(development,"1"))openType=0x44564d4c;
+#endif
+    io_connect_t client=0;kern_return_t kr=p_IOServiceOpen(service,mach_task_self(),openType,&client);
+    if(openType!=DVM_GPU_OPEN_TYPE)fprintf(stderr,"GPU_LOAD_DEVELOPMENT_OPEN type=%x result=%x\n",openType,kr);
     p_IOObjectRelease(service);if(kr)fail("mmio-open");ns.client=client;
     mach_vm_address_t ram=0,regs=0;mach_vm_size_t ramN=0,regsN=0;
     kr=p_IOConnectMapMemory64(client,DVM_GPU_MEMORY_TYPE,mach_task_self(),&ram,&ramN,kIOMapAnywhere|kIOMapCopybackCache);

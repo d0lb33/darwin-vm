@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import plistlib
 from pathlib import Path
 import re
 import shlex
@@ -15,7 +16,10 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('base',type=Path);p.add_argument('out',type=Path)
     p.add_argument('--bootstrap',action='store_true',help='incrementally rebuild the pinned mode-3 consumer supervisor; requires reinstall/reboot')
-    a=p.parse_args();a.base=a.base.resolve();a.out=a.out.resolve()
+    p.add_argument('--development-loader',action='store_true',help='add the dedicated test entitlement; requires --bootstrap and a new boot trust cache')
+    a=p.parse_args()
+    if a.development_loader and not a.bootstrap:p.error('development loader requires bootstrap revision')
+    a.base=a.base.resolve();a.out=a.out.resolve()
     repo=Path(__file__).resolve().parents[2];source=repo/'tools/gpu'
     started=time.monotonic();shutil.copytree(a.base,a.out)
     sdk=subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip()
@@ -58,7 +62,17 @@ def main():
         defines=['-DDVM_DRIVER_MMIO','-DDVM_DRIVER_BINARY','-DDVM_DRIVER_PRESENT',
                  '-DDVM_SHARED_SURFACE','-DDVM_SERVICE_POOL_CONTRACT','-DDVM_CA_PROBE',
                  '-DDVM_TEST_RUNNER',f'-DDVM_CA_FRAMES={frames}']
-        helper_changed=False
+        entitlements_path=a.out/'entitlements.plist'
+        before_entitlements=entitlements_path.read_bytes()
+        entitlements=plistlib.loads(before_entitlements)
+        if a.development_loader:
+            entitlements['org.darwin-vm.development-loader']=True
+            # Exact TXM 217.0.2, 0xfffffff017033618: the target address
+            # space needs this entitlement as well as Developer Mode.
+            entitlements['get-task-allow']=True
+        entitlements_path.write_bytes(plistlib.dumps(entitlements))
+        helper_changed=entitlements_path.read_bytes()!=before_entitlements
+        record['development_loader_entitlement']=bool(entitlements.get('org.darwin-vm.development-loader'))
         for name in ('driver_probe','driver_workload'):
             flags=common+guest+defines+(['-O3'] if name=='driver_probe' else [])
             scan=subprocess.check_output(['xcrun','clang',*flags,'-MM','-MT','dependencies',str(source/(name+'.m'))],text=True)

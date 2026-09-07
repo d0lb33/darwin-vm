@@ -68,8 +68,8 @@ class RunnerPeer(MMIOPeer):
             path.rename(directory/'queued.json')
             self.current = dict(job=job, payload=payload, out=directory,
                                 first_record=len(self.records), first_audit=self.audit_seen,
-                                started=time.monotonic())
-            return dict(action='stage',job=job['job'],bytes=len(payload),sha256=job['sha256'],test=job.get('test','builtin'),mode=job.get('mode','data'),
+                                started=time.monotonic(),first_serial=(self.out/'serial.log').stat().st_size)
+            return dict(action='stage',job=job['job'],bytes=len(payload),sha256=job['sha256'],test=job.get('test','builtin'),mode=job.get('mode','data'),development=job.get('development',False),
                         info=base64.b64encode(info).decode(),resources=base64.b64encode(resources).decode())
         if op == 'runnerFetch':
             c = self.current
@@ -96,13 +96,21 @@ class RunnerPeer(MMIOPeer):
             audits=[json.loads(x) for x in (self.out/'driver-audit.jsonl').read_text().splitlines()]
             audits=[x for x in audits if x['seq']>c['first_audit']]
             directory=c['out']
+            # Early dyld/open failures precede the child's MMIO audit mapping.
+            # Preserve the bounded UART interval as a separate evidence source.
+            with (self.out/'serial.log').open('rb') as serial:
+                serial.seek(c['first_serial']);uart=serial.read(4*1024*1024)
+                if serial.read(1):raise ValueError('job UART evidence exceeds bound')
+            (directory/'guest-loading.log').write_bytes(uart)
+            loading=[line for line in uart.decode(errors='replace').splitlines()
+                     if line.startswith(('GPU_LOAD_','DVM_DEV_LOADER '))]
             (directory/'driver-host.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in records))
             (directory/'driver-audit.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in audits))
             for r in records:
                 if 'upload_file' in r:shutil.copyfile(self.out/r['upload_file'],directory/r['upload_file'])
             (directory/'shared-ram.bin').write_bytes(self.ram[:])
             result=dict(c['result'],host_elapsed_seconds=c['ended']-c['started'],
-                        expected=c['job'].get('expected','observe'),verified=False)
+                        expected=c['job'].get('expected','observe'),verified=False,loading_evidence=loading)
             if result['spawn']==0 and result['exit']==0 and result['signal']==0:
                 from consumer_verify import verify_records
                 child=[x['line'] for x in audits]

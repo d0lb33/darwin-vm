@@ -73,8 +73,8 @@ static int DVMRunTestSupervisor(const char *executable) {
         }
         fprintf(stderr,"GPU_LOAD_RUNNER_STAGED job=%llu bytes=%lu sha256=%s staging_us=%.3f mode=%s\n",jobID,(unsigned long)length,[job[@"sha256"] UTF8String],(now()-staged)*1e6,mode.UTF8String);
         NSString *env=[@"DVM_DRIVER_BUNDLE_PATH=" stringByAppendingString:bundle];
-        BOOL package=[job[@"test"] isEqual:@"package"];
-        char *args[]={(char *)executable,"--worker",NULL};char *environment[]={(char *)env.UTF8String,package?"DVM_RUNNER_TEST=package":"DVM_RUNNER_TEST=builtin",NULL};
+        BOOL package=[job[@"test"] isEqual:@"package"],development=[job[@"development"] isEqual:@YES];
+        char *args[]={(char *)executable,"--worker",NULL};char *environment[]={(char *)env.UTF8String,package?"DVM_RUNNER_TEST=package":"DVM_RUNNER_TEST=builtin",development?"DVM_RUNNER_DEVELOPMENT=1":"DVM_RUNNER_DEVELOPMENT=0",NULL};
         pid_t child=0;double started=now();int rc=spawn(&child,executable,NULL,NULL,args,environment);
         int status=0;pid_t waited=-1;
         if(!rc){
