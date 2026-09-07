@@ -1,12 +1,13 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 2u
+#define DVM_CONTRACT_VERSION 3u
 #define DVM_TEXTURE_DIMENSION 512u
 #define DVM_BUFFER_BYTES (1024u*1024u)
 #define DVM_TEXTURE_BYTES (1024u*1024u)
 #define DVM_BUFFER_BINDING_ALIGNMENT 16u
 #define DVM_COMPUTE_BINDINGS 8u
+#define DVM_RENDER_BUFFERS 31u
 #define DVM_INLINE_BYTES 4096u
 #define DVM_TEXTURE_USAGE_MASK 7u
 #define DVM_MANAGED_PAGE_BYTES 16384u
@@ -49,7 +50,7 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"bounded-compute-and-resource-metadata-v2",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"bounded-render-buffer-coherence-v3",
         @"queries":@{DVM_CAPABILITY_QUERIES(DVM_BOOL_VALUE,DVM_UINT_VALUE)},
         @"computeBindings":@DVM_COMPUTE_BINDINGS,@"inlineBytes":@DVM_INLINE_BYTES,
         @"bufferBytes":@DVM_BUFFER_BYTES,@"textureBytes":@DVM_TEXTURE_BYTES,@"textureUsageMask":@DVM_TEXTURE_USAGE_MASK,
@@ -57,7 +58,7 @@ static inline NSDictionary *DVMContractProfile(void) {
         @"resourceMetadataVersion":@1,@"textureFormats":@[@10,@30,@70,@80,@115],
         @"logicalStorageModes":@[@0,@1],@"protectedResources":@NO,@"heaps":@NO,
         @"renderTimestampDomain":@"host-mach-absolute-seconds",
-        @"linearTextureUsageMask":@1,@"renderBufferAccess":@"read-only",
+        @"linearTextureUsageMask":@1,@"renderBufferAccess":@"vertex-completion-writeback",@"renderBuffers":@DVM_RENDER_BUFFERS,@"renderWritebackBytes":@DVM_BUFFER_BYTES,
         @"taskAttribution":@"opaque-guest-u32-metadata-host-process-owns-execution",
         @"residentManagedSurfaceExtensionVersion":@1,@"generalShaderCompilation":@NO};
 #undef DVM_BOOL_VALUE

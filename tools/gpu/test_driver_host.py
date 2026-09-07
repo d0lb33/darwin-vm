@@ -135,6 +135,11 @@ class HostTests(unittest.TestCase):
         self.assertEqual(base64.b64decode(self.rpc('read',texture=target)['data']),bytes([0,0,255,255])*4096)
 
 class DriverTests(unittest.TestCase):
+    def test_render_writeback_completion_and_ordering(self):
+        result=subprocess.run([str(BUILD/'test_render_writeback')],capture_output=True,text=True,timeout=15)
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertIn('PASS render writes:',result.stderr)
+
     def test_capability_batch_is_negotiated_and_bound_to_validation(self):
         result=subprocess.run([str(BUILD/'driver_capability_test')],capture_output=True,text=True,timeout=10)
         self.assertEqual(result.returncode,0,result.stderr)

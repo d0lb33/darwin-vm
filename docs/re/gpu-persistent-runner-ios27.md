@@ -5,6 +5,12 @@ iPhone17,3/T8140. SPTM/TXM, native SMC and migrated disk lineage are retained.
 Every runtime experiment uses a disposable child. The driver remains explicitly
 selected in the test process; software system composition remains available.
 
+The newer main/DCP QEMU and vertex-writeback driver are preserved separately in
+`~/dvm-artifacts/gpu-runtime-loader-main-ios27/`. Its manifest still uses the
+original installed control parent; select the matching backend per job. See
+[main integration and buffer coherence](gpu-main-sync-buffer-coherence-ios27.md)
+for the eight independently verified jobs and the remaining multi-frame failure.
+
 ## Contracts and stop conditions
 
 The supervisor boots once, waits for native display/input readiness, and accepts

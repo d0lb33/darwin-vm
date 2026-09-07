@@ -541,6 +541,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     if([op isEqual:@"sampler"])return Sampler(host,seq,request);
     if([op isEqual:@"renderSubmit"])return RenderSubmit(host,seq,request);
     if([op isEqual:@"writeRenderBuffer"])return WriteRenderBuffer(host,seq,request);
+    if([op isEqual:@"readRenderBuffer"])return ReadRenderBuffer(host,seq,request);
     if([op isEqual:@"function"])return SpecializedFunction(host,seq,request);
     if ([op isEqual:@"buffer"])
         return Buffer(host, seq, request);

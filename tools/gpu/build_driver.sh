@@ -96,6 +96,8 @@ xcrun clang "${flags[@]}" "$repo/tools/gpu/driver_host.m" -framework Metal -fram
 xcrun clang "${flags[@]}" "${partial[@]}" "${consumer_flags[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_workload.m" "$repo/tools/gpu/driver_client.m" -framework Metal -framework Foundation -framework IOSurface -framework QuartzCore -framework CoreGraphics -o "$out/driver_client"
 xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_contract_test.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/driver_contract_test"
 xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_capability_test.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/driver_capability_test"
+xcrun clang "${flags[@]}" "${partial[@]}" "$repo/tools/gpu/test_render_writeback.m" "$repo/tools/gpu/driver_guest.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/test_render_writeback"
+cp "$repo/tools/gpu/test_render_writeback.m" "$out/"
 cp "$repo/tools/gpu/present_"* "$repo/tools/gpu/blur_"* "$repo/tools/gpu/driver_"* "$repo/tools/gpu/build_driver.sh" "$out/"
 
 cp "$repo/qemu-sptm/include/xnu/darwin_gpu_transport.h" "$out/"

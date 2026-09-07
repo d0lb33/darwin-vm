@@ -591,6 +591,28 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                     if (![returned isKindOfClass:NSDictionary.class] || returned.count != (render?0:buffers.count))
                         reject(@"bad batched readback table");
                     NSMutableArray *decoded = [NSMutableArray array];
+                    NSMutableArray *writtenObjects = [NSMutableArray array], *writtenData = [NSMutableArray array];
+                    if(render){
+                        NSArray *written=r[@"writtenBuffers"]?:@[];
+                        if(![written isKindOfClass:NSArray.class]||written.count>buffers.count)reject(@"render writeback table");
+                        NSMutableArray *seen=[NSMutableArray array];NSUInteger total=0;
+                        for(id handle in written){
+                            DVMBuffer *owned=nil;
+                            for(DVMBuffer *b in buffers)if([b.handle isEqual:handle])owned=b;
+                            if(!owned||[seen containsObject:handle]||owned.length>DVM_BUFFER_BYTES-total)reject(@"render writeback ownership/budget");
+                            [seen addObject:handle];total+=owned.length;
+                            NSMutableData *data=[NSMutableData dataWithLength:owned.length];
+                            for(NSUInteger offset=0;offset<owned.length;offset+=32768){
+                                NSUInteger length=MIN(32768,owned.length-offset);
+                                NSDictionary *part=self.commandQueue.owner.transport(@{@"op":@"readRenderBuffer",@"buffer":handle,@"offset":@(offset),@"length":@(length)},&e);
+                                id encoded=part[@"data"];
+                                NSData *chunk=[encoded isKindOfClass:NSString.class]?[[NSData alloc] initWithBase64EncodedString:encoded options:0]:nil;
+                                if(![part[@"buffer"] isEqual:handle]||![part[@"offset"] isEqual:@(offset)]||chunk.length!=length)reject(e.description?:@"render writeback chunk");
+                                memcpy((uint8_t *)data.mutableBytes+offset,chunk.bytes,length);
+                            }
+                            [writtenObjects addObject:owned];[writtenData addObject:data];
+                        }
+                    }
                     for (DVMBuffer *b in render?@[]:buffers) {
                         id encoded = returned[b.handle.stringValue];
                         NSData *d = self.commandQueue.owner.binaryPayloads&&!render
@@ -605,6 +627,10 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                         output.completedShadow=pixels;
                     }
                     // Validate all readbacks before publishing any CPU shadow.
+                    for(NSUInteger i=0;i<writtenObjects.count;i++){
+                        DVMBuffer *b=writtenObjects[i];NSData *data=writtenData[i];
+                        memcpy(b.contents,data.bytes,data.length);
+                    }
                     for (NSUInteger i = 0; !render && i < buffers.count; i++) {
                         DVMBuffer *b = buffers[i]; NSData *d = decoded[i];
                         memcpy(b.contents, d.bytes, d.length);

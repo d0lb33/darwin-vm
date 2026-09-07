@@ -30,7 +30,7 @@ static id<MTLRenderPipelineState> DVMNewRenderPipeline(DVMDevice *device,MTLRend
     MTLRenderPipelineColorAttachmentDescriptor *c=d.colorAttachments[0];
     NSDictionary *r=[device call:@{@"op":@"renderPipeline",@"vertexLibrary":v.library.handle,@"vertex":v.name,@"fragmentLibrary":f.library.handle,@"fragment":f.name,
         @"color":@[@(c.pixelFormat),@(c.blendingEnabled),@(c.sourceRGBBlendFactor),@(c.destinationRGBBlendFactor),@(c.rgbBlendOperation),@(c.sourceAlphaBlendFactor),@(c.destinationAlphaBlendFactor),@(c.alphaBlendOperation),@(c.writeMask)],
-        @"vertexHandle":v.handle?:@0,@"fragmentHandle":f.handle?:@0,
+        @"vertexHandle":v.handle?:@0,@"fragmentHandle":f.handle?:@0,@"bufferWriteback":@YES,
         @"depth":@(d.depthAttachmentPixelFormat),@"stencil":@(d.stencilAttachmentPixelFormat),@"attributes":attributes,@"layouts":layouts} error:err];
     if(!r)return nil;DVMRenderPipeline *p=[DVMRenderPipeline new];p.owner=device;p.handle=r[@"handle"];p.functions=@[v,f];p.label=d.label;return p;
 }
@@ -66,7 +66,7 @@ static id<MTLSamplerState> DVMNewSampler(DVMDevice *device,MTLSamplerDescriptor 
 - (void)setScissorRect:(MTLScissorRect)s {[self record:@[@"scissor",@(s.x),@(s.y),@(s.width),@(s.height)]];}
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a {[self record:@[@"blend",@(r),@(g),@(b),@(a)]];}
 - (void)buffer:(id<MTLBuffer>)b offset:(NSUInteger)o index:(NSUInteger)i stage:(NSString *)stage {
-    if(i>=8||(b?(o>=b.length||o%16):o!=0))reject(@"render buffer bounds/alignment");
+    if(i>=DVM_RENDER_BUFFERS||(b?(o>=b.length||o%16):o!=0))reject(@"render buffer bounds/alignment");
     [self record:@[stage,b?[self own:b kind:DVMBuffer.class]:@0,@(o),@(i)]];
     NSMutableDictionary *bindings=[stage isEqual:@"vertexBuffer"]?self.vertexBindings:self.fragmentBindings;
     if(b)bindings[@(i)]=b;else [bindings removeObjectForKey:@(i)];
@@ -82,15 +82,15 @@ static id<MTLSamplerState> DVMNewSampler(DVMDevice *device,MTLSamplerDescriptor 
     [self buffer:b offset:o index:i stage:@"fragmentBuffer"];
 }
 - (void)setVertexBuffers:(id<MTLBuffer> const __unsafe_unretained *)buffers offsets:(const NSUInteger *)offsets withRange:(NSRange)range {
-    if(range.location>8||range.length>8-range.location||(!buffers&&range.length)||(!offsets&&range.length))reject(@"vertex buffer range");
+    if(range.location>DVM_RENDER_BUFFERS||range.length>DVM_RENDER_BUFFERS-range.location||(!buffers&&range.length)||(!offsets&&range.length))reject(@"vertex buffer range");
     for(NSUInteger j=0;j<range.length;j++)[self setVertexBuffer:buffers[j] offset:offsets[j] atIndex:range.location+j];
 }
 - (void)setFragmentBuffers:(id<MTLBuffer> const __unsafe_unretained *)buffers offsets:(const NSUInteger *)offsets withRange:(NSRange)range {
-    if(range.location>8||range.length>8-range.location||(!buffers&&range.length)||(!offsets&&range.length))reject(@"fragment buffer range");
+    if(range.location>DVM_RENDER_BUFFERS||range.length>DVM_RENDER_BUFFERS-range.location||(!buffers&&range.length)||(!offsets&&range.length))reject(@"fragment buffer range");
     for(NSUInteger j=0;j<range.length;j++)[self setFragmentBuffer:buffers[j] offset:offsets[j] atIndex:range.location+j];
 }
 - (void)bytes:(const void *)p length:(NSUInteger)n index:(NSUInteger)i stage:(NSString *)stage {
-    if(!p||!n||n>DVM_INLINE_BYTES||i>=8)reject(@"render inline bounds");
+    if(!p||!n||n>DVM_INLINE_BYTES||i>=DVM_RENDER_BUFFERS)reject(@"render inline bounds");
     [self record:@[stage,[[NSData dataWithBytes:p length:n] base64EncodedStringWithOptions:0],@(i)]];
     [([stage isEqual:@"vertexBytes"]?self.vertexBindings:self.fragmentBindings) removeObjectForKey:@(i)];
 }

@@ -23,12 +23,12 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Discovery | Explicit process-local device factory | Exact guest signed bundle load and CARenderer use | Normal plugin discovery, service-global context, system compositor adoption |
 | Capabilities | Versioned forwarding profile and 20 related scalar getters | Exact guest all 20; host mismatch rejection | Full GPU-family predicates remain false; wider feature queries incomplete |
 | Libraries | Requested guest URL/data identity, exact AIR forwarded to configured host library | Exact unmodified AIR, real function specialization and render execution | Host currently needs matching local AIR cache; general multi-library delivery pending |
-| Functions/render pipelines | Named/indexed constants; general vertex/fragment pipeline descriptors within documented bounds | Exact QuartzCore specialized vertex/fragment pair; 65 constants | Linked functions, archives, writable render bindings, tile/MSAA/depth targets |
-| Command encoding | Direct indexed/nonindexed draws, state and binding serialization, one in-flight command | Exact 64×64 red CALayer, one indexed draw, exact pixels, zero objects | Offset updates, bulk bindings and unbinding implemented; host changing-scene first frame passes. Next prewarm pipeline requires read/write vertex-buffer bindings, currently rejected |
+| Functions/render pipelines | Named/indexed constants; general vertex/fragment pipeline descriptors within documented bounds | Exact QuartzCore specialized vertex/fragment pair; 65 constants | Linked functions, archives, writable fragment bindings, tile/MSAA/depth targets |
+| Command encoding | Direct indexed/nonindexed draws, state and binding serialization, one in-flight command | Exact 64×64 red CALayer, one indexed draw, exact pixels, zero objects | Offset/bulk bindings and unbinding implemented; 31 buffer slots and vertex writeback tested on host. Multi-frame rehearsal now stops at fragment texture slot 8 |
 | Compute | Existing luma/blur and bounded compute submission | Exact compute/copy controls and managed blur | Pipeline allowlist remains a development restriction; replace with general validated reflection before claiming broad compute |
-| Resources | Owned buffer shadows, 5 texture formats, allocation/protection metadata, read-only linear views | Host alias coherence/bounds/parent lifetime; exact CARenderer allocation | Dirty tracking, general IOSurface import/planes, heaps/private/memoryless storage |
+| Resources | Owned buffer shadows, 5 texture formats, allocation/protection metadata, read-only linear views | Host alias coherence/bounds/parent lifetime, chunked vertex writeback and atomic error publication; exact CARenderer allocation | Dirty tracking, general IOSurface import/planes, heaps/private/memoryless storage |
 | Presentation | Separate managed shared-page IOSurface extension with native retirement | Earlier exact displayed blur and input recovery | CARenderer output is currently offscreen; generic render target adoption unknown |
-| Synchronization | Serial RPC, completion callbacks, strong resource retention | Exact single-consumer completion and retirement; host failure tests | Multiple queues/in-flight buffers, events/fences, reset; timestamp clock translation |
+| Synchronization | Serial RPC, completion callbacks, strong resource retention | Exact single-consumer completion and retirement; host ordered vertex writes, CPU/GPU reuse and failure tests | Multiple queues/in-flight buffers, events/fences, reset; timestamp clock translation |
 | Checkpoint | Active GPU migration blocked | Copied-pixel historical checkpoints only | Live host resources and executing commands cannot be checkpointed |
 | Iteration | Fresh-process supervisor, signed package staging, incremental build and captured-submission replay tools; opt-in test-kernel RX mapping exception | Exact guest installed controls; boot-trusted driver staged on Data executes actual CARenderer with verified pixels; 27-request host replay | Two code-distinct runtime revisions now pass real guest CARenderer in one uninstrumented boot using native OOP-JIT signatures plus opt-in xART fixture; global loading and checkpoints remain outside scope |
 | Performance | Separate first-use and host GPU timing; prior sustained managed-blur controls | Prior displayed blur missed target pacing; red draw is not a benchmark | Native Liquid Glass/scrolling and sustained CARenderer performance unproven |
@@ -50,8 +50,21 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
    termination evidence for failures. Stop an individual child after 90 seconds;
    stop the session explicitly or at its recorded overall deadline. Do not
    interpret the absent trust-cache hash as proof that loading must fail.
-2. **Changing scene:** one retained renderer/target with changing geometry and
-   overlapping opaque layers. Host rehearsal passes the first three-draw frame after the offset/bulk-binding batch. Subsequent QuartzCore prewarming aborts on a vertex `vertex_buffer` at index 1 reported as read/write by host reflection (`CA_SEQUENCE_HOST4`). Implement buffer coherence before accepting writable inputs; compare native and forwarded host output, then run the exact guest suite in the persistent runner. Add transparency, images, clipping and transforms to the same suite.
+2. **Changing scene:** the first three-layer frame passes in the host rehearsal.
+   Vertex-buffer writeback and 31 buffer slots are now implemented and tested;
+   exact-guest dynamically loaded revision 5 still passes the red control.
+   The next host prewarm failure is fragment texture `img_tex_1C` at slot 8
+   (`CA_BUFFER_SEQUENCE_HOST5`), beyond the eight-slot contract. Inventory the
+   related texture/sampler requirements and extend them together, including
+   bounds and capability negotiation tests. Package-test scene verification is
+   needed to avoid changing the pinned helper for revised capability limits.
+   Then compare native/forwarded output and run the exact guest scene.
+
+Main/DCP integration, the failed and corrected vertex barrier experiment,
+current evidence and reproduction are in
+[main integration and buffer coherence](gpu-main-sync-buffer-coherence-ios27.md).
+Writable fragment buffers and GPU-written linear-texture/index aliases still
+require additional synchronization work; they fail explicitly today.
 
 Keep correctness, completion, lifetime, display preservation and sustained
 performance as distinct verdicts. Capture generated upload bytes, descriptors,
