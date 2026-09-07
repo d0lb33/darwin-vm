@@ -70,12 +70,7 @@ static unsigned nativeLibraryCalls;
 #import "driver_api.h"
 #endif
 static void require(BOOL ok,const char *why){if(!ok){fprintf(stderr,"UIKIT_HOST_FAIL %s\n",why);exit(1);}}
-static UIWindowScene *DVMUIKitHostScene;
-static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
-    require(argc==2,"output directory");
-    CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
-    id<MTLDevice> device=MTLCreateSystemDefaultDevice();require(device!=nil,"native Metal device");
-#ifndef DVM_UIKIT_FORWARDED
+static void DVMInstallNativeObservers(id<MTLDevice> device){
     Method replacement=class_getInstanceMethod(NSObject.class,@selector(newDVMDiagnosticLibraryWithURL:error:));
     Class cls=[device class];
     require(class_addMethod(cls,@selector(newDVMDiagnosticLibraryWithURL:error:),method_getImplementation(replacement),method_getTypeEncoding(replacement)),"native library observer");
@@ -83,9 +78,16 @@ static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
     replacement=class_getInstanceMethod(NSObject.class,@selector(newDVMDiagnosticPipelineWithDescriptor:error:));
     require(class_addMethod(cls,@selector(newDVMDiagnosticPipelineWithDescriptor:error:),method_getImplementation(replacement),method_getTypeEncoding(replacement)),"native pipeline observer");
     method_exchangeImplementations(class_getInstanceMethod(cls,@selector(newRenderPipelineStateWithDescriptor:error:)),class_getInstanceMethod(cls,@selector(newDVMDiagnosticPipelineWithDescriptor:error:)));
-#endif
-    if(getenv("DVM_UIKIT_NATIVE_CONTRACT"))DVMNativeContract([device class]);
+}
+static UIWindowScene *DVMUIKitHostScene;
+static void (^DVMUIKitHostRender)(void);
+static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
+    require(argc==2,"output directory");
+    CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+    id<MTLDevice> device=MTLCreateSystemDefaultDevice();require(device!=nil,"native Metal device");
+    if(getenv("DVM_UIKIT_NATIVE_CONTRACT")&&getenv("DVM_UIKIT_NATIVE_CONTRACT_BEFORE_UI"))DVMNativeContract([device class]);
     id<MTLCommandQueue> queue=[device newCommandQueue];
+    id<MTLDevice> nativeDevice=device;id<MTLCommandQueue> nativeQueue=queue;
 #ifdef DVM_UIKIT_FORWARDED
     DVMHost *host=[DVMHost new];host.device=device;host.queue=queue;host.entries=[NSMutableDictionary dictionary];
     NSString *capture=[@(argv[1]) stringByAppendingPathComponent:@"requests.jsonl"];
@@ -128,6 +130,21 @@ static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
     // nested runUntilDate inside the main-queue callback blocks queued UIKit
     // work and accessibility requests, so it is not a normal window control.
     void (^render)(void)=^{@autoreleasepool{
+    BOOL paired=getenv("DVM_UIKIT_PAIRED_NATIVE")!=NULL;
+#ifdef DVM_UIKIT_FORWARDED
+    if(paired){
+        // Validate the actual backend before the native reference replaces
+        // process-class capability predicates. Do not bypass the real probe.
+        (void)[(id<DVMCapabilityQueries>)device hasUnifiedMemory];
+        fprintf(stderr,"UIKIT_HOST_PAIRED_BACKEND validated_before_native_test_overrides=1\n");
+    }
+#endif
+#ifndef DVM_UIKIT_FORWARDED
+    DVMInstallNativeObservers(nativeDevice);
+#else
+    if(paired)DVMInstallNativeObservers(nativeDevice);
+#endif
+    if(paired||(getenv("DVM_UIKIT_NATIVE_CONTRACT")&&!getenv("DVM_UIKIT_NATIVE_CONTRACT_BEFORE_UI")))DVMNativeContract([nativeDevice class]);
     UIKitInspect(view.layer,"after-display",0);
     BOOL displayed=getenv("DVM_UIKIT_DISPLAY_FRAME")!=NULL;
     unsigned width=displayed?1179:320,height=displayed?2556:480;
@@ -148,7 +165,11 @@ static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
     id<MTLTexture> target=[device newTextureWithDescriptor:d];require(target!=nil,"target");
     CARenderer *renderer=[CARenderer rendererWithMTLTexture:target options:@{kCARendererMetalCommandQueue:queue,kCARendererColorSpace:(__bridge id)space,@"kCARendererFlags":@2}];
     require(renderer!=nil,"renderer");
-    [CATransaction begin];[CATransaction setDisableActions:YES];renderer.layer=root;renderer.bounds=root.bounds;
+    id<MTLTexture> pairedTarget=paired?[nativeDevice newTextureWithDescriptor:d]:nil;
+    CARenderer *pairedRenderer=paired?[CARenderer rendererWithMTLTexture:pairedTarget options:@{kCARendererMetalCommandQueue:nativeQueue,kCARendererColorSpace:(__bridge id)space,@"kCARendererFlags":@2}]:nil;
+    if(paired)require(pairedTarget&&pairedRenderer,"paired native renderer");
+    [CATransaction begin];[CATransaction setDisableActions:YES];if(!paired)renderer.layer=root;renderer.bounds=root.bounds;
+    pairedRenderer.bounds=root.bounds;
     [CATransaction commit];[CATransaction flush];
     fprintf(stderr,"UIKIT_HOST_CONTENTS flipped=%u\n",view.layer.contentsAreFlipped);
     unsigned frames=getenv("DVM_UIKIT_HOST_FRAMES")?(unsigned)atoi(getenv("DVM_UIKIT_HOST_FRAMES")):1;
@@ -163,12 +184,27 @@ static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
         card.alpha=frame%2?.7:1;
     }
     [CATransaction commit];[CATransaction flush];
+    void (^nativeFrame)(void)=^{
+        // A CALayer tree belongs to one CARenderer context at a time. Transfer
+        // it explicitly; simultaneous assignment made the first renderer empty.
+        [CATransaction begin];[CATransaction setDisableActions:YES];renderer.layer=nil;pairedRenderer.layer=root;[CATransaction commit];[CATransaction flush];
+        [pairedRenderer beginFrameAtTime:frameTime+frame/60.0 timeStamp:NULL];[pairedRenderer addUpdateRect:root.bounds];[pairedRenderer render];[pairedRenderer endFrame];
+        id<MTLCommandBuffer> nativeFence=[nativeQueue commandBuffer];[nativeFence commit];[nativeFence waitUntilCompleted];
+        require(nativeFence.status==MTLCommandBufferStatusCompleted,"paired native completion");
+        NSMutableData *bytes=[NSMutableData dataWithLength:width*height*4];
+        [pairedTarget getBytes:bytes.mutableBytes bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
+        require([bytes writeToFile:[out stringByAppendingPathComponent:[NSString stringWithFormat:@"paired-native-frame-%u.bgra",frame]] atomically:YES],"paired native pixels");
+        fprintf(stderr,"UIKIT_HOST_PAIRED_NATIVE frame=%u time=%.9f completed=1 order=%s same_layer=1\n",frame,frameTime+frame/60.0,getenv("DVM_UIKIT_PAIRED_NATIVE"));
+    };
+    if(paired&&!strcmp(getenv("DVM_UIKIT_PAIRED_NATIVE"),"first"))nativeFrame();
+    if(paired){[CATransaction begin];[CATransaction setDisableActions:YES];pairedRenderer.layer=nil;renderer.layer=root;[CATransaction commit];[CATransaction flush];}
     [renderer beginFrameAtTime:frameTime+frame/60.0 timeStamp:NULL];[renderer addUpdateRect:root.bounds];[renderer render];[renderer endFrame];
     id<MTLCommandBuffer> fence=[queue commandBuffer];[fence commit];[fence waitUntilCompleted];
     require(fence.status==MTLCommandBufferStatusCompleted,"completion");
     [target getBytes:gpu.mutableBytes bytesPerRow:width*4 fromRegion:MTLRegionMake2D(0,0,width,height) mipmapLevel:0];
     require([gpu writeToFile:[out stringByAppendingPathComponent:[NSString stringWithFormat:@"gpu-frame-%u.bgra",frame]] atomically:YES],"frame output");
     fprintf(stderr,"UIKIT_HOST_FRAME index=%u completed=1 model_opacity=%.3f time_offset=%.9f\n",frame,view.layer.opacity,frame/60.0);
+    if(paired&&!strcmp(getenv("DVM_UIKIT_PAIRED_NATIVE"),"last"))nativeFrame();
     }
     CGContextRef context=CGBitmapContextCreate(cpu.mutableBytes,width,height,8,width*4,space,kCGImageAlphaPremultipliedFirst|kCGBitmapByteOrder32Little);
     CGContextTranslateCTM(context,0,height);CGContextScaleCTM(context,1,-1);[root renderInContext:context];
@@ -178,14 +214,12 @@ static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
     for(unsigned i=0;i<width*height*4;i++){unsigned delta=abs((int)a[i]-(int)b[i]);different+=delta>2;maxError=MAX(maxError,delta);totalError+=delta;}
     fprintf(stderr,"UIKIT_HOST_COMPARE different=%u max=%u total=%llu scope=host-catalyst-only\n",different,maxError,(unsigned long long)totalError);
     if(getenv("DVM_UIKIT_NATIVE_AIR"))require(nativeLibraryCalls>0,"native AIR control was exercised");
-    renderer.layer=nil;renderer=nil;window.hidden=YES;window.rootViewController=nil;CGContextRelease(context);CGColorSpaceRelease(space);
+    renderer.layer=nil;renderer=nil;pairedRenderer.layer=nil;pairedRenderer=nil;window.hidden=YES;window.rootViewController=nil;CGContextRelease(context);CGColorSpaceRelease(space);
     if(window)exit(0);
     }};
     if(window){
-        unsigned seconds=getenv("DVM_UIKIT_WINDOW_HOLD")?(unsigned)atoi(getenv("DVM_UIKIT_WINDOW_HOLD")):0;
-        require(seconds==0||seconds==20||seconds==45,"bounded native window capture");
-        fprintf(stderr,"UIKIT_HOST_WINDOW_CAPTURE_READY pid=%d seconds=%u before_offscreen_renderer=1 natural_event_loop=1\n",getpid(),seconds);
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((seconds+.1)*NSEC_PER_SEC)),dispatch_get_main_queue(),render);
+        DVMUIKitHostRender=render;
+        fprintf(stderr,"UIKIT_HOST_WINDOW_PREPARED awaiting_scene_activation=1\n");
     }else render();
 }}
 
@@ -198,6 +232,15 @@ static const char **DVMUIKitHostArgv;
 @implementation DVMUIKitHostDelegate
 - (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
     (void)application;(void)options;
+    fprintf(stderr,"UIKIT_HOST_APPLICATION_LAUNCHED\n");
+    dispatch_async(dispatch_get_main_queue(),^{
+        if(!application.connectedScenes.count){
+            fprintf(stderr,"UIKIT_HOST_SCENE_REQUEST initial_scene=1\n");
+            [application requestSceneSessionActivation:nil userActivity:nil options:nil errorHandler:^(NSError *error){
+                fprintf(stderr,"UIKIT_HOST_SCENE_ERROR %s\n",error.description.UTF8String);exit(1);
+            }];
+        }
+    });
     return YES;
 }
 @end
@@ -206,17 +249,26 @@ static const char **DVMUIKitHostArgv;
 @implementation DVMUIKitHostSceneDelegate
 - (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
     (void)session;(void)options;require([scene isKindOfClass:UIWindowScene.class],"window scene lifecycle");
+    require(DVMUIKitHostScene==nil,"probe accepts exactly one connected scene");
     DVMUIKitHostScene=(UIWindowScene *)scene;
+    fprintf(stderr,"UIKIT_HOST_SCENE_CONNECTED state=%ld\n",(long)scene.activationState);
+    DVMRunUIKitHost(DVMUIKitHostArgc,DVMUIKitHostArgv);
 }
 - (void)sceneDidBecomeActive:(UIScene *)scene {
     static BOOL rendered=NO;if(rendered)return;rendered=YES;
     fprintf(stderr,"UIKIT_HOST_SCENE_ACTIVE state=%ld\n",(long)scene.activationState);
-    dispatch_async(dispatch_get_main_queue(),^{DVMRunUIKitHost(DVMUIKitHostArgc,DVMUIKitHostArgv);});
+    require(DVMUIKitHostRender!=nil,"window prepared before activation");
+    unsigned seconds=getenv("DVM_UIKIT_WINDOW_HOLD")?(unsigned)atoi(getenv("DVM_UIKIT_WINDOW_HOLD")):0;
+    require(seconds==0||seconds==20||seconds==45,"bounded native window capture");
+    fprintf(stderr,"UIKIT_HOST_WINDOW_CAPTURE_READY pid=%d seconds=%u before_offscreen_renderer=1 natural_event_loop=1\n",getpid(),seconds);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((seconds+.1)*NSEC_PER_SEC)),dispatch_get_main_queue(),DVMUIKitHostRender);
+    DVMUIKitHostRender=nil;
 }
 @end
 int main(int argc,const char **argv){@autoreleasepool{
     if(getenv("DVM_UIKIT_WINDOW")){
         DVMUIKitHostArgc=argc;DVMUIKitHostArgv=argv;
+        fprintf(stderr,"UIKIT_HOST_APPLICATION_MAIN pid=%d\n",getpid());
         return UIApplicationMain(argc,(char **)argv,nil,NSStringFromClass(DVMUIKitHostDelegate.class));
     }
     DVMRunUIKitHost(argc,argv);return 0;

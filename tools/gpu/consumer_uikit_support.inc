@@ -39,6 +39,8 @@ static void UIKitInspect(CALayer *layer, const char *stage, unsigned depth){
         layer.bounds.size.width,layer.bounds.size.height,layer.contents?NSStringFromClass([layer.contents class]).UTF8String:"nil",
         layer.needsDisplay,layer.geometryFlipped,layer.contentsAreFlipped,layer.contentsScale);
     CGRect frame=layer.frame;
+    fprintf(stderr,"GPU_LOAD_UIKIT_STATE stage=%s depth=%u opacity=%.6f animations=%.160s\n",
+        stage,depth,layer.opacity,UIKitOneLine(layer.animationKeys).UTF8String);
     fprintf(stderr,"GPU_LOAD_UIKIT_GEOMETRY stage=%s depth=%u frame=%.3f,%.3f,%.3f,%.3f corner_radius=%.3f corner_curve=%s masks=%u edge_mask=%u edge_aa=%u\n",
         stage,depth,frame.origin.x,frame.origin.y,frame.size.width,frame.size.height,
         layer.cornerRadius,layer.cornerCurve.UTF8String,layer.masksToBounds,(unsigned)layer.edgeAntialiasingMask,layer.allowsEdgeAntialiasing);
