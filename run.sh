@@ -9,6 +9,9 @@ set -euo pipefail
 #   FBMODE        text | graphics              default: text (verbose console on screen)
 #   VNC           vnc display spec             default: :0  (used when DISPLAY_MODE=vnc)
 #   BOOT_ARGS     override the XNU boot-args entirely
+#   DVM_PMGR      1 (default): restore boots keep the PMGR node and run six
+#                 vCPUs so the stock kernel starts the other CPUs itself;
+#                 0: single vCPU, no PMGR (the pre-2026-09-06 restore shell)
 #
 # With a display, XNU is booted with serial=2 (serial *input*, console *output*
 # on the screen), so the console shows up in the window and keys typed into the
@@ -34,7 +37,7 @@ usage: $0 [--restore] [--nographic] [--vnc [:N]] [--sdl] [--cocoa] [--fb WxH[@sc
   --graphics       boot graphics (progress spinner) instead of the text console
 
 The native-SMC system disk is the default when $SMC_MANIFEST exists.
-DISPLAY_MODE, FB and VNC select the display. FBMODE and BOOT_ARGS apply to restore boots.
+DISPLAY_MODE, FB and VNC select the display. FBMODE, BOOT_ARGS and DVM_PMGR apply to restore boots.
 USAGE
     exit 1
 }
@@ -91,9 +94,15 @@ boot_qemu() {
         echo "Missing raw device tree $dtree_raw; run get_files.sh or set DTREE_RAW." >&2
         return 1
     fi
+    # PMGR is the default: the stock kernel starts the other five CPUs itself
+    # through ApplePMGR (docs/re/native-pmgr.md). It needs six vCPUs, so
+    # DVM_PMGR=0 drops both the node and the SMP flags for a single-CPU shell.
+    local pmgr="${DVM_PMGR:-1}"
     local dtree
     dtree="$(mktemp "${TMPDIR:-/tmp}/dvm-smc-dtree.XXXXXX")"
-    python3 "$REPO/dt_fixup.py" "$dtree_raw" "$dtree" -nvram "$REPO/nvram.bin" -enable smc -enable spmi -dram 8G
+    local enable=(-enable smc -enable spmi)
+    [[ "$pmgr" == 0 ]] || enable+=(-enable pmgr)
+    python3 "$REPO/dt_fixup.py" "$dtree_raw" "$dtree" -nvram "$REPO/nvram.bin" "${enable[@]}" -dram 8G
 
     # serial=3: serial in+out (console on the UART)
     # serial=2: serial in only, console output goes to the framebuffer
@@ -121,6 +130,7 @@ boot_qemu() {
             -txm      "${FIRMWARE_DIR}/txm"
         )
     fi
+    [[ "$pmgr" == 0 ]] || args+=( -smp 6 -accel tcg,thread=multi )
 
     if [[ "${fb}" != "off" ]]; then
         args+=( -fb "${fb}" -fbmode "${fbmode}" )

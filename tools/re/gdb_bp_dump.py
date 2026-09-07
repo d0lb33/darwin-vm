@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+"""Stop at runtime PCs over QEMU's gdbstub and dump registers plus memory.
+
+A generic version of smp_trace.py for bring-up loops: launch probe.sh with
+`NO_WATCHDOG=1 ... -- -S -gdb tcp:127.0.0.1:PORT`, then
+
+    tools/re/gdb_bp_dump.py PORT --pc 0xfffffff0292622ac \
+        --mem x1:0x60 --mem 'x1+0x50:*:0x100' --hits 2 --timeout 120
+
+`--mem REG[+OFF][:*][:LEN]` dumps LEN bytes at REG+OFF; a `*` dereferences
+the 8-byte pointer found there first (`x1+0x50:*:0x100` dumps the object
+pointed to by the word at x1+0x50). Every stop prints all 31 GPRs, sp, pc.
+Addresses are runtime (kernel slide +0x20000000 on this firmware).
+"""
+import argparse
+import re
+import socket
+import struct
+import sys
+import time
+
+sys.path.insert(0, __file__.rsplit("/", 1)[0])
+from smp_trace import Remote  # noqa: E402
+
+
+def hexdump(base, data):
+    for i in range(0, len(data), 32):
+        chunk = data[i:i + 32]
+        words = " ".join("%016x" % struct.unpack_from("<Q", chunk, j)[0]
+                         for j in range(0, len(chunk) - 7, 8))
+        print("  %016x: %s" % (base + i, words))
+
+
+def read_mem(remote, addr, length):
+    out = bytearray()
+    while len(out) < length:
+        n = min(0x200, length - len(out))
+        reply = remote.command("m%x,%x" % (addr + len(out), n))
+        if reply.startswith("E") or not reply:
+            raise RuntimeError("memory read failed at 0x%x: %r" % (addr + len(out), reply))
+        out += bytes.fromhex(reply)
+    return bytes(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("port", type=int)
+    ap.add_argument("--pc", type=lambda v: int(v, 0), action="append", required=True)
+    ap.add_argument("--mem", action="append", default=[])
+    ap.add_argument("--hits", type=int, default=1)
+    ap.add_argument("--bt", type=int, default=0, help="walk this many frame-pointer frames (fp -> [fp], lr at [fp+8])")
+    ap.add_argument("--timeout", type=float, default=120)
+    ap.add_argument("--umem", type=int, default=0,
+                    help="dump this many bytes before/after the deepest user-space (< 0x1000000000) lr in the backtrace")
+    ap.add_argument("--max-per-pc", type=int, default=0,
+                    help="after this many stops at one pc, remove that breakpoint (0 = never)")
+    a = ap.parse_args()
+    remote = Remote(a.port)
+    remote.sock.settimeout(a.timeout)
+    for pc in a.pc:
+        assert remote.command("Z1,%x,4" % pc) == "OK", "breakpoint refused"
+    hits = 0
+    per_pc = {}
+    t0 = time.time()
+    try:
+        while hits < a.hits:
+            remote.send("c")
+            remote.receive()
+            regs = struct.unpack_from("<33Q", bytes.fromhex(remote.command("g")))
+            pc = regs[32]
+            print("=== stop at pc=0x%x (hit %d) t=%.3f" % (pc, hits + 1, time.time() - t0))
+            per_pc[pc] = per_pc.get(pc, 0) + 1
+            if a.max_per_pc and per_pc[pc] == a.max_per_pc:
+                reply = remote.command("z1,%x,4" % pc)
+                print("  (breakpoint at 0x%x removed after %d stops: reply %r)" % (pc, a.max_per_pc, reply))
+            for i in range(0, 31, 4):
+                print("  " + " ".join("x%-2d=%016x" % (j, regs[j]) for j in range(i, min(i + 4, 31))))
+            print("  sp=%016x pc=%016x" % (regs[31], pc))
+            if a.bt:
+                fp = regs[29]
+                user_lr = 0
+                print("  bt: lr=0x%x" % (regs[30] & 0x0000ffffffffffff))
+                for depth in range(a.bt):
+                    if not fp or fp & 7:
+                        break
+                    try:
+                        frame = read_mem(remote, fp, 16)
+                    except RuntimeError:
+                        break
+                    next_fp, lr = struct.unpack("<QQ", frame)
+                    lr &= 0x0000ffffffffffff
+                    print("      #%d fp=0x%x lr=0x%x" % (depth, fp, lr))
+                    if lr and lr < 0x1000000000 and not user_lr:
+                        user_lr = lr
+                    fp = next_fp
+                if a.umem and user_lr:
+                    base = user_lr - a.umem
+                    try:
+                        print("  [user code around lr 0x%x]" % user_lr)
+                        hexdump(base, read_mem(remote, base, 2 * a.umem))
+                    except RuntimeError as e:
+                        print("  (user memory read failed: %s)" % e)
+            for spec in a.mem:
+                # REG followed by any sequence of +OFF (add) and * (deref),
+                # then an optional :LEN, e.g. x1+0x50:*+0x98:*:0x40
+                m = re.fullmatch(r"(x\d+|sp)((?::?\*|\+(?:0x[0-9a-f]+|\d+))*)(?::(0x[0-9a-f]+|\d+))?", spec)
+                if not m:
+                    print("  bad --mem", spec)
+                    continue
+                reg = 31 if m.group(1) == "sp" else int(m.group(1)[1:])
+                addr = regs[reg]
+                length = int(m.group(3), 0) if m.group(3) else 0x40
+                label = spec
+                try:
+                    for op in re.findall(r":?\*|\+(?:0x[0-9a-f]+|\d+)", m.group(2)):
+                        if op.endswith("*"):
+                            addr = struct.unpack("<Q", read_mem(remote, addr, 8))[0]
+                            label += " -> 0x%x" % addr
+                        else:
+                            addr += int(op[1:], 0)
+                    print("  [%s]" % label)
+                    hexdump(addr, read_mem(remote, addr, length))
+                except RuntimeError as e:
+                    print("  [%s]" % label, e)
+            hits += 1
+            if pc in a.pc:
+                # A stop can still arrive for a breakpoint --max-per-pc already
+                # removed (another vCPU had hit it), so tolerate a failed remove
+                # and never re-insert a removed one.
+                removed = a.max_per_pc and per_pc.get(pc, 0) >= a.max_per_pc
+                remote.command("z1,%x,4" % pc)
+                remote.command("s")
+                if not removed:
+                    assert remote.command("Z1,%x,4" % pc) == "OK"
+            else:
+                print("  (stop was not at a requested breakpoint)")
+                break
+    except socket.timeout:
+        print("timeout waiting for a breakpoint")
+    finally:
+        remote.sock.close()
+
+
+if __name__ == "__main__":
+    main()

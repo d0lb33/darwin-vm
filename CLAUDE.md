@@ -30,11 +30,20 @@ Setup complete. The positional rebuild remains storage-only.
 `./run.sh` boots a fresh child of `~/dvm-artifacts/native-smc/system.qcow2`
 using its pinned `default.json` when installed; this durable package contains
 the native battery and original powerd. It starts from disk, without saved RAM.
-Use `./run.sh --restore` for the ramdisk shell. Without an installed system
-manifest, the launcher uses the restore path; both paths enable SMC. Restore
-boots regenerate their tree from `firmware/dtree.raw` (or `DTREE_RAW`), which
-`get_files.sh` now preserves. Never try to restore deleted nodes from an old
-fixed tree. For bounded default disk validation:
+Since 2026-09-06 the package pins the **stock kernelcache** and a tree with
+`-enable pmgr -development-activation`: the six CPUs come up through the
+emulated PMGR (`docs/re/native-pmgr.md`), there is no `DARWIN_SMP_PV`
+adapter, AMX is emulated, and the IOMFB model answers the display power
+RPCs (`docs/re/iomfb-power-path.md`), so the guest sleeps its display like
+a phone on its lock screen; a home press through `tools/input/relay.py`
+wakes it. The previous inputs sit beside the new ones as `*.pre-pmgr-*`;
+`tools/rootfs/repin_native_smc.py --restore-backup pmgr` puts them back.
+Use `./run.sh --restore` for the ramdisk shell; it also enables PMGR and
+six vCPUs (`DVM_PMGR=0` for the single-CPU shell). Without an installed
+system manifest, the launcher uses the restore path; both paths enable SMC.
+Restore boots regenerate their tree from `firmware/dtree.raw` (or
+`DTREE_RAW`), which `get_files.sh` now preserves. Never try to restore
+deleted nodes from an old fixed tree. For bounded default disk validation:
 `PATH="$PWD/qemu-sptm/build:$PATH" python3 tools/warm_boot_probe.py --tag SMC_CHECK --seconds 480 --stop-on 'iomfb: presented '`.
 
 Use saved RAM/device checkpoints for diagnosis: reproducing Settings crashes,
@@ -443,8 +452,8 @@ endgame, has no Apple IMP-DEF registers at all and needs TCG regardless.
 
 `tools/time_boot.py` times a boot to a serial marker, `hvf-probe/hvf_exitbench`
 measures exit cost, and `target/arm/gxfstat.c` counts per-boot guest events at
-0.6% overhead. Note `darwin.c` sets `mc->max_cpus = 1` while the device tree
-describes six CPUs, so MTTCG headroom is unused.
+0.6% overhead. The default package now runs six vCPUs under MTTCG with the
+stock kernel starting them through the PMGR model.
 
 ## Where the userspace boot stands
 
