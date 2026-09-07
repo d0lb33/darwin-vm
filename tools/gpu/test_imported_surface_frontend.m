@@ -64,6 +64,9 @@ int main(void){@autoreleasepool{
         id<MTLTexture> a=[device newTextureWithDescriptor:d iosurface:surface plane:0];
         id<MTLTexture> b=[device newTextureWithDescriptor:d iosurface:surface plane:0];
         assert(a&&b&&registrations==1&&host.imports.count==1&&host.importedBytes==32768);
+        assert([a setPurgeableState:MTLPurgeableStateKeepCurrent]==MTLPurgeableStateNonVolatile);
+        BOOL refused=NO;@try{[a setPurgeableState:MTLPurgeableStateVolatile];}@catch(NSException *e){refused=[e.reason containsString:@"pinned IOSurface volatility"];}
+        assert(refused&&[b setPurgeableState:MTLPurgeableStateKeepCurrent]==MTLPurgeableStateNonVolatile);
         id<MTLCommandQueue> queue=[device newCommandQueue];
         for(unsigned frame=0;frame<8;frame++){@autoreleasepool{
             if(getenv("DVM_IMPORT_BACKEND_ONLY")){

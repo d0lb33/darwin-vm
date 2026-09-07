@@ -38,6 +38,7 @@ enum {
 @property(nonatomic) uint32_t guestProcessBits;
 @property(nonatomic,strong) NSMutableData *textureUpload;
 @property(nonatomic) uint64_t textureUploadToken;
+@property(nonatomic) MTLPurgeableState purgeableState;
 @end
 @implementation DVMEntry
 - (void)dealloc {_object=nil;_sharedRender=nil;}
@@ -136,6 +137,7 @@ static DVMEntry *Entry(DVMHost *host, id raw, NSString *kind) {
     if (!Number(raw, &handle) || handle == 0)
         return nil;
     DVMEntry *entry = host.entries[@(handle)];
+    if(entry.purgeableState>MTLPurgeableStateNonVolatile||entry.parent.purgeableState>MTLPurgeableStateNonVolatile)return nil;
     return entry && [entry.kind isEqualToString:kind] ? entry : nil;
 }
 static BOOL Add(DVMHost *host, NSString *kind, id object, DVMEntry **out) {
@@ -145,6 +147,7 @@ static BOOL Add(DVMHost *host, NSString *kind, id object, DVMEntry **out) {
     entry.handle = ++host.nextHandle;
     entry.kind = kind;
     entry.object = object;
+    entry.purgeableState=MTLPurgeableStateNonVolatile;
     host.entries[@(entry.handle)] = entry;
     host.creations++;
     *out = entry;
@@ -667,6 +670,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     if([op isEqual:@"depthState"])return DepthState(host,seq,request);
     if([op isEqual:@"linearLayout"])return LinearLayout(host,seq,request);
     if([op isEqual:@"linearTexture"])return LinearTexture(host,seq,request);
+    if([op isEqual:@"resourcePurgeable"])return ResourcePurgeable(host,seq,request);
     if([op isEqual:@"resourceProcess"]){
         DVMEntry *entry=Entry(host,request[@"handle"],@"texture")?:Entry(host,request[@"handle"],@"buffer");uint64_t bits;
         if(!entry||!Number(request[@"processBits"],&bits)||bits>UINT32_MAX)return HostError(seq,EINVAL,@"resource process ownership/value");

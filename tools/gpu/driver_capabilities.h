@@ -1,7 +1,7 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 20u
+#define DVM_CONTRACT_VERSION 21u
 #define DVM_RENDER_REQUEST_BYTES (2u*1024u*1024u)
 #define DVM_RENDER_REQUEST_CHUNK 32768u
 #define DVM_RENDER_DIRECT_BYTES 60000u
@@ -119,7 +119,9 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-hdr-1d-sampled-luts-v20",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-owned-resource-purgeability-v21",
+        @"resourcePurgeabilityVersion":@1,@"resourcePurgeabilityStates":@[@1,@2,@3,@4],
+        @"pinnedSurfacePurgeabilityStates":@[@1,@2],@"volatileResourceAccess":@"reacquire-nonvolatile-before-use",
         @"texture1DFormats":@[@23,@25,@55,@105],@"texture1DUsageMask":@1,@"texture1DStorageModes":@[@0],
         @"blitEncoders":@YES,@"blitBufferAlignment":@4,@"blitIOSurfaceImport":@NO,@"blitTextureTypes":@[@2],
         @"privateColorTextureAdditionalUsages":@[@(DVM_TEXTURE_BLOCK_WRITES_ONLY|5u)],

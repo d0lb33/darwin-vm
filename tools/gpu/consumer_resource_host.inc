@@ -1,5 +1,26 @@
 // Linear textures alias a real host MTLBuffer. Alignment is negotiated for this
 // implemented allocation operation, never used to advertise a GPU family.
+static NSDictionary *ResourcePurgeable(DVMHost *host,uint64_t seq,NSDictionary *r){
+    uint64_t handle,state;
+    if(!Number(r[@"handle"],&handle)||!Number(r[@"state"],&state)||state<1||state>4)return HostError(seq,EINVAL,@"purgeability handle/state");
+    DVMEntry *entry=host.entries[@(handle)];
+    if(!entry||(![entry.kind isEqual:@"buffer"]&&![entry.kind isEqual:@"texture"]))return HostError(seq,EINVAL,@"purgeability resource ownership");
+    DVMEntry *root=entry.parent?:entry;
+    if(root.textureUpload)return HostError(seq,EBUSY,@"purgeability during partial texture upload");
+    BOOL pinned=entry.sharedRender||entry.importedPages;
+    if(pinned&&state>MTLPurgeableStateNonVolatile)return HostError(seq,ENOTSUP,@"pinned IOSurface volatility requires native surface/pin retirement");
+    MTLPurgeableState old=MTLPurgeableStateNonVolatile,current=MTLPurgeableStateNonVolatile;
+    if(!pinned){
+        // The worker serves one request at a time, after prior GPU completion.
+        // Native allocation owns discard/reacquire, not a fabricated state bit.
+        old=[(id<MTLResource>)root.object setPurgeableState:state];
+        current=[(id<MTLResource>)root.object setPurgeableState:MTLPurgeableStateKeepCurrent];
+        if(old<2||old>4||current<2||current>4){root.purgeableState=MTLPurgeableStateEmpty;return HostError(seq,EIO,@"native purgeability state contract");}
+    }
+    root.purgeableState=current;
+    for(DVMEntry *alias in host.entries.allValues)if(alias==root||alias.parent==root)alias.purgeableState=current;
+    return @{@"seq":@(seq),@"ok":@YES,@"handle":@(handle),@"root":@(root.handle),@"requested":@(state),@"previous":@(old),@"current":@(current)};
+}
 static NSUInteger LinearAlignment(DVMHost *host,MTLPixelFormat format) {
     if(!DVMFormatBytes(format)||DVM1DFormat(format))return 0;
     NSUInteger a=[host.device minimumLinearTextureAlignmentForPixelFormat:format];

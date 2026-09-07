@@ -11,14 +11,15 @@ backboardd, not stock IOAcceleratorES enumeration or universal app discovery.
 No injected CALayer, replacement Metal factory, debugger, or test-helper
 consumer participates in this experiment.
 
-**Current boundary (GUEST12):** the compositor requests an existing full-screen
-RGBA16Float IOSurface. Its ownership and mapping are outside our fixed owned
-BGRA-pool import contract. Shader/LUT initialization progressed through 53
-successful host requests; no render/blit submission occurred.
+**Current boundary (CA_PURGEABILITY_GUEST1):** the retained registry imports the
+actual fullscreen RGBA16Float IOSurface, host Metal completes 21 compositor
+passes/58 draws, and QuartzCore's owned-buffer Volatile request passes. The
+guest then submits A408, which QEMU's BGRA-only scanout parser rejects; D594
+completion is withheld. See [exact purgeability/display evidence](gpu-resource-purgeability-ios27.md).
 
-**Not yet proven:** a compositor GPU submission, GPU-produced system UI
-pixels, or preserved display/input during accelerated composition. Prior
-CARenderer/UIKit helper results do not establish those outcomes.
+**Not yet proven:** correct compositor colors, completed native presentation,
+preserved display/input during accelerated composition, or sustained system
+pacing. Raw GPU-produced lock-screen pixels are captured as diagnostic evidence.
 
 ## Evidence and failed contracts
 

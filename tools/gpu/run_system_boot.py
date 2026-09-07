@@ -65,6 +65,8 @@ def main():
                     failure_at=time.monotonic();report['stop_reason']='first failed boot/compositor contract';report['failure_context']=combined[-32768:]
                 if failure_at is None and peer.records and not peer.records[-1]['reply'].get('ok',False):
                     failure_at=time.monotonic();report['stop_reason']='first rejected compositor host request';report['failed_request']=peer.records[-1]
+                if failure_at is None and 'iomfb: display-state failed; A408 retained, no D594' in errtail:
+                    failure_at=time.monotonic();report['stop_reason']='native display rejected compositor swap; completion withheld';report['display_failure_context']=errtail[-16384:]
                 # Do not serve a replacement compositor after the owner has
                 # failed. Retained host resources have no restart contract.
                 if failure_at:break

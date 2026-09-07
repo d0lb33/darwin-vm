@@ -86,6 +86,23 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @property(nonatomic) NSUInteger clientLength;
 - (NSData *)cpuData;
 @end
+static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMMetalRPC rpc){
+    NSError *e=nil;
+    // contents may be written directly, without didModifyRange.
+    // Compare owned bytes; update the cache only after host ACK.
+    BOOL initialized=buffer.renderUploaded!=nil;
+    NSMutableData *uploaded=buffer.renderUploaded?:[NSMutableData dataWithLength:buffer.length];
+    for(NSUInteger offset=0;offset<buffer.length;offset+=32768){
+        NSUInteger length=MIN(32768,buffer.length-offset);
+        DVMDirtyRange changed=initialized?DVMFindDirtyRange((uint8_t *)buffer.contents+offset,(uint8_t *)uploaded.bytes+offset,length):(DVMDirtyRange){0,length};
+        if(!changed.length)continue;
+        NSUInteger start=offset+changed.offset;
+        NSData *chunk=[NSData dataWithBytes:(uint8_t *)buffer.contents+start length:changed.length];
+        if(!rpc(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(start),@"data":[chunk base64EncodedStringWithOptions:0]},&e))reject(e.description?:@"render buffer upload");
+        memcpy((uint8_t *)uploaded.mutableBytes+start,chunk.bytes,changed.length);
+    }
+    buffer.renderUploaded=uploaded;
+}
 @interface DVMPipeline : DVMObject <MTLComputePipelineState>
 @property(nonatomic, strong) DVMFunction *function;
 @property(nonatomic) NSUInteger threadExecutionWidth;
@@ -103,6 +120,7 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @property(nonatomic) NSUInteger backingOffset,backingRow;
 @property(nonatomic,strong) id surfaceObject;
 @property(nonatomic,strong) id<DVMMetalOwnedMapping> surfaceMapping;
+@property(nonatomic) uint64_t shadowGeneration;
 - (NSUInteger)row;
 - (NSData *)read;
 @end
@@ -460,6 +478,14 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @implementation DVMPipeline
 @end
 @implementation DVMBuffer
+- (void)prepareForPurgeability:(MTLPurgeableState)state {
+    if(state==MTLPurgeableStateVolatile&&self.residencyState<=MTLPurgeableStateNonVolatile)
+        DVMUploadBufferChanges(self,self.owner.transport);
+}
+- (void)purgeabilityChanged:(MTLPurgeableState)old current:(MTLPurgeableState)current {
+    [super purgeabilityChanged:old current:current];
+    if(old==MTLPurgeableStateEmpty||current==MTLPurgeableStateEmpty)self.renderUploaded=nil;
+}
 - (void)dealloc {if(_clientDeallocator)_clientDeallocator(_clientBytes,_clientLength);}
 - (NSData *)cpuData {return [NSData dataWithBytes:self.contents length:self.length];}
 - (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
@@ -481,15 +507,29 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return _clientBytes?_clientLength:_shadow.length;
 }
 - (void *)contents {
+    [self requireResident];
     return _clientBytes?:_shadow.mutableBytes;
 }
 - (void)didModifyRange:(NSRange)range {
+    [self requireResident];
     if(self.owner.submissionInFlight||range.location>self.length||range.length>self.length-range.location)
         reject(@"buffer modification outside owned idle allocation");
 }
 @end
 
 @implementation DVMTexture
+- (DVMResource *)purgeabilityRoot {return self.backingBuffer?:self;}
+- (void)prepareForPurgeability:(MTLPurgeableState)state {
+    if(self.surfaceMapping&&state>MTLPurgeableStateNonVolatile)
+        reject(@"pinned IOSurface volatility requires native surface/pin retirement");
+    if(state==MTLPurgeableStateVolatile&&self.pendingUpload){
+        DVMUploadTextureChunks(self,self.owner.transport);self.pendingUpload=nil;
+    }
+}
+- (void)purgeabilityChanged:(MTLPurgeableState)old current:(MTLPurgeableState)current {
+    [super purgeabilityChanged:old current:current];
+    if(old==MTLPurgeableStateEmpty||current==MTLPurgeableStateEmpty){self.completedShadow=nil;self.pendingUpload=nil;}
+}
 - (NSUInteger)row {
     return _width * DVMFormatBytes(_pixelFormat);
 }
@@ -516,6 +556,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return 1;
 }
 - (void)check:(MTLRegion)r level:(NSUInteger)level row:(NSUInteger)row pointer:(const void *)p {
+    [self requireResident];
     if(self.surfaceMapping)reject(@"owned IOSurface CPU access uses its lock and lease contract");
     if(self.storageMode==MTLStorageModePrivate)reject(@"private textures have no CPU transfer access");
     if (!p || level || !r.size.width || !r.size.height || !r.size.depth ||
@@ -558,6 +599,9 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     self.completedShadow=nil;
 }
 - (NSData *)read {
+    [self requireResident];
+    uint64_t generation=self.purgeabilityRoot.storageGeneration;
+    if(self.shadowGeneration!=generation){self.completedShadow=nil;self.shadowGeneration=generation;}
     if(self.surfaceMapping)reject(@"owned IOSurface has no copied readback path");
     if(self.storageMode==MTLStorageModePrivate)reject(@"private textures have no CPU transfer access");
     if(self.owner.submissionInFlight)reject(@"texture read while GPU work is in flight");
@@ -761,6 +805,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                 // Resolve uploads only after preceding GPU completion/writeback.
                 // Capturing pending textures at commit would re-upload stale
                 // CPU contents over a predecessor's GPU-produced image.
+                for(DVMTexture *t in textures)[t requireResident];
                 if(!render)for(DVMBuffer *b in buffers)
                     [uploads addObject:@{@"op":@"upload",@"buffer":b.handle,
                         @"data":self.commandQueue.owner.binaryPayloads?[b cpuData]:[[b cpuData] base64EncodedStringWithOptions:0]}];
@@ -769,22 +814,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                     else [uploads addObject:@{@"texture":t.handle,@"row":@([t row]),
                         @"data":self.commandQueue.owner.binaryPayloads&&!render?t.pendingUpload:[t.pendingUpload base64EncodedStringWithOptions:0]}];
                 }
-                if(render)for(DVMBuffer *buffer in buffers) {
-                    // contents may be written directly, without didModifyRange.
-                    // Compare owned bytes; update the cache only after host ACK.
-                    BOOL initialized=buffer.renderUploaded!=nil;
-                    NSMutableData *uploaded=buffer.renderUploaded?:[NSMutableData dataWithLength:buffer.length];
-                    for(NSUInteger offset=0;offset<buffer.length;offset+=32768){
-                        NSUInteger length=MIN(32768,buffer.length-offset);
-                        DVMDirtyRange changed=initialized?DVMFindDirtyRange((uint8_t *)buffer.contents+offset,(uint8_t *)uploaded.bytes+offset,length):(DVMDirtyRange){0,length};
-                        if(!changed.length)continue;
-                        NSUInteger start=offset+changed.offset;
-                        NSData *chunk=[NSData dataWithBytes:(uint8_t *)buffer.contents+start length:changed.length];
-                        if(!self.commandQueue.owner.transport(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(start),@"data":[chunk base64EncodedStringWithOptions:0]},&e))reject(e.description?:@"render buffer upload");
-                        memcpy((uint8_t *)uploaded.mutableBytes+start,chunk.bytes,changed.length);
-                    }
-                    buffer.renderUploaded=uploaded;
-                }
+                if(render)for(DVMBuffer *buffer in buffers)DVMUploadBufferChanges(buffer,self.commandQueue.owner.transport);
                 BOOL blur=self.commands.count&&self.commands[0][@"imageblock"]!=nil;
                 DVMTexture *output=nil;
                 if(blur)for(DVMTexture *t in textures)if([t.handle isEqual:[self.commands.lastObject[@"textures"] lastObject]])output=t;

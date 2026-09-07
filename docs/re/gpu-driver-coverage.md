@@ -21,7 +21,7 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Area | Implemented | Verified behavior | Unsupported / unknown contract |
 | --- | --- | --- | --- |
 | Discovery | Explicit process-local factory and opt-in backboardd boot registration through MTLAddDevice | Actual backboardd loads the arm64e driver and its default factory returns that device | Normal global plugin discovery and accelerated system UI output remain unproven |
-| Capabilities | V20 forwarding profile; original 20 queries, compression/format batch, framebuffer reads, private half-float/color mip targets and bounded render staging | CA_CAPS_GUEST14 passes all original queries; exact guest framebuffer-fetch/glass specialization and HDR LUT allocations; host ordered overlap/reuse and unsupported-host rejection | Full GPU-family predicates remain false; absence from a capability-gated runtime path is not evidence of non-requirement |
+| Capabilities | V21 forwarding profile; original 20 queries, compression/format batch, framebuffer reads, private half-float/color mip targets, bounded render staging and explicit owned/pinned purgeability policy | CA_CAPS_GUEST14 passes all original queries; exact guest framebuffer-fetch/glass specialization and HDR LUT allocations; host ordered overlap/reuse and unsupported-host rejection | Full GPU-family predicates remain false; absence from a capability-gated runtime path is not evidence of non-requirement |
 | Libraries | Requested guest file/URL/data identity; unique bounded MTLB slice; explicit content-addressed multi-library host cache | Exact unmodified AIR specialization/render execution in earlier consumers; GUEST12 loads QuartzCore and HDRProcessing; host replay and malformed-container controls | General library-byte upload and ambiguous multiple AIR slices; HDR library loading does not prove compositor shader execution |
 | Functions/render pipelines | Named/indexed constants; owned native function stage metadata, including unspecialized functions; general vertex/fragment pipeline descriptors within documented bounds | Exact QuartzCore specialized vertex/fragment pair; 65 constants | Linked functions, archives, writable fragment bindings, tile/MSAA/depth targets |
 | Command encoding | Direct indexed/nonindexed draws, 31 buffer slots, 16 fragment textures/samplers; bounded FIFO of 32 command buffers on one execution queue; atomic staging of render requests up to 2 MiB over 64 KiB MMIO | Exact changing scenes and 64×64 group opacity with private intermediate targets; host queued GPU dependency and cancellation tests | Multiple execution queues, indirect commands, fragment buffer writes and general barriers remain unsupported |
@@ -31,6 +31,7 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | UIKit effects | Actual UIVisualEffectView material/glass probes; window attachment respecting UIKit invalidation; original guest QuartzCore shaders | Exact guest translucent glass 10 passes/21 draws; removed harness-created black covering draws; paired prepared native/forwarded host scene comparison added in 10ed430 | Independent exact-guest effect oracle and displayed/system-wide glass remain unproven. Historical natural-event-loop comparison failed; host input matching is separate from guest evidence. See [invalidation evidence](gpu-uikit-invalidation-ios27.md) |
 | Synchronization | Serial RPC, bounded FIFO, completion callbacks, strong resource retention; failed shared jobs prohibit reuse | Exact consumer completion and native retirement; host predecessor GPU-write visibility, disjoint mip read/write and dependent failure cancellation | Same-allocation mip sampling requires application-guaranteed disjoint subresources; dynamic source LOD is not validated. Multiple execution queues, events/fences, reset and timestamp clock translation remain unsupported |
 | Checkpoint | Active GPU migration blocked | Copied-pixel historical checkpoints only | Live host resources and executing commands cannot be checkpointed |
+| Purgeability | Native owned-resource transitions with buffer/texture alias state, Empty cache invalidation and lost-ack quarantine | Exact backboardd 256 KiB buffer transitions to Volatile after GPU completion; host discard/reacquire, dirty-write retention and uncertain-state rejection | Exact guest reacquisition/Empty; pinned surface Volatile/Empty rejected; no recovery from uncertain transitions |
 | Iteration | Fresh-process supervisor, signed package staging, incremental build and captured-submission replay tools; opt-in test-kernel RX mapping exception | Exact guest installed controls; boot-trusted driver staged on Data executes actual CARenderer with verified pixels; 27-request host replay | Two code-distinct runtime revisions now pass real guest CARenderer in one uninstrumented boot using native OOP-JIT signatures plus opt-in xART fixture; global loading and checkpoints remain outside scope |
 | Performance | Separate setup, frame work, native presentation and pacing measurements | 1,024 changing displayed UIKit frames average 59.998 fps, p95 work 16.781 ms; 218 absolute misses, maximum native gap 34.177 ms; no live GPU resource growth | Smooth native Liquid Glass/scrolling remains unproven; average throughput is not smooth pacing |
 
@@ -53,9 +54,12 @@ renders the measured layout through scattered file aliases and verifies all
 final half-float pixels. The subsequent GUEST21 retained registry connects those actual pages to a host
 Metal texture, with no copy. After the alignment and synchronous-submission
 fixes, GUEST23 executes 21 actual compositor passes and 58 draws, including its
-fullscreen IOSurface. It then raises on purgeable allocation policy. Final raw
-pixels are captured but color/brightness correctness, DCP presentation and
-sustained system pacing remain unverified. See the separate
+fullscreen IOSurface. Its purgeability failure is superseded by
+CA_PURGEABILITY_GUEST1: the actual owned buffer transitions to Volatile after
+GPU completion. The guest submits its RGhA A408 swap, but QEMU rejects that
+format and withholds D594. Final raw pixels are captured but color/brightness
+correctness, DCP presentation and sustained system pacing remain unverified.
+See [the current failed display contract](gpu-resource-purgeability-ios27.md) and the separate
 [retained-import contract and evidence](gpu-compositor-import-ios27.md).
 See [system boot evidence](gpu-system-boot-ios27.md).
 

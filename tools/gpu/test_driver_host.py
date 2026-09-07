@@ -17,6 +17,34 @@ AIR = Path('/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib')
 SHA = '8860e4a17d89783da06429a302db0bc61b2939963f202c0c6ad31189a1021364'
 
 class HostTests(unittest.TestCase):
+    def test_native_purgeability_and_alias_reacquisition(self):
+        b=self.rpc('buffer',length=65536)['handle']
+        t=self.rpc('linearTexture',buffer=b,width=16,height=16,format=80,offset=0,row=64,usage=1)['handle']
+        for handle,state,previous,current in ((b,1,2,2),(t,3,2,3),(b,1,3,3),(b,2,3,2),(t,4,2,4),(b,1,4,4),(t,2,4,2)):
+            reply=self.rpc('resourcePurgeable',handle=handle,state=state)
+            self.assertTrue(reply['ok'],reply)
+            self.assertEqual((reply['root'],reply['requested'],reply['previous'],reply['current']),(b,state,previous,current))
+            if current>2:
+                self.assertFalse(self.rpc('read',texture=t)['ok'])
+                self.assertFalse(self.rpc('read',buffer=b)['ok'])
+        payload=bytes([7,11,13,255])*16384
+        self.assertTrue(self.rpc('upload',buffer=b,data=base64.b64encode(payload).decode())['ok'])
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=t)['data']),payload[:1024])
+        for state in (0,5,True,-1):self.assertFalse(self.rpc('resourcePurgeable',handle=b,state=state)['ok'])
+        self.assertFalse(self.rpc('resourcePurgeable',handle=99999,state=2)['ok'])
+        self.assertTrue(self.rpc('release',handle=t)['ok']);self.assertTrue(self.rpc('release',handle=b)['ok'])
+        for storage in (0,2):
+            texture=self.rpc('texture',width=64,height=64,format=80,usage=5,storage=storage)['handle']
+            self.assertEqual(self.rpc('resourcePurgeable',handle=texture,state=4)['previous'],2)
+            clear=dict(kind='render',target=texture,load=2,store=1,clear=[1,0,0,1],operations=[])
+            before=self.rpc('stats')['submissions']
+            self.assertFalse(self.rpc('renderSubmit',commands=[clear],uploads=[],readbacks=[])['ok'])
+            self.assertEqual(self.rpc('stats')['submissions'],before)
+            self.assertEqual(self.rpc('resourcePurgeable',handle=texture,state=2)['previous'],4)
+            self.assertTrue(self.rpc('renderSubmit',commands=[clear],uploads=[],readbacks=[])['ok'])
+            if storage==0:self.assertEqual(base64.b64decode(self.rpc('read',texture=texture)['data']),bytes([0,0,255,255])*4096)
+            self.assertTrue(self.rpc('release',handle=texture)['ok'])
+
     def test_integer_1d_lut_extent_usage_and_transfer(self):
         fields=dict(width=3072,height=1,depth=1,type=0,format=23,storage=0,usage=1,levels=1)
         result=self.rpc('texture',**fields);self.assertTrue(result['ok'],result)

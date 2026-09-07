@@ -4,8 +4,24 @@
 @property(nonatomic) MTLResourceOptions acceptedOptions;
 @property(nonatomic) NSUInteger hostAllocatedSize;
 @property(nonatomic) int32_t responsibleProcess;
+@property(atomic) MTLPurgeableState residencyState;
+@property(atomic) uint64_t storageGeneration;
+@property(atomic) BOOL purgeabilityFailed;
+- (DVMResource *)purgeabilityRoot;
+- (void)prepareForPurgeability:(MTLPurgeableState)state;
+- (void)purgeabilityChanged:(MTLPurgeableState)old current:(MTLPurgeableState)current;
+- (void)requireResident;
 @end
 @implementation DVMResource
+- (DVMResource *)purgeabilityRoot {return self;}
+- (void)prepareForPurgeability:(MTLPurgeableState)state {(void)state;}
+- (void)purgeabilityChanged:(MTLPurgeableState)old current:(MTLPurgeableState)current {
+    self.residencyState=current;if(old==MTLPurgeableStateEmpty||current==MTLPurgeableStateEmpty)self.storageGeneration++;
+}
+- (void)requireResident {
+    if(self.purgeabilityRoot.purgeabilityFailed)reject(@"uncertain purgeability acknowledgement; resource quarantined");
+    if(self.purgeabilityRoot.residencyState>MTLPurgeableStateNonVolatile)reject(@"volatile resource requires nonvolatile reacquisition");
+}
 - (void)setResponsibleProcess:(int32_t)process {
     NSError *e=nil;NSNumber *bits=@((uint32_t)process);
     NSDictionary *r=[self.owner call:@{@"op":@"resourceProcess",@"handle":self.handle,@"processBits":bits} error:&e];
@@ -23,9 +39,23 @@
 - (BOOL)isAliasable {return NO;}
 - (void)makeAliasable {reject(@"resource has no heap allocation");}
 - (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state {
-    if(state!=MTLPurgeableStateKeepCurrent&&state!=MTLPurgeableStateNonVolatile)
-        reject(@"purgeable allocations unsupported");
-    return MTLPurgeableStateNonVolatile;
+    if(state<1||state>4)reject(@"purgeable state outside contract");
+    __block NSDictionary *reply=nil;__block NSError *failure=nil;
+    dispatch_sync(self.owner.serial,^{
+      DVMResource *root=self.purgeabilityRoot;BOOL sent=NO;
+      @try {
+        if(root.purgeabilityFailed)reject(@"uncertain purgeability acknowledgement; resource quarantined");
+        [root prepareForPurgeability:state];
+        sent=YES;
+        reply=self.owner.transport(@{@"op":@"resourcePurgeable",@"handle":self.handle,@"state":@(state)},&failure);
+        NSUInteger old=[reply[@"previous"] unsignedIntegerValue],current=[reply[@"current"] unsignedIntegerValue];
+        if(![reply[@"ok"] boolValue]||![reply[@"handle"] isEqual:self.handle]||![reply[@"root"] isEqual:root.handle]||
+           [reply[@"requested"] unsignedIntegerValue]!=state||old<2||old>4||current<2||current>4){reply=nil;root.purgeabilityFailed=YES;return;}
+        [root purgeabilityChanged:old current:current];
+      } @catch(NSException *exception){if(sent)root.purgeabilityFailed=YES;reply=nil;failure=error(exception.reason);}
+    });
+    if(!reply)reject(failure.description?:@"purgeable state acknowledgement");
+    return [reply[@"previous"] unsignedIntegerValue];
 }
 @end
 @protocol DVMProtectionMetadata

@@ -4,6 +4,12 @@ This is the next step after the temporary descriptor pin probe, not system UI
 acceleration acceptance. No different guest, SPTM/TXM change, NVMe transport,
 debugger attachment or dynamic backboardd restart is involved.
 
+Latest follow-up: [V21 purgeability](gpu-resource-purgeability-ios27.md) passes
+the first actual buffer Volatile request after a completed compositor batch.
+The next explicit failure is QEMU rejecting the guest's RGhA A408 scanout and
+withholding D594 completion. The historical GUEST23 failure below is superseded;
+correct colors and displayed system UI remain unverified.
+
 ## Contracts and current evidence
 
 The opt-in `--surface-import` bootstrap enables a separate registry extension
