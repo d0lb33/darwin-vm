@@ -9,6 +9,9 @@
 #include "driver_capabilities.h"
 #include "dirty_buffer_range.h"
 #include "metal_library_slice.h"
+#ifdef DVM_SURFACE_PIN_PROBE
+static void DVMProbeSurfacePin(IOSurfaceRef surface);
+#endif
 
 static NSError *error(NSString *s) {
     return [NSError errorWithDomain:@"DVMMetalDriver"
@@ -357,6 +360,9 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d
                                  iosurface:(IOSurfaceRef)s
                                      plane:(NSUInteger)plane {
+#ifdef DVM_SURFACE_PIN_PROBE
+    DVMProbeSurfacePin(s);
+#endif
     if(!s||!d||plane||!self.mappingProvider||d.textureType!=MTLTextureType2D||d.width!=DVM_PRESENT_WIDTH||
        d.height!=DVM_PRESENT_HEIGHT||d.depth!=1||d.arrayLength!=1||d.mipmapLevelCount!=1||d.sampleCount!=1||
        d.pixelFormat!=MTLPixelFormatBGRA8Unorm||d.usage!=(MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead)||

@@ -20,6 +20,7 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('base',type=Path);p.add_argument('backboardd',type=Path);p.add_argument('out',type=Path)
     p.add_argument('--runtime-probe',action='store_true',help='bounded arm64e runtime loading probe inside backboardd; does not replace/unload the boot driver')
+    p.add_argument('--surface-pin-probe',action='store_true',help='audit the first actual compositor IOSurface and exercise the opt-in kernel pin/complete probe')
     a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
     source=Path(__file__).resolve().parent;repo=source.parents[1];start=time.monotonic()
     shutil.copytree(a.base/'stubs',a.out/'stubs')
@@ -31,6 +32,7 @@ def main():
     flags=['-target','arm64e-apple-ios27.0','-isysroot',sdk,'-Wno-incompatible-sysroot','-fobjc-arc','-fobjc-arc-exceptions',
            '-O1','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-Wno-protocol','-Wno-objc-protocol-property-synthesis','-fno-objc-msgsend-selector-stubs']
     if a.runtime_probe:flags.append('-DDVM_BOOT_RUNTIME_PROBE')
+    if a.surface_pin_probe:flags.append('-DDVM_SURFACE_PIN_PROBE')
     commands=[]
     def run(cmd,**kw):commands.append(cmd);return subprocess.run(cmd,check=True,**kw)
     obj=a.out/'system_bootstrap.o'
@@ -99,7 +101,7 @@ def main():
     for f in source.iterdir():
         if f.suffix in ('.m','.h','.inc','.py'):shutil.copyfile(f,a.out/f.name)
     (a.out/'build.json').write_text(json.dumps(dict(commands=commands,seconds=time.monotonic()-start,
-        runtime_probe=a.runtime_probe,
+        runtime_probe=a.runtime_probe,surface_pin_probe=a.surface_pin_probe,
         before_sha256=sha(before),after_sha256=sha(target),plugin_sha256=sha(binary),
         dependency=install,header_edit=dict(offset=off,bytes=length),
         scope='backboardd boot dependency and dedicated transport entitlement; no kernel, guest cache, SPTM or TXM edits'),indent=2)+'\n')

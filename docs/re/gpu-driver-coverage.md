@@ -20,21 +20,46 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 
 | Area | Implemented | Verified behavior | Unsupported / unknown contract |
 | --- | --- | --- | --- |
-| Discovery | Explicit process-local device factory | Exact guest signed bundle load and CARenderer use | Normal plugin discovery, service-global context, system compositor adoption |
-| Capabilities | V16 forwarding profile; original 20 queries, compression/format batch, framebuffer reads, private half-float/color mip targets and bounded render staging | Exact guest framebuffer-fetch and glass specialization; host ordered overlap/reuse, disjoint mip control and unsupported-host rejection | Full GPU-family predicates remain false; static query coverage is not a runtime trace |
-| Libraries | Requested guest URL/data identity; select a unique bounded MTLB slice by container contents, not a known shader size | Exact unmodified AIR, real function specialization/render execution; different-sized host AIR and malformed-container controls | Host currently needs matching local AIR cache; ambiguous multiple AIR slices and general multi-library delivery pending |
+| Discovery | Explicit process-local factory and opt-in backboardd boot registration through MTLAddDevice | Actual backboardd loads the arm64e driver and its default factory returns that device | Normal global plugin discovery and accelerated system UI output remain unproven |
+| Capabilities | V20 forwarding profile; original 20 queries, compression/format batch, framebuffer reads, private half-float/color mip targets and bounded render staging | CA_CAPS_GUEST14 passes all original queries; exact guest framebuffer-fetch/glass specialization and HDR LUT allocations; host ordered overlap/reuse and unsupported-host rejection | Full GPU-family predicates remain false; absence from a capability-gated runtime path is not evidence of non-requirement |
+| Libraries | Requested guest file/URL/data identity; unique bounded MTLB slice; explicit content-addressed multi-library host cache | Exact unmodified AIR specialization/render execution in earlier consumers; GUEST12 loads QuartzCore and HDRProcessing; host replay and malformed-container controls | General library-byte upload and ambiguous multiple AIR slices; HDR library loading does not prove compositor shader execution |
 | Functions/render pipelines | Named/indexed constants; owned native function stage metadata, including unspecialized functions; general vertex/fragment pipeline descriptors within documented bounds | Exact QuartzCore specialized vertex/fragment pair; 65 constants | Linked functions, archives, writable fragment bindings, tile/MSAA/depth targets |
 | Command encoding | Direct indexed/nonindexed draws, 31 buffer slots, 16 fragment textures/samplers; bounded FIFO of 32 command buffers on one execution queue; atomic staging of render requests up to 2 MiB over 64 KiB MMIO | Exact changing scenes and 64×64 group opacity with private intermediate targets; host queued GPU dependency and cancellation tests | Multiple execution queues, indirect commands, fragment buffer writes and general barriers remain unsupported |
 | Compute | Existing luma/blur and bounded compute submission | Exact compute/copy controls and managed blur | Pipeline allowlist remains a development restriction; replace with general validated reflection before claiming broad compute |
-| Resources | Dirty buffer spans, partial 2D/3D transfers, 6 texture formats (A8 sampled only), read-only linear views; private RGBA8/BGRA8/RGBA16Float block-write targets, 2D mip allocation/attachments and opaque guest process metadata | Exact glass half-float/mip allocation; host exact signed/HDR values, eight reuses and mip-relative bounds; private CPU-access rejection | General IOSurface import/planes, heaps, memoryless storage, private blit transfers, mip generation and texture views; axes 4096, private images 16 MiB counting mips, copied images 1 MiB |
+| Resources | Dirty buffer spans, partial 2D/3D transfers, bounded color formats and sampled 1D R16Uint/R16Float/R32Float/RG32Float LUTs; private color mip targets; ordered 2D texture copies/mips and buffer fill/copy/writeback | Exact HDR LUT allocations and earlier glass mip allocations; 40 native-equal host LUT frames, 48 blit frames/96 outputs; private CPU-access rejection | General IOSurface import/planes, heaps, memoryless and texture views; imported/buffer-backed texture blits; axes 4096, private images 16 MiB counting mips, copied images 1 MiB |
 | Presentation | Owned shared-page IOSurface render target with native retirement and fresh-process handoff | Actual UIKit at 1179×2556: first DCP byte comparison and 1,024 changing frames with final pixels, per-frame native completion, retirement and software lock-screen recovery | General surface registration, UIKit window interaction and system-compositor adoption unknown |
-| UIKit effects | Actual UIVisualEffectView material/glass probes; window attachment respecting UIKit invalidation; original guest QuartzCore shaders | Exact guest translucent glass 10 passes/21 draws; removed harness-created black covering draws, all resources retire; native host window visually shows glass | Independent exact-guest effect oracle and displayed/system-wide glass remain unproven. Natural-event-loop host comparison fails; input equivalence needs investigation. See [invalidation evidence](gpu-uikit-invalidation-ios27.md) |
+| UIKit effects | Actual UIVisualEffectView material/glass probes; window attachment respecting UIKit invalidation; original guest QuartzCore shaders | Exact guest translucent glass 10 passes/21 draws; removed harness-created black covering draws; paired prepared native/forwarded host scene comparison added in 10ed430 | Independent exact-guest effect oracle and displayed/system-wide glass remain unproven. Historical natural-event-loop comparison failed; host input matching is separate from guest evidence. See [invalidation evidence](gpu-uikit-invalidation-ios27.md) |
 | Synchronization | Serial RPC, bounded FIFO, completion callbacks, strong resource retention; failed shared jobs prohibit reuse | Exact consumer completion and native retirement; host predecessor GPU-write visibility, disjoint mip read/write and dependent failure cancellation | Same-allocation mip sampling requires application-guaranteed disjoint subresources; dynamic source LOD is not validated. Multiple execution queues, events/fences, reset and timestamp clock translation remain unsupported |
 | Checkpoint | Active GPU migration blocked | Copied-pixel historical checkpoints only | Live host resources and executing commands cannot be checkpointed |
 | Iteration | Fresh-process supervisor, signed package staging, incremental build and captured-submission replay tools; opt-in test-kernel RX mapping exception | Exact guest installed controls; boot-trusted driver staged on Data executes actual CARenderer with verified pixels; 27-request host replay | Two code-distinct runtime revisions now pass real guest CARenderer in one uninstrumented boot using native OOP-JIT signatures plus opt-in xART fixture; global loading and checkpoints remain outside scope |
 | Performance | Separate setup, frame work, native presentation and pacing measurements | 1,024 changing displayed UIKit frames average 59.998 fps, p95 work 16.781 ms; 218 absolute misses, maximum native gap 34.177 ms; no live GPU resource growth | Smooth native Liquid Glass/scrolling remains unproven; average throughput is not smooth pacing |
 
-## Current bounded experiments
+## Current priority and evidence classes
+
+[Compositor gaps](gpu-compositor-gaps-ios27.md) separates **statically referenced,
+runtime observed, implemented, verified, unsupported and unknown** behavior.
+It prioritizes existing IOSurface memory, formats/geometry, ownership and
+completion, then capability-gated events and additional pipeline/command paths.
+Unknown indirect receivers remain unknown. The exact-cache metadata survey is
+bounded; it is not a prerequisite to the next actual compositor submission.
+
+GUEST12 registers in actual backboardd and completes 53 host RPCs, but submits
+zero render/blit batches. Its current rejected request is a 1179×2556
+RGBA16Float IOSurface with shared storage and usage 5. The first pin probe
+measured a 9,472-byte row and 24,211,456-byte allocation, exposing the probe's
+incorrect whole-page size requirement. The corrected PIN_GUEST2 pins/validates/
+completes its 1,478 backing pages three times. A separate native host test
+renders the measured layout through scattered file aliases and verifies all
+final half-float pixels. Neither connects guest pages to the host GPU yet.
+See [system boot evidence](gpu-system-boot-ios27.md).
+
+Backboardd dynamic staging/restart is deferred after its single staging-path
+failure. Runner revision success is not backboardd loading/recovery evidence.
+Interactive sessions have no fixed 600-second lifetime; readiness, per-test,
+GPU completion and failed-reuse safeguards remain separate. Automated regression
+runs retain their bounded session deadline.
+
+## Earlier consumer milestones (historical sequence)
 
 1. **Persistent staging/loading:** boot one isolated runner, require existing
    native display plus stable input/fresh ACK, then stage the trusted driver and

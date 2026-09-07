@@ -275,3 +275,115 @@ This may reuse parts of the existing shared-pool page registration, but the
 pool tests do not prove arbitrary IOSurface pinning or compositor/DCP lifetime.
 Those are the major unresolved contracts for the next bounded experiment.
 Staged backboardd restarts are not a prerequisite; use another disposable boot.
+
+## Existing-surface pinning and native layout, 2026-09-07
+
+`CA_SURFACE_PIN_GUEST2` proves the scoped pin/complete contract in **actual
+backboardd**, not a test runner. Its ordinary compositor surface ID 3 reports:
+
+```
+GPU_LOAD_SURFACE_META id=3 width=1179 height=2556 row=9472 element=8 format=52476841 planes=0 bytes=24211456 nonnull=1 base_offset=0 tail=12288
+GPU_LOAD_SURFACE_PIN trial=2 kr=0 count=4 stage=5 pages=1478 bytes=24211456 complete=0
+GPU_LOAD_SURFACE_PIN trial=3 kr=0 count=4 stage=5 pages=1478 bytes=24211456 complete=0
+GPU_LOAD_SURFACE_PIN trial=4 kr=0 count=4 stage=5 pages=1478 bytes=24211456 complete=0
+```
+
+Wrong scalar count and null range return `0xe00002c2`. The independent verifier
+checks all audit slot sequence numbers, lengths and CRCs before checking these
+results. Earlier `CA_SURFACE_PIN_GUEST1` failed with `0xe00002c2`/stage 0 because
+the first probe required whole 16 KiB allocation pages. Its metadata length
+has a 12 KiB remainder. The correction validates exactly the requested byte
+range, including partial edge pages; it does not round up the caller's range.
+GUEST1 remains a failed probe, not a pinning result.
+
+The opt-in shim hooks the exact **modern** diagnostics external-method entry
+`0xfffffff00b291bd0` (vtable `0xfffffff007e27b08`, slot 0x5d0, diversity 0x5d9d).
+The older slot 0x540 reaches `0xfffffff00b347aa0`, an intentional panic path.
+This distinction also matches Apple's
+[IOUserClient2022 implementation](https://github.com/apple-oss-distributions/xnu/blob/main/iokit/Kernel/IOUserClient.cpp).
+The replacement is gated on the transport provider and the caller's
+AMFI-resolved `org.darwin-vm.transport` entitlement. All other providers preserve
+the original modern dispatcher; our provider never exposes diagnostic methods.
+
+For the caller task it invokes the exact native thread-task accessor at
+`0xfffffff00ab70c54` with TPIDR_EL1, matching the stock modern dispatcher call
+at `0xfffffff00b2911c4/1c8`. It allocates IOGeneralMemoryDescriptor and uses
+`initWithOptions` slot 0x78 (diversity 0xfe46, target `0xfffffff00b2582a0`),
+virtual64/in-out options 0x13, then prepare, descriptor-derived physical
+segments, and complete. No physical address is returned to userspace or sent
+to the host. A failed complete quarantines the descriptor instead of claiming
+it is safe to release/reuse. Concurrent imports, duplicate physical aliases,
+retained export, process death and GPU/display lifetime remain unproven.
+
+`build_surface_pin.py` guards the complete source SHA, entry bytes and PAC
+slots and places the 1,148-byte shim at `0xfffffff00aa5e000`, verified empty RX
+padding beyond the existing development-loader code. It extends only that
+fileset's executable extent. Source BootKC SHA is
+`934efdcc2c084515d952fd07c3ff4cba463990da9f54d4be25878b7f2c8d00c9`;
+corrected output SHA is
+`8aa47595e668a8c1b9646ff568bc324ef4b76b1edc2d6969effeff94290c431f`.
+SPTM, TXM, tree, native SMC, disk lineage and the boot registration path remain
+the pinned inputs. The disposable restore installer reports reached shell yes,
+zero XNU panics and verified GPU_LOAD_INSTALLED; both owned system probes ended
+without a first kernel panic. They were explicitly stopped. No unrelated VM
+was modified; the original interactive runner PID 88732 stayed running.
+
+**Host-only layout result:** `surface_layout_host.m` takes the verified guest
+metadata and creates a native buffer over 1,478 shared-file pages mapped in
+reverse physical order. Native Metal accepts the exact row/format, clears eight
+frames to signed/HDR half-float values and completes under five-second per-job
+deadlines. All 3,013,524 final pixels match via a second mapping of the file,
+without Metal readback; the 4 KiB beyond the measured allocation remains
+unchanged. All host texture/buffer aliases are released before unmapping.
+Metal API validation is enabled. Observed setup 28.723 ms and total eight-frame
+batch 10.206 ms are **not guest transport latency or sustained pacing**.
+
+The system probe still records 53 successful host requests, **zero render/blit
+submissions**, and the original frontend IOSurface rejection. GUEST2 ends at
+104.573 s. No accelerated system frame, display retirement, or input recovery
+is claimed by this test. The next implementation must retain/register the
+actual descriptor pages, create a host alias resource with exact bounds, and
+retire all host/GPU/display ownership before unpinning. Pinning alone is not
+that lifetime contract.
+
+Reproduction (fresh output tags required):
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+python3 tools/gpu/build_surface_pin.py \
+  /Users/jdolbe1/dvm-artifacts/gpu-runtime-loader-ios27/bootkc /tmp/dvm/CA_SURFACE_PIN_KERNEL3
+python3 tools/gpu/build_system_bootstrap.py \
+  /tmp/dvm/CA_UIKIT_INVALIDATION_RED_BUILD1 \
+  /Users/jdolbe1/dvm-artifacts/extract/bin/backboardd /tmp/dvm/CA_SURFACE_PIN_BUILD2 --surface-pin-probe
+python3 tools/gpu/derive_gpu_manifest.py \
+  --source /Users/jdolbe1/dvm-artifacts/gpu-quartzcore-regions-ios27/control.json \
+  --bootkc /tmp/dvm/CA_SURFACE_PIN_KERNEL3/bootkc --output /tmp/dvm/CA_SURFACE_PIN_KERNEL3/control.json
+python3 tools/gpu/prepare_system_bootstrap.py /tmp/dvm/CA_SURFACE_PIN_BUILD2 \
+  /Users/jdolbe1/dvm-artifacts/gpu-quartzcore-render-ready-ios27/launchd.plist \
+  /Users/jdolbe1/dvm-artifacts/gpu-quartzcore-handoff-ios27/tc /tmp/dvm/CA_SURFACE_PIN_STAGE2
+python3 tools/gpu/run_guest_install.py --manifest /tmp/dvm/CA_SURFACE_PIN_KERNEL3/control.json \
+  --stage /tmp/dvm/CA_SURFACE_PIN_STAGE2 --tag CA_SURFACE_PIN_INSTALL2 --mmio-restore
+python3 tools/gpu/run_system_boot.py /tmp/dvm/CA_SURFACE_PIN_INSTALL2/warm-manifest.json \
+  --worker /tmp/dvm/CA_SYSTEM_LUT_HOST12/driver_host \
+  --library /Users/jdolbe1/dvm-artifacts/gpu-managed-pool-ios27/QuartzCore.metallib \
+  --library-cache /tmp/dvm/CA_SYSTEM_LIBRARY_CACHE10 --tag CA_SURFACE_PIN_GUEST2 --seconds 180
+python3 tools/gpu/verify_surface_pin.py /tmp/dvm/CA_SURFACE_PIN_GUEST2
+xcrun clang -fobjc-arc -O2 -Wall -Wextra -Werror tools/gpu/surface_layout_host.m \
+  -framework Foundation -framework Metal -o /tmp/dvm/CA_SURFACE_PIN_KERNEL3/surface_layout_host
+MTL_DEBUG_LAYER=1 /tmp/dvm/CA_SURFACE_PIN_KERNEL3/surface_layout_host \
+  /tmp/dvm/CA_SURFACE_PIN_GUEST2/pin-verification.json
+```
+
+See [the prioritized gaps](gpu-compositor-gaps-ios27.md) for the separate
+bounded cache survey and capability-gated paths discovered beyond our scenes.
+
+Durable evidence:
+`/Users/jdolbe1/dvm-artifacts/research/gpu-compositor-import-20260907-pin`.
+The diagnostic index preserves 618 records (88,001,862 bytes), including both
+failed/successful guest audits, manifests, compiler output and host validation.
+`execution-inputs/index.json` separately hashes the corrected BootKC, signed
+backboardd/plugin, TC, native host probe, six extracted framework images and
+RenderBox disassembly (12 files, 174,500,507 bytes). Disks/full guest RAM are
+excluded. The durable pin verifier was rerun successfully against the copied
+audit. All 81 host regressions and shell syntax checks passed before boot;
+QEMU was unchanged and its pinned binary was not rebuilt or overwritten.
