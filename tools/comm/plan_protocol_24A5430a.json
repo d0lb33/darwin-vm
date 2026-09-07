@@ -1,0 +1,314 @@
+[
+  {
+    "name": "ping",
+    "encoding": "v16@0:8"
+  },
+  {
+    "name": "addNewPlanWithAddress:matchingId:oid:confirmationCode:triggerType:userConsent:completion:",
+    "encoding": "v72@0:8@\"NSString\"16@\"NSString\"24@\"NSString\"32@\"NSString\"40q48q56@?<v@?@\"NSError\">64"
+  },
+  {
+    "name": "addNewPlanWithCardData:confirmationCode:triggerType:userConsent:completion:",
+    "encoding": "v56@0:8@\"NSString\"16@\"NSString\"24q32q40@?<v@?@\"NSError\">48"
+  },
+  {
+    "name": "carrierItemsShouldUpdate:completion:",
+    "encoding": "v28@0:8B16@?<v@?@\"NSArray\"@\"NSError\">20"
+  },
+  {
+    "name": "didCancelRemotePlan",
+    "encoding": "v16@0:8"
+  },
+  {
+    "name": "didDeletePlanItem:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanItem\"16@?<v@?B@\"NSError\">24"
+  },
+  {
+    "name": "didPurchasePlanForCarrier:mnc:gid1:gid2:state:",
+    "encoding": "v56@0:8@\"NSString\"16@\"NSString\"24@\"NSString\"32@\"NSString\"40@\"NSString\"48"
+  },
+  {
+    "name": "didPurchasePlanForCsn:iccid:profileServer:state:",
+    "encoding": "v48@0:8@\"NSData\"16@\"NSString\"24@\"NSString\"32@\"NSString\"40"
+  },
+  {
+    "name": "didPurchasePlanWithIccid:downloadProfile:",
+    "encoding": "v28@0:8@\"NSString\"16B24"
+  },
+  {
+    "name": "didPurchaseRemotePlanForEid:imei:meid:iccid:alternateSmdpFqdn:completion:",
+    "encoding": "v64@0:8@\"NSString\"16@\"NSString\"24@\"NSString\"32@\"NSString\"40@\"NSString\"48@?<v@?B>56"
+  },
+  {
+    "name": "didSelectPlanForData:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanItem\"16@?<v@?B@\"NSError\">24"
+  },
+  {
+    "name": "didSelectPlanForDefaultVoice:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanItem\"16@?<v@?B@\"NSError\">24"
+  },
+  {
+    "name": "didSelectPlansForIMessage:completion:",
+    "encoding": "v32@0:8@\"NSArray\"16@?<v@?B@\"NSError\">24"
+  },
+  {
+    "name": "didTransferPlanForCsn:iccid:srcIccid:profileServer:matchingId:state:",
+    "encoding": "v64@0:8@\"NSData\"16@\"NSString\"24@\"NSString\"32@\"NSString\"40@\"NSString\"48@\"NSString\"56"
+  },
+  {
+    "name": "getSupportedFlowTypes:",
+    "encoding": "v24@0:8@?<v@?Q@\"NSError\">16"
+  },
+  {
+    "name": "pendingReleaseRemotePlan",
+    "encoding": "v16@0:8"
+  },
+  {
+    "name": "planItemsWithCompletion:",
+    "encoding": "v24@0:8@?<v@?@\"NSArray\"@\"NSError\">16"
+  },
+  {
+    "name": "resumePlanProvisioning:userConsent:completion:",
+    "encoding": "v36@0:8B16q20@?<v@?@\"NSError\">28"
+  },
+  {
+    "name": "setUserInPurchaseFlow:",
+    "encoding": "v20@0:8B16"
+  },
+  {
+    "name": "shouldShowPlanSetup:",
+    "encoding": "v24@0:8@?<v@?B>16"
+  },
+  {
+    "name": "userSignupInitiatedOrFailed",
+    "encoding": "v16@0:8"
+  },
+  {
+    "name": "addNewRemotePlanWithAddress:matchingId:oid:confirmationCode:isPairing:withCSN:withContext:userConsent:completion:",
+    "encoding": "v84@0:8@\"NSString\"16@\"NSString\"24@\"NSString\"32@\"NSString\"40B48@\"NSString\"52@\"CTXPCServiceSubscriptionContext\"60q68@?<v@?@\"NSError\">76"
+  },
+  {
+    "name": "addNewRemotePlanWithCardData:confirmationCode:isPairing:withCSN:withContext:userConsent:completion:",
+    "encoding": "v68@0:8@\"NSString\"16@\"NSString\"24B32@\"NSString\"36@\"CTXPCServiceSubscriptionContext\"44q52@?<v@?@\"NSError\">60"
+  },
+  {
+    "name": "installPendingRemotePlan:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanItem\"16@?<v@?@\"NSError\">24"
+  },
+  {
+    "name": "isRemotePlanCapableWithContext:completion:",
+    "encoding": "v32@0:8@\"CTXPCServiceSubscriptionContext\"16@?<v@?B>24"
+  },
+  {
+    "name": "shouldShowAddNewRemotePlanWithContext:completion:",
+    "encoding": "v32@0:8@\"CTXPCServiceSubscriptionContext\"16@?<v@?BQ@\"NSString\"@\"NSError\">24"
+  },
+  {
+    "name": "getSelectedEnv:",
+    "encoding": "v24@0:8@?<v@?q>16"
+  },
+  {
+    "name": "mccMncOverride:",
+    "encoding": "v24@0:8@?<v@?qq>16"
+  },
+  {
+    "name": "setSelectedEnv:",
+    "encoding": "v24@0:8q16"
+  },
+  {
+    "name": "activatePlanPendingTransfer:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanPendingTransfer\"16@?<v@?B@\"NSString\"@\"NSDictionary\"@\"NSError\">24"
+  },
+  {
+    "name": "addNewPlanWithFlowType:completion:",
+    "encoding": "v32@0:8Q16@?<v@?@\"NSError\">24"
+  },
+  {
+    "name": "addNewRemotePlan:withCSN:withContext:userConsent:completion:",
+    "encoding": "v52@0:8B16@\"NSString\"20@\"CTXPCServiceSubscriptionContext\"28q36@?<v@?@\"NSError\">44"
+  },
+  {
+    "name": "cancelPlanActivation:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanPendingTransfer\"16@?<v@?@\"NSError\">24"
+  },
+  {
+    "name": "danglingPlanItemsShouldUpdate:completion:",
+    "encoding": "v28@0:8B16@?<v@?@\"NSArray\"@\"NSError\">20"
+  },
+  {
+    "name": "deleteAllRemoteProfiles",
+    "encoding": "v16@0:8"
+  },
+  {
+    "name": "deletePlanPendingTransfer:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanPendingTransfer\"16@?<v@?@\"NSError\">24"
+  },
+  {
+    "name": "deleteRemoteProfile:",
+    "encoding": "v24@0:8@\"NSString\"16"
+  },
+  {
+    "name": "didDeleteRemotePlanItem:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanItem\"16@?<v@?B@\"NSError\">24"
+  },
+  {
+    "name": "didEnablePlanItems:completion:",
+    "encoding": "v32@0:8@\"NSArray\"16@?<v@?@\"NSError\">24"
+  },
+  {
+    "name": "didEnablePlanItemsForTravel:completion:",
+    "encoding": "v32@0:8@\"NSArray\"16@?<v@?@\"NSError\">24"
+  },
+  {
+    "name": "didSelectPlanItem:enable:completion:",
+    "encoding": "v36@0:8@\"CTCellularPlanItem\"16B24@?<v@?B@\"NSError\">28"
+  },
+  {
+    "name": "didSelectRemotePlanItem:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanItem\"16@?<v@?B@\"NSError\">24"
+  },
+  {
+    "name": "eraseAllPlansWithCompletion:",
+    "encoding": "v24@0:8@?<v@?B@\"NSError\">16"
+  },
+  {
+    "name": "eraseAllRemotePlansWithCompletion:",
+    "encoding": "v24@0:8@?<v@?B@\"NSError\">16"
+  },
+  {
+    "name": "expirePlan",
+    "encoding": "v16@0:8"
+  },
+  {
+    "name": "fetchRemoteProfiles:",
+    "encoding": "v24@0:8@\"NSString\"16"
+  },
+  {
+    "name": "finishProvisioningWithCompletion:",
+    "encoding": "v24@0:8@?<v@?B>16"
+  },
+  {
+    "name": "finishRemoteProvisioningWithCompletion:",
+    "encoding": "v24@0:8@?<v@?B>16"
+  },
+  {
+    "name": "getAutoPlanSelectionWithCompletion:",
+    "encoding": "v24@0:8@?<v@?B>16"
+  },
+  {
+    "name": "getIMEIPrefix:",
+    "encoding": "v24@0:8@?<v@?@\"NSString\">16"
+  },
+  {
+    "name": "getPlansPendingTransferForTestabilityWithCompletion:",
+    "encoding": "v24@0:8@?<v@?@\"NSArray\"@\"NSError\">16"
+  },
+  {
+    "name": "getPlansPendingTransferWithCompletion:",
+    "encoding": "v24@0:8@?<v@?@\"NSArray\"@\"NSError\">16"
+  },
+  {
+    "name": "getPredefinedLabels:",
+    "encoding": "v24@0:8@?<v@?@\"NSArray\"@\"NSError\">16"
+  },
+  {
+    "name": "getRemoteInfo:",
+    "encoding": "v24@0:8@?<v@?@\"NSDictionary\"@\"NSError\">16"
+  },
+  {
+    "name": "getRoamingSignupOverrideWithCompletion:",
+    "encoding": "v24@0:8@?<v@?B>16"
+  },
+  {
+    "name": "getSelectedProxy:",
+    "encoding": "v24@0:8@?<v@?q>16"
+  },
+  {
+    "name": "getShortLabelsForLabels:completion:",
+    "encoding": "v32@0:8@\"NSArray\"16@?<v@?@\"NSArray\"@\"NSError\">24"
+  },
+  {
+    "name": "getSkipEligibilityCheck:",
+    "encoding": "v24@0:8@?<v@?B>16"
+  },
+  {
+    "name": "getSubscriptionContextUUIDforPlan:completion:",
+    "encoding": "v32@0:8@\"NSString\"16@?<v@?@\"NSString\"@\"NSError\">24"
+  },
+  {
+    "name": "latitudeLongitudeOverride:",
+    "encoding": "v24@0:8@?<v@?dd>16"
+  },
+  {
+    "name": "manageAccountForRemotePlan:completion:",
+    "encoding": "v32@0:8@\"CTCellularPlanItem\"16@?<v@?B@\"NSError\">24"
+  },
+  {
+    "name": "remapSimLabel:to:completion:",
+    "encoding": "v40@0:8@\"CTDanglingPlanItem\"16@\"CTCellularPlanItem\"24@?<v@?@\"NSError\">32"
+  },
+  {
+    "name": "remotePlanItemsWithUpdateFetch:completion:",
+    "encoding": "v28@0:8B16@?<v@?@\"NSArray\"@\"NSError\">20"
+  },
+  {
+    "name": "remoteUserDidProvideResponse:confirmationCode:plan:completion:",
+    "encoding": "v44@0:8B16@\"NSString\"20@\"CTCellularPlanItem\"28@?<v@?B@\"NSError\">36"
+  },
+  {
+    "name": "resolveSimLabel:completion:",
+    "encoding": "v32@0:8@\"CTDanglingPlanItem\"16@?<v@?@\"NSError\">24"
+  },
+  {
+    "name": "selectRemoteProfile:",
+    "encoding": "v24@0:8@\"NSString\"16"
+  },
+  {
+    "name": "setAutoPlanSelection:",
+    "encoding": "v20@0:8B16"
+  },
+  {
+    "name": "setIMEIPrefix:",
+    "encoding": "v24@0:8@\"NSString\"16"
+  },
+  {
+    "name": "setLabelForPlan:label:completion:",
+    "encoding": "v40@0:8@\"CTCellularPlanItem\"16@\"CTUserLabel\"24@?<v@?B@\"NSError\">32"
+  },
+  {
+    "name": "setLatitude:andLongitude:",
+    "encoding": "v32@0:8@\"NSNumber\"16@\"NSNumber\"24"
+  },
+  {
+    "name": "setMcc:andMnc:",
+    "encoding": "v32@0:8q16q24"
+  },
+  {
+    "name": "setRoamingSignupOverride:",
+    "encoding": "v20@0:8B16"
+  },
+  {
+    "name": "setSelectedProxy:",
+    "encoding": "v24@0:8q16"
+  },
+  {
+    "name": "setSkipEligibilityCheck:",
+    "encoding": "v20@0:8B16"
+  },
+  {
+    "name": "showUiIgnoringActivationFlags:",
+    "encoding": "v20@0:8B16"
+  },
+  {
+    "name": "startProvisioningWithCompletion:",
+    "encoding": "v24@0:8@?<v@?B>16"
+  },
+  {
+    "name": "startRemoteProvisioningWithCompletion:",
+    "encoding": "v24@0:8@?<v@?B>16"
+  },
+  {
+    "name": "userDidProvideResponse:confirmationCode:plan:completion:",
+    "encoding": "v48@0:8q16@\"NSString\"24@\"CTCellularPlanItem\"32@?<v@?B@\"NSError\">40"
+  }
+]
