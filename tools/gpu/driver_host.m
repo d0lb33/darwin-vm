@@ -240,7 +240,7 @@ static NSDictionary *Pipeline(DVMHost *host, uint64_t seq, NSDictionary *request
     };
 }
 static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request) {
-    uint64_t width, height, format,depth,type,storage;
+    uint64_t width, height, format,depth,type,storage,levels;
     MTLTextureUsage usage;
     if (!Number(request[@"width"], &width) || !Number(request[@"height"], &height) || !width ||
         !height || width > kMaxDimension || height > kMaxDimension ||
@@ -258,7 +258,9 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     bpp=DVMFormatBytes(format);pixel=format;
     if(!bpp)return HostError(seq, EINVAL, @"unsupported texture format");
     if(!DVMTextureUsageValid(format,storage,type,usage))return HostError(seq,EINVAL,@"texture format usage contract");
-    NSUInteger bytes = (NSUInteger)width * (NSUInteger)height * (NSUInteger)depth * bpp;
+    if(!Number(request[@"levels"]?:@1,&levels)||!DVMTextureLevelsValid(width,height,format,storage,type,levels))
+        return HostError(seq,EINVAL,@"texture mip level contract");
+    NSUInteger bytes = DVMTextureAllocationBytes(width,height,depth,format,levels);
     if (bytes > (storage==MTLStorageModePrivate?DVM_PRIVATE_TEXTURE_BYTES:DVM_TEXTURE_BYTES))
         return HostError(seq, EINVAL, @"texture exceeds storage-mode byte limit");
     if (bytes > kMaxTextures - host.textureBytes)
@@ -271,10 +273,11 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     descriptor.textureType=type;descriptor.depth=depth;
     descriptor.storageMode = storage==MTLStorageModePrivate?MTLStorageModePrivate:MTLStorageModeShared;
     descriptor.usage = usage;
+    descriptor.mipmapLevelCount=levels;
     id<MTLTexture> texture = [host.device newTextureWithDescriptor:descriptor];
     if (!texture)
         return HostError(seq, ENOMEM, @"Metal texture allocation failed");
-    if(texture.usage!=usage)return HostError(seq,ENOTSUP,@"native texture usage differs from requested contract");
+    if(texture.usage!=usage||texture.mipmapLevelCount!=levels)return HostError(seq,ENOTSUP,@"native texture usage differs from requested contract");
     DVMEntry *entry;
     if (!Add(host, @"texture", texture, &entry))
         return HostError(seq, ENOSPC, @"object table is full");
@@ -608,7 +611,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
         if(!alignment||DVM_SHARED_TEXTURE_ALIGNMENT%alignment||DVM_PRESENT_ROW%DVM_SHARED_TEXTURE_ALIGNMENT||
            DVM_MANAGED_PAGE_BYTES%DVM_SHARED_TEXTURE_ALIGNMENT)
             return HostError(seq,ENOTSUP,@"host cannot honor owned IOSurface alignment profile");
-        for(NSNumber *format in @[@70,@80]){
+        for(NSNumber *format in @[@70,@80,@115]){
             MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format.unsignedIntegerValue width:4 height:4 mipmapped:NO];
             d.storageMode=MTLStorageModePrivate;d.usage=DVM_TEXTURE_BLOCK_WRITES_ONLY|5u;
             id<MTLTexture> probe=[host.device newTextureWithDescriptor:d];

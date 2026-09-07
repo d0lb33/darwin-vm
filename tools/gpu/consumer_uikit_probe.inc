@@ -17,8 +17,13 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         DVMUIKitAddEffect(view,DVM_CA_UIKIT_EFFECT);
         fprintf(stderr,"GPU_LOAD_UIKIT_EFFECT kind=%u window=%u\n",DVM_CA_UIKIT_EFFECT,view.window!=nil);
 #endif
+        UIWindow *window=nil;
+#ifdef DVM_CA_UIKIT_WINDOW
+        stage="uikit-window";window=DVMUIKitAttachWindow(view,nil);
+#endif
         stage="uikit-layout";fprintf(stderr,"GPU_LOAD_UIKIT_STAGE name=%s\n",stage);
         [view layoutIfNeeded];UIKitInspect(view.layer,"before-display",0);UIKitDisplay(view.layer);[CATransaction commit];[CATransaction flush];UIKitInspect(view.layer,"after-display",0);
+        if(window)[[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.1]];
         MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:width height:height mipmapped:NO];
         d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
         id<MTLTexture> target=[device newTextureWithDescriptor:d];if(!target)fail("uikit-target");
@@ -65,6 +70,6 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
 #else
         if(different)fail("uikit-pixel-reference");
 #endif
-        renderer.layer=nil;renderer=nil;CGColorSpaceRelease(space);
+        renderer.layer=nil;renderer=nil;window.hidden=YES;window.rootViewController=nil;CGColorSpaceRelease(space);
     }@catch(NSException *e){fprintf(stderr,"GPU_LOAD_ERROR uikit_stage=%s name=%s reason=%.220s\n",stage,e.name.UTF8String,e.reason.UTF8String);exit(1);}
 }

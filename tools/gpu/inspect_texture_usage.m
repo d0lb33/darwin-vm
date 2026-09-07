@@ -3,7 +3,7 @@
 #import <Metal/Metal.h>
 int main(void){@autoreleasepool{
     id<MTLDevice> device=MTLCreateSystemDefaultDevice();
-    for(NSNumber *format in @[@70,@80]) for(NSNumber *value in @[@5,@65541]){
+    for(NSNumber *format in @[@70,@80,@115]) for(NSNumber *value in @[@5,@65541]){
         MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format.unsignedIntegerValue width:64 height:64 mipmapped:NO];
         d.storageMode=MTLStorageModePrivate;d.usage=value.unsignedIntegerValue;
         fprintf(stderr,"DESCRIPTOR usage=%lu %s\n",(unsigned long)d.usage,d.description.UTF8String);

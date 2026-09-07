@@ -15,3 +15,5 @@ done
 xcrun clang "${flags[@]}" "$repo/tools/gpu/test_surface_handoff.m" -framework Foundation -framework IOSurface -o "$out/test_surface_handoff"
 xcrun clang "${flags[@]}" "$repo/tools/gpu/driver_client.m" "$repo/tools/gpu/driver_workload.m" "$repo/tools/gpu/driver_guest.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/driver_client"
 cp "$repo/tools/gpu/"*.m "$repo/tools/gpu/"*.h "$repo/tools/gpu/"*.inc "$out/"
+
+xcrun clang "${flags[@]}" "$repo/tools/gpu/test_native_mip_alias.m" -framework Metal -framework Foundation -o "$out/test_native_mip_alias"

@@ -65,19 +65,39 @@ class HostTests(unittest.TestCase):
     def test_private_block_write_usage_contract(self):
         contract=self.rpc('capabilities')['contract']
         self.assertEqual(contract['privateColorTextureAdditionalUsages'],[65541])
-        self.assertEqual(contract['privateColorTextureUsageFormats'],[70,80])
-        for fmt in (70,80):
+        self.assertEqual(contract['privateColorTextureUsageFormats'],[70,80,115])
+        self.assertEqual(contract['colorAttachmentFormats'],[70,80,115])
+        for fmt in (70,80,115):
             t=self.rpc('texture',width=67,height=39,format=fmt,usage=65541,storage=2)
             self.assertTrue(t['ok']);self.assertEqual(t['nativeStorageMode'],2)
             self.assertFalse(self.rpc('read',texture=t['handle'])['ok'])
             self.assertTrue(self.rpc('release',handle=t['handle'])['ok'])
-        for fields in (dict(storage=0),dict(storage=1),dict(format=1),dict(format=115),
+        for fields in (dict(storage=0),dict(storage=1),dict(format=1),dict(format=10),
                        dict(type=7,depth=2),dict(usage=65536),dict(usage=65537),
                        dict(usage=65540),dict(usage=65543),dict(usage=131077)):
             request=dict(width=64,height=64,format=80,usage=65541,storage=2)
             request.update(fields)
             self.assertFalse(self.rpc('texture',**request)['ok'],request)
         self.assertEqual(self.rpc('stats')['live']['objects'],0)
+
+    def test_private_mip_extent_budget_and_invalid_target_level(self):
+        fields=dict(width=67,height=39,format=80,usage=5,storage=2,levels=4)
+        for bad in (dict(levels=0),dict(levels=8),dict(storage=0),dict(storage=1),dict(format=10),dict(type=7,depth=2)):
+            self.assertFalse(self.rpc('texture',**dict(fields,**bad))['ok'])
+        t=self.rpc('texture',**fields)['handle']
+        expected=sum(max(1,67>>i)*max(1,39>>i)*4 for i in range(4))
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],expected)
+        clear=dict(kind='render',target=t,level=4,load=2,store=1,clear=[1,0,0,1],operations=[])
+        self.assertFalse(self.rpc('renderSubmit',commands=[clear],uploads=[],readbacks=[])['ok'])
+        self.assertEqual(self.rpc('stats')['submissions'],0)
+        clear['level']=3;clear['operations']=[['scissor',0,0,9,4]]
+        self.assertFalse(self.rpc('renderSubmit',commands=[clear],uploads=[],readbacks=[])['ok'])
+        self.assertEqual(self.rpc('stats')['submissions'],0)
+        clear['operations']=[['scissor',0,0,8,4]]
+        self.assertTrue(self.rpc('renderSubmit',commands=[clear],uploads=[],readbacks=[])['ok'])
+        self.assertTrue(self.rpc('release',handle=t)['ok'])
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
+        self.assertFalse(self.rpc('texture',width=2048,height=2048,format=80,usage=5,storage=2,levels=2)['ok'])
 
     def test_staged_render_ownership_integrity_and_atomic_validation(self):
         target=self.rpc('texture',width=64,height=64,format=80,usage=5)['handle']

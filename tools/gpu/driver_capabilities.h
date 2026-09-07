@@ -1,7 +1,7 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 13u
+#define DVM_CONTRACT_VERSION 16u
 #define DVM_RENDER_REQUEST_BYTES (2u*1024u*1024u)
 #define DVM_RENDER_REQUEST_CHUNK 32768u
 #define DVM_RENDER_DIRECT_BYTES 60000u
@@ -44,9 +44,24 @@ static inline BOOL DVMTextureUsageValid(NSUInteger format,NSUInteger storage,NSU
         // Observed QuartzCore allocation: render writes followed by sampling.
         // Compute writes and other private-bit combinations remain unvalidated.
         return storage==MTLStorageModePrivate&&type==MTLTextureType2D&&
-            (format==70||format==80)&&usage==(DVM_TEXTURE_BLOCK_WRITES_ONLY|5u);
+            (format==70||format==80||format==115)&&usage==(DVM_TEXTURE_BLOCK_WRITES_ONLY|5u);
     }
     return usage&&!(usage&~DVMFormatUsageMask(format));
+}
+static inline BOOL DVMTextureLevelsValid(NSUInteger width,NSUInteger height,NSUInteger format,NSUInteger storage,NSUInteger type,NSUInteger levels){
+    if(!width||!height||!levels)return NO;
+    if(levels==1)return YES;
+    if(storage!=MTLStorageModePrivate||type!=MTLTextureType2D||(format!=70&&format!=80&&format!=115))return NO;
+    NSUInteger maxLevels=1,extent=MAX(width,height);
+    while(extent>1){extent>>=1;maxLevels++;}
+    return levels<=maxLevels;
+}
+static inline NSUInteger DVMTextureAllocationBytes(NSUInteger width,NSUInteger height,NSUInteger depth,NSUInteger format,NSUInteger levels){
+    NSUInteger bytes=0;
+    for(NSUInteger level=0;level<levels;level++){
+        bytes+=MAX((NSUInteger)1,width>>level)*MAX((NSUInteger)1,height>>level)*depth*DVMFormatBytes(format);
+    }
+    return bytes;
 }
 static inline unsigned DVMConstantBytes(NSUInteger type) {
     switch(type){case MTLDataTypeBool:case MTLDataTypeUChar:return 1;case MTLDataTypeUChar2:return 2;case MTLDataTypeUChar4:return 4;case MTLDataTypeUInt:case MTLDataTypeInt:case MTLDataTypeFloat:return 4;default:return 0;}
@@ -97,9 +112,10 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"staged-render-and-private-color-v13",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"private-disjoint-mip-and-half-float-render-v16",
         @"privateColorTextureAdditionalUsages":@[@(DVM_TEXTURE_BLOCK_WRITES_ONLY|5u)],
-        @"privateColorTextureUsageFormats":@[@70,@80],
+        @"privateColorTextureUsageFormats":@[@70,@80,@115],@"colorAttachmentFormats":@[@70,@80,@115],
+        @"private2DMipFormats":@[@70,@80,@115],@"maximumMipLevels":@13,@"mipRenderAttachments":@YES,@"privateMipReadWrite":@"application-guaranteed-disjoint-subresources-native-hazard-tracking",@"mipGeneration":@NO,@"textureViews":@NO,
         @"renderRequestBytes":@DVM_RENDER_REQUEST_BYTES,@"renderRequestChunkBytes":@DVM_RENDER_REQUEST_CHUNK,@"renderRequestTransactions":@1,
         @"framebufferRead":@"current-fragment-single-color-attachment-ordered-programmable-blending",
         @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureUploadTransactions":@1,

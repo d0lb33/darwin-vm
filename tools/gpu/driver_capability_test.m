@@ -24,7 +24,7 @@ int main(void){@autoreleasepool{
     check(![device newTextureWithDescriptor:texture],"private block usage rejected on shared storage");
     texture.storageMode=MTLStorageModePrivate;texture.usage=65543;
     check(![device newTextureWithDescriptor:texture],"block usage compute writes unvalidated");
-    texture.usage=65541;texture.pixelFormat=MTLPixelFormatRGBA16Float;
+    texture.usage=65541;texture.pixelFormat=MTLPixelFormatR8Unorm;
     check(![device newTextureWithDescriptor:texture],"block usage format bound");
     texture.usage=MTLTextureUsageShaderRead;texture.storageMode=MTLStorageModeShared;texture.pixelFormat=MTLPixelFormatBGRA8Unorm;
     check(requests==1,"out of bounds rejected before transport");

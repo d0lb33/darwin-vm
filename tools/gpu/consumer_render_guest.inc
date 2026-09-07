@@ -121,12 +121,12 @@ static id<MTLSamplerState> DVMNewSampler(DVMDevice *device,MTLSamplerDescriptor 
 static id<MTLRenderCommandEncoder> DVMNewRenderEncoder(DVMCommand *command,MTLRenderPassDescriptor *d) {
     [command encoding];if(command.openEncoders||!d)reject(@"render pass state");
     MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[0];
-    if(![(id)a.texture isKindOfClass:DVMTexture.class]||a.texture.device!=command.device||a.texture.textureType!=MTLTextureType2D||a.level||a.slice||a.depthPlane||a.resolveTexture||d.depthAttachment.texture||d.stencilAttachment.texture)
+    if(![(id)a.texture isKindOfClass:DVMTexture.class]||a.texture.device!=command.device||a.texture.textureType!=MTLTextureType2D||a.level>=a.texture.mipmapLevelCount||a.slice||a.depthPlane||a.resolveTexture||d.depthAttachment.texture||d.stencilAttachment.texture)
         reject(@"render pass outside single owned color target contract");
     for(unsigned i=1;i<8;i++)if(d.colorAttachments[i].texture)reject(@"multiple color attachments");
     [command.resources addObject:a.texture];
     NSMutableArray *ops=[NSMutableArray array];
-    [command.commands addObject:@{@"kind":@"render",@"target":[(DVMTexture *)a.texture handle],@"load":@(a.loadAction),@"store":@(a.storeAction),@"clear":@[@(a.clearColor.red),@(a.clearColor.green),@(a.clearColor.blue),@(a.clearColor.alpha)],@"operations":ops}];
+    [command.commands addObject:@{@"kind":@"render",@"target":[(DVMTexture *)a.texture handle],@"level":@(a.level),@"load":@(a.loadAction),@"store":@(a.storeAction),@"clear":@[@(a.clearColor.red),@(a.clearColor.green),@(a.clearColor.blue),@(a.clearColor.alpha)],@"operations":ops}];
     command.openEncoders++;DVMRenderEncoder *e=[DVMRenderEncoder new];e.command=command;e.operations=ops;
     e.vertexBindings=[NSMutableDictionary dictionary];e.fragmentBindings=[NSMutableDictionary dictionary];return e;
 }

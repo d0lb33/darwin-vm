@@ -86,7 +86,7 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @property(nonatomic, strong) NSData *pendingUpload;
 @property(nonatomic, strong) NSData *completedShadow;
 @property(nonatomic) NSUInteger width;
-@property(nonatomic) NSUInteger height,depth;
+@property(nonatomic) NSUInteger height,depth,mipLevels;
 @property(nonatomic) MTLTextureType textureType;
 @property(nonatomic) MTLPixelFormat pixelFormat;
 @property(nonatomic) MTLTextureUsage usage;
@@ -322,7 +322,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
         @"height" : @(d.height), @"depth":@(d.depth), @"type":@(d.textureType),
         @"format" : @(d.pixelFormat),
         @"storage" : @(d.storageMode),
-        @"usage" : @(d.usage)
+        @"usage" : @(d.usage),@"levels":@(d.mipmapLevelCount)
     }
                            error:&e];
     if (!r)
@@ -331,7 +331,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     o.owner = self;
     o.handle = r[@"handle"];
     o.width = d.width;
-    o.height = d.height;o.depth=d.depth;o.textureType=d.textureType;
+    o.height = d.height;o.depth=d.depth;o.textureType=d.textureType;o.mipLevels=d.mipmapLevelCount;
     o.pixelFormat = d.pixelFormat;
     o.usage = d.usage;
     o.acceptedOptions=d.resourceOptions;
@@ -464,7 +464,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (IOSurfaceRef)iosurface {return (__bridge IOSurfaceRef)self.surfaceObject;}
 - (NSUInteger)iosurfacePlane {return 0;}
 - (NSUInteger)mipmapLevelCount {
-    return 1;
+    return self.mipLevels?:1;
 }
 - (MTLTextureCompressionType)compressionType {return MTLTextureCompressionTypeLossless;}
 - (NSUInteger)arrayLength {

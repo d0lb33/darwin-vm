@@ -33,7 +33,7 @@ static NSDictionary *RenderPipeline(DVMHost *host,uint64_t seq,NSDictionary *r) 
     id<MTLFunction> f=[r[@"fragmentHandle"] unsignedLongLongValue]?Entry(host,r[@"fragmentHandle"],@"function").object:[fl.object newFunctionWithName:r[@"fragment"]];
     if(!v||!f||v.functionType!=MTLFunctionTypeVertex||f.functionType!=MTLFunctionTypeFragment)return HostError(seq,EINVAL,@"render function stages");
     NSArray *c=r[@"color"],*attrs=r[@"attributes"],*layouts=r[@"layouts"];
-    if(!RenderNumbers(c,9)||(![c[0] isEqual:@80]&&![c[0] isEqual:@70])||[c[1] unsignedIntValue]>1||
+    if(!RenderNumbers(c,9)||(![c[0] isEqual:@80]&&![c[0] isEqual:@70]&&![c[0] isEqual:@115])||[c[1] unsignedIntValue]>1||
        !RenderUInt(c[2],18)||!RenderUInt(c[3],18)||!RenderUInt(c[4],4)||!RenderUInt(c[5],18)||!RenderUInt(c[6],18)||!RenderUInt(c[7],4)||!RenderUInt(c[8],15)||
        ![r[@"depth"] isEqual:@0]||![r[@"stencil"] isEqual:@0]||![attrs isKindOfClass:NSArray.class]||attrs.count>DVM_RENDER_BUFFERS||![layouts isKindOfClass:NSArray.class]||layouts.count>DVM_RENDER_BUFFERS)
         return HostError(seq,ENOTSUP,@"render attachment/layout contract");
@@ -111,7 +111,16 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
         DVMEntry *target=Entry(host,pass[@"target"],@"texture");NSArray *clear=pass[@"clear"],*ops=pass[@"operations"];
         if(target.sharedRender){if(target.sharedRender.state!=DVMSharedAcquired)return HostError(seq,EBUSY,@"shared render target is not acquired");[sharedTargets addObject:target.sharedRender];}
         if(!target||[(id<MTLTexture>)target.object textureType]!=MTLTextureType2D||!([(id<MTLTexture>)target.object usage]&MTLTextureUsageRenderTarget)||!RenderUInt(pass[@"load"],2)||!RenderUInt(pass[@"store"],1)||!RenderNumbers(clear,4)||![ops isKindOfClass:NSArray.class]||ops.count>256)return HostError(seq,EINVAL,@"render pass descriptor");
-        MTLRenderPassDescriptor *d=[MTLRenderPassDescriptor renderPassDescriptor];d.colorAttachments[0].texture=target.object;d.colorAttachments[0].loadAction=[pass[@"load"] unsignedIntegerValue];d.colorAttachments[0].storeAction=[pass[@"store"] unsignedIntegerValue];d.colorAttachments[0].clearColor=MTLClearColorMake([clear[0] doubleValue],[clear[1] doubleValue],[clear[2] doubleValue],[clear[3] doubleValue]);
+        uint64_t level;
+        if(!Number(pass[@"level"]?:@0,&level)||level>=[(id<MTLTexture>)target.object mipmapLevelCount])return HostError(seq,EINVAL,@"render target mip level");
+        NSUInteger targetWidth=MAX((NSUInteger)1,target.width>>level),targetHeight=MAX((NSUInteger)1,target.height>>level);
+        // Native Metal accepts reading earlier mip subresources while writing
+        // a later mip in this allocation (test_native_mip_alias, validation on).
+        // Reflection cannot identify a shader's dynamic source LOD. As in
+        // native Metal, the application must keep read/write subresources
+        // disjoint. This does not authorize sampling the destination mip.
+        BOOL disjointMipCandidate=level>0&&[(id<MTLTexture>)target.object storageMode]==MTLStorageModePrivate;
+        MTLRenderPassDescriptor *d=[MTLRenderPassDescriptor renderPassDescriptor];d.colorAttachments[0].level=level;d.colorAttachments[0].texture=target.object;d.colorAttachments[0].loadAction=[pass[@"load"] unsignedIntegerValue];d.colorAttachments[0].storeAction=[pass[@"store"] unsignedIntegerValue];d.colorAttachments[0].clearColor=MTLClearColorMake([clear[0] doubleValue],[clear[1] doubleValue],[clear[2] doubleValue],[clear[3] doubleValue]);
         id<MTLRenderCommandEncoder> encoder=[cb renderCommandEncoderWithDescriptor:d];
         DVMEntry *pipeline=nil;NSMutableDictionary *vertexBuffers=[NSMutableDictionary dictionary],*fragmentBuffers=[NSMutableDictionary dictionary],*fragmentTextures=[NSMutableDictionary dictionary],*fragmentSamplers=[NSMutableDictionary dictionary];NSString *failure=nil;
         for(NSArray *op in ops){
@@ -123,8 +132,8 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
                 NSUInteger value=[op[1] unsignedIntegerValue];if([name isEqual:@"cull"])[encoder setCullMode:value];else if([name isEqual:@"winding"])[encoder setFrontFacingWinding:value];else if([name isEqual:@"fill"])[encoder setTriangleFillMode:value];else [encoder setStencilReferenceValue:(uint32_t)value];
             } else if([name isEqual:@"viewport"]&&op.count==7&&RenderNumbers([op subarrayWithRange:NSMakeRange(1,6)],6)){
                 MTLViewport v={[op[1] doubleValue],[op[2] doubleValue],[op[3] doubleValue],[op[4] doubleValue],[op[5] doubleValue],[op[6] doubleValue]};if(v.width<=0||v.height<=0||v.width>4096||v.height>4096||fabs(v.originX)>4096||fabs(v.originY)>4096||v.znear<0||v.zfar>1||v.znear>v.zfar){failure=@"viewport bounds";break;}[encoder setViewport:v];
-            } else if([name isEqual:@"scissor"]&&op.count==5&&RenderUInt(op[1],target.width)&&RenderUInt(op[2],target.height)&&RenderUInt(op[3],target.width)&&RenderUInt(op[4],target.height)){
-                MTLScissorRect s={[op[1] unsignedIntegerValue],[op[2] unsignedIntegerValue],[op[3] unsignedIntegerValue],[op[4] unsignedIntegerValue]};if(!s.width||!s.height||s.width>target.width-s.x||s.height>target.height-s.y){failure=@"scissor bounds";break;}[encoder setScissorRect:s];
+            } else if([name isEqual:@"scissor"]&&op.count==5&&RenderUInt(op[1],targetWidth)&&RenderUInt(op[2],targetHeight)&&RenderUInt(op[3],targetWidth)&&RenderUInt(op[4],targetHeight)){
+                MTLScissorRect s={[op[1] unsignedIntegerValue],[op[2] unsignedIntegerValue],[op[3] unsignedIntegerValue],[op[4] unsignedIntegerValue]};if(!s.width||!s.height||s.width>targetWidth-s.x||s.height>targetHeight-s.y){failure=@"scissor bounds";break;}[encoder setScissorRect:s];
             } else if([name isEqual:@"blend"]&&op.count==5&&RenderNumbers([op subarrayWithRange:NSMakeRange(1,4)],4)) [encoder setBlendColorRed:[op[1] floatValue] green:[op[2] floatValue] blue:[op[3] floatValue] alpha:[op[4] floatValue]];
             else if(([name isEqual:@"vertexBuffer"]||[name isEqual:@"fragmentBuffer"])&&op.count==4&&RenderUInt(op[3],DVM_RENDER_BUFFERS-1)){
                 if([op[1] isEqual:@0]&&[op[2] isEqual:@0]){
@@ -137,7 +146,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
             } else if(([name isEqual:@"vertexBytes"]||[name isEqual:@"fragmentBytes"])&&op.count==3&&RenderUInt(op[2],DVM_RENDER_BUFFERS-1)){
                 NSData *data=DVMBPayload(op[1]);if(!data.length||data.length>DVM_INLINE_BYTES){failure=@"render inline bounds";break;}if([name isEqual:@"vertexBytes"]){[encoder setVertexBytes:data.bytes length:data.length atIndex:[op[2] unsignedIntegerValue]];vertexBuffers[op[2]]=@[@(data.length)];}else {[encoder setFragmentBytes:data.bytes length:data.length atIndex:[op[2] unsignedIntegerValue]];fragmentBuffers[op[2]]=@[@(data.length)];}
             } else if(([name isEqual:@"fragmentTexture"]||[name isEqual:@"fragmentSampler"])&&op.count==3&&RenderUInt(op[2],[name isEqual:@"fragmentTexture"]?DVM_FRAGMENT_TEXTURES-1:DVM_FRAGMENT_SAMPLERS-1)){
-                BOOL texture=[name isEqual:@"fragmentTexture"];DVMEntry *e=Entry(host,op[1],texture?@"texture":@"sampler");if((!e&&![op[1] isEqual:@0])||(texture&&e&&(!([(id<MTLTexture>)e.object usage]&MTLTextureUsageShaderRead)||e==target||(e.sharedRender&&e.sharedRender.state!=DVMSharedAcquired)))){failure=@"fragment resource ownership/usage";break;}if(texture){[encoder setFragmentTexture:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentTextures[op[2]]=e;}else {[encoder setFragmentSamplerState:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentSamplers[op[2]]=e;}
+                BOOL texture=[name isEqual:@"fragmentTexture"];DVMEntry *e=Entry(host,op[1],texture?@"texture":@"sampler");if((!e&&![op[1] isEqual:@0])||(texture&&e&&(!([(id<MTLTexture>)e.object usage]&MTLTextureUsageShaderRead)||(e==target&&!disjointMipCandidate)||(e.sharedRender&&e.sharedRender.state!=DVMSharedAcquired)))){failure=@"fragment resource ownership/usage";break;}if(texture){[encoder setFragmentTexture:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentTextures[op[2]]=e;}else {[encoder setFragmentSamplerState:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentSamplers[op[2]]=e;}
             } else if([name isEqual:@"draw"]&&op.count==5&&RenderUInt(op[1],4)&&RenderUInt(op[2],4096)&&RenderUInt(op[3],4096)&&RenderUInt(op[4],64)&&pipeline){
                 NSUInteger start=[op[2] unsignedIntegerValue],count=[op[3] unsignedIntegerValue],instances=[op[4] unsignedIntegerValue];if(!count||!instances||start+count>4096){failure=@"draw extent";break;}
                 for(NSArray *layout in pipeline.object[@"layouts"]){NSUInteger elements=[layout[2] unsignedIntegerValue]==2?instances:[layout[2] unsignedIntegerValue]==0?1:start+count;NSArray *bound=vertexBuffers[layout[0]];if(!bound||elements*[layout[1] unsignedIntegerValue]>[bound[0] unsignedIntegerValue]){failure=@"vertex footprint exceeds binding";break;}}

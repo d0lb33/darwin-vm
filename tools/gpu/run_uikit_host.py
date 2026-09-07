@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import plistlib
 import re
 import shlex
 from pathlib import Path
@@ -18,6 +19,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('out',type=Path)
     p.add_argument('--effect',choices=('none','blur','glass'),default='none',help='actual UIVisualEffectView over the checker')
+    p.add_argument('--window-root',action='store_true',help='render the entire attached UIWindow layer tree')
+    p.add_argument('--window',action='store_true',help='attach view to a public UIWindow; log real lifecycle state')
     p.add_argument('--frames',type=int,choices=(1,3),default=1)
     p.add_argument('--display-animate',action='store_true',help='native reference for alternating card geometry/transparency')
     p.add_argument('--display-frame',type=int,help='native 1179x2556 display-layout reference with this final frame marker')
@@ -31,6 +34,7 @@ def main():
     libraries.add_argument('--forwarded-library',type=Path,help='explicit host-rehearsal substitution, raw MTLB or fat library')
     libraries.add_argument('--native-library',type=Path,help='native host control using selected AIR instead of its default FAT library')
     a=p.parse_args()
+    if a.window_root and (not a.window or a.display_frame is not None):p.error('window root requires window, no display reference')
     if a.diagnostic_unsplit and not a.forwarded_library:p.error('unsplit requires forwarded control')
     if a.native_contract and a.forwarded_library:p.error('native contract requires a native control')
     if a.native_query and not a.native_contract:p.error('native query requires native contract')
@@ -39,6 +43,18 @@ def main():
     if a.display_frame is not None and (not 3<=a.display_frame<=1024 or a.frames!=1 or a.forwarded_library or a.animate):p.error('display reference requires native single image, frame 3..1024')
     if a.animate and a.frames!=3:p.error('animated control requires three frames')
     a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
+    executable=a.out/'test'
+    if a.window:
+        bundle=a.out/'UIKitProbe.app';executable=bundle/'Contents/MacOS/UIKitProbe'
+        executable.parent.mkdir(parents=True)
+        (bundle/'Contents/Info.plist').write_bytes(plistlib.dumps(dict(
+            CFBundleIdentifier='org.darwinvm.gpu.probe'+hashlib.sha256(str(a.out).encode()).hexdigest()[:12],CFBundleName='DVM UIKit Probe',
+            CFBundleExecutable='UIKitProbe',CFBundlePackageType='APPL',
+            CFBundleVersion='1',CFBundleShortVersionString='1.0',LSMinimumSystemVersion='27.0',
+            NSHighResolutionCapable=True,UIApplicationSceneManifest=dict(
+                UIApplicationSupportsMultipleScenes=False,UISceneConfigurations={
+                    'UIWindowSceneSessionRoleApplication':[dict(UISceneConfigurationName='Probe',
+                        UISceneClassName='UIWindowScene',UISceneDelegateClassName='DVMUIKitHostSceneDelegate')]}))))
     src=Path(__file__).resolve().parent
     sdk=Path(subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip())
     flags=['-target','arm64-apple-ios27.0-macabi','-isysroot',str(sdk),
@@ -47,6 +63,10 @@ def main():
         '-Wno-deprecated-declarations','-Wno-protocol','-Wno-objc-protocol-property-synthesis']
     sources=[src/'test_uikit_host.m'];env=os.environ.copy()
     for k in ('DVM_DRIVER_LIBRARY','DVM_REHEARSAL_AIR','DVM_UIKIT_DIAGNOSTIC_UNSPLIT','DVM_UIKIT_NATIVE_AIR','DVM_UIKIT_NATIVE_CONTRACT','DVM_UIKIT_NATIVE_QUERIES','DVM_UIKIT_NATIVE_PIPELINE_DELAY_US'):env.pop(k,None)
+    env.pop('DVM_UIKIT_WINDOW_ROOT',None)
+    if a.window_root:env['DVM_UIKIT_WINDOW_ROOT']='1'
+    env.pop('DVM_UIKIT_WINDOW',None)
+    if a.window:env['DVM_UIKIT_WINDOW']='1'
     env['DVM_UIKIT_HOST_FRAMES']=str(a.frames)
     env.pop('DVM_UIKIT_HOST_ANIMATE',None)
     env.pop('DVM_UIKIT_DISPLAY_FRAME',None)
@@ -67,6 +87,8 @@ def main():
     metadata['frame_time_step_seconds']=1/60
     metadata['animate']=a.animate
     metadata['effect']=a.effect
+    metadata['window_requested']=a.window
+    metadata['window_root']=a.window_root
     metadata['display_frame']=a.display_frame
     metadata['display_animate']=a.display_animate
     metadata['width']=1179 if a.display_frame is not None else 320
@@ -105,7 +127,8 @@ def main():
     metadata['native_query_overrides']=a.native_query
     metadata['native_pipeline_delay_us']=a.native_pipeline_delay_us
     argv=['xcrun','clang',*flags,*map(str,sources),'-framework','Foundation','-framework','Metal',
-        '-framework','QuartzCore','-framework','CoreGraphics','-framework','UIKit','-framework','IOSurface','-o',str(a.out/'test')]
+        '-framework','QuartzCore','-framework','CoreGraphics','-framework','UIKit','-framework','IOSurface','-o',str(executable)]
+    metadata['executable']=str(executable)
     metadata['build_argv']=argv
     metadata['validation_environment']={k:env[k] for k in ('MTL_DEBUG_LAYER','MTL_SHADER_VALIDATION') if k in env}
     dependencies={}
@@ -118,11 +141,11 @@ def main():
     started=time.monotonic()
     with (a.out/'build.log').open('wb') as log:subprocess.run(argv,stdout=log,stderr=log,check=True,timeout=60)
     metadata['build_seconds']=time.monotonic()-started
-    metadata['binary_sha256']=hashlib.sha256((a.out/'test').read_bytes()).hexdigest()
+    metadata['binary_sha256']=hashlib.sha256(executable.read_bytes()).hexdigest()
     started=time.monotonic()
     try:
         with (a.out/'result.log').open('wb') as log:
-            r=subprocess.run([str(a.out/'test'),str(a.out)],env=env,stdout=log,stderr=log,timeout=30)
+            r=subprocess.run([str(executable),str(a.out)],env=env,stdout=log,stderr=log,timeout=30)
         metadata['exit']=r.returncode
         r.check_returncode()
         for name in ('gpu','cpu'):

@@ -5,6 +5,7 @@
 // CPU layer rendering is captured separately; it is not a byte-exact GPU oracle.
 #include "consumer_uikit_scene.inc"
 #include "consumer_uikit_effect_scene.inc"
+#include "consumer_uikit_window.inc"
 #ifdef DVM_CA_UIKIT_TRACE
 #import <objc/runtime.h>
 extern CFTypeID CABackingStoreGetTypeID(void);

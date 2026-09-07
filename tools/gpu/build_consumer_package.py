@@ -20,10 +20,12 @@ p.add_argument('--uikit',action='store_true',help='actual UIKit view tree; offsc
 p.add_argument('--uikit-external-reference',action='store_true',help='retire after UIKit capture; pixel acceptance requires independent native-reference analysis')
 p.add_argument('--uikit-animate',action='store_true',help='alternate UIKit card geometry and transparency in a displayed batch')
 p.add_argument('--uikit-effect',choices=('none','blur','glass'),default='none',help='actual UIKit blur/glass view; offscreen experiment')
+p.add_argument('--uikit-window',action='store_true',help='attach to a public UIWindow and record lifecycle state')
 p.add_argument('--uikit-trace',action='store_true',help='observe original backing-store conversion in the isolated UIKit process')
 a=p.parse_args()
 if a.renderer_flags and not (a.orientation or a.uikit):p.error('renderer flags require an orientation or UIKit diagnostic')
 if a.orientation and (a.uikit or a.frames!=1 or a.shared_surface or a.regions or a.scene):p.error('orientation requires --frames 1, offscreen, no other scene mode')
+if a.uikit_window and (not a.uikit or a.shared_surface):p.error('window probe requires offscreen UIKit')
 if a.uikit_effect!='none' and (not a.uikit or a.shared_surface):p.error('effect experiment requires offscreen UIKit')
 if a.uikit_animate and not (a.uikit and a.shared_surface):p.error('UIKit animation requires displayed UIKit')
 if a.uikit_trace and (not a.uikit or a.shared_surface):p.error('UIKit tracing requires the offscreen UIKit probe')
@@ -42,7 +44,7 @@ sdk=subprocess.check_output(['xcrun','--sdk','iphoneos' if a.uikit else 'macosx'
 flags=['-target','arm64-apple-ios27.0','-isysroot',sdk,'-Wno-incompatible-sysroot',
        '-fobjc-arc','-fobjc-arc-exceptions','-O1','-Wall','-Wextra','-Werror',
        '-Wno-deprecated-declarations','-fno-objc-msgsend-selector-stubs']
-uikit_headers=[f'-DDVM_CA_UIKIT_EFFECT={("none","blur","glass").index(a.uikit_effect)}']+(['-DDVM_ORIENTATION_GUEST'] if a.orientation else [])+(['-DDVM_CA_UIKIT'] if a.uikit else [])+(['-DDVM_CA_UIKIT_ANIMATE'] if a.uikit_animate else [])+(['-DDVM_CA_UIKIT_TRACE'] if a.uikit_trace else [])+(['-DDVM_CA_UIKIT_EXTERNAL_REFERENCE'] if a.uikit_external_reference else [])
+uikit_headers=[f'-DDVM_CA_UIKIT_EFFECT={("none","blur","glass").index(a.uikit_effect)}']+(['-DDVM_ORIENTATION_GUEST'] if a.orientation else [])+(['-DDVM_CA_UIKIT'] if a.uikit else [])+(['-DDVM_CA_UIKIT_ANIMATE'] if a.uikit_animate else [])+(['-DDVM_CA_UIKIT_WINDOW'] if a.uikit_window else [])+(['-DDVM_CA_UIKIT_TRACE'] if a.uikit_trace else [])+(['-DDVM_CA_UIKIT_EXTERNAL_REFERENCE'] if a.uikit_external_reference else [])
 subprocess.run(['xcrun','clang',*flags,*uikit_headers,f'-DDVM_CA_RENDERER_FLAGS={a.renderer_flags}',*(['-DDVM_CA_SHARED'] if a.shared_surface else []),*(['-DDVM_CA_REGIONS'] if a.regions else []),f'-DDVM_CA_FRAMES={a.frames}',f'-DDVM_CA_HZ={a.hz}',f'-DDVM_CA_SCENE={a.scene}','-c',str(src/'consumer_package.m'),'-o',str(a.out/'consumer_package.o')],check=True)
 symbols=subprocess.check_output(['nm','-u',str(a.out/'consumer_package.o')],text=True).split()
 stub=a.out/'stubs/usr/lib/libobjc.tbd';text=stub.read_text()
@@ -52,7 +54,7 @@ stub=a.out/'stubs/usr/lib/libSystem.tbd';text=stub.read_text()
 added=[s for s in ('_task_info','_mach_task_self_','_backtrace','_sigaction','_memset_pattern16') if '"'+s+'"' not in text]
 stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))
 for framework,names in {
-    'Foundation':['_NSSetUncaughtExceptionHandler',*(['_OBJC_CLASS_$_NSThread'] if a.uikit else [])],
+    'Foundation':['_NSSetUncaughtExceptionHandler',*(['_OBJC_CLASS_$_NSThread','_OBJC_CLASS_$_NSRunLoop'] if a.uikit else [])],
     'CoreFoundation':['_CFDataCreate',*(['_CFGetTypeID','_CFCopyDescription'] if a.uikit else [])],
     'CoreGraphics':[*(['_CGContextSetInterpolationQuality'] if a.orientation else []),'_CGPointZero','_CGDataProviderCreateWithCFData','_CGDataProviderRelease','_CGImageCreate','_CGImageRelease',*(['_CGBitmapContextCreate','_CGBitmapContextCreateImage','_CGContextRelease','_CGContextTranslateCTM','_CGContextScaleCTM'] if a.uikit or a.orientation else [])],
     'QuartzCore':['_CATransform3DMakeScale','_kCAFilterNearest',*(['_CACurrentMediaTime'] if a.uikit or a.orientation else []),*(['_CABackingStoreGetTypeID'] if a.uikit_trace else [])],
@@ -63,7 +65,8 @@ for framework,names in {
 binary=a.out/'DVMProxy.bundle/DVMProxy'
 if a.uikit:
     stub=a.out/'stubs/System/Library/Frameworks/UIKit.framework/UIKit.tbd';stub.parent.mkdir(exist_ok=True)
-    names=[s for s in symbols if s.startswith('_OBJC_CLASS_$_UI')]
+    names=[s for s in symbols if s.startswith('_OBJC_CLASS_$_UI') or s in
+           ('_UIAccessibilityIsReduceTransparencyEnabled','_UIAccessibilityIsReduceMotionEnabled')]
     stub.write_text('--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-ios ]\ninstall-name: /System/Library/Frameworks/UIKit.framework/UIKit\nexports:\n  - targets: [ arm64-ios ]\n    symbols: [ '+', '.join('"'+s+'"' for s in names)+' ]\n...\n')
 subprocess.run(['xcrun','clang',*flags,'-F',str(a.out/'stubs/System/Library/Frameworks'),'-L',str(a.out/'stubs/usr/lib'),
     '-dynamiclib','-Wl,-install_name,/usr/local/libexec/DVMProxy.bundle/DVMProxy',str(a.out/'driver_guest.o'),str(a.out/'consumer_package.o'),
@@ -86,12 +89,12 @@ revision['consumer_package_relinked']=True
 imports=a.out/'consumer-package.nm-u';imports.write_bytes(subprocess.check_output(['nm','-u',str(binary)]))
 (a.out/'DVMProxy.nm-u').write_bytes(imports.read_bytes())
 subprocess.run(['python3',str(src/'verify_guest_imports.py'),'--output',str(a.out/'consumer-package-imports.tsv'),str(imports)],check=True)
-record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,uikit=a.uikit,uikit_effect=a.uikit_effect,uikit_animate=a.uikit_animate,uikit_trace=a.uikit_trace,uikit_external_reference=a.uikit_external_reference,orientation=a.orientation,renderer_flags=a.renderer_flags,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,uikit=a.uikit,uikit_effect=a.uikit_effect,uikit_window=a.uikit_window,uikit_animate=a.uikit_animate,uikit_trace=a.uikit_trace,uikit_external_reference=a.uikit_external_reference,orientation=a.orientation,renderer_flags=a.renderer_flags,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
             helper_sha256=hashlib.sha256((a.out/'dvm-gpu-load').read_bytes()).hexdigest(),
             scope='test export compiled; guest execution untested')
 if record['helper_sha256']!=hashlib.sha256((a.base/'dvm-gpu-load').read_bytes()).hexdigest():
     raise ValueError('package unexpectedly changed the pinned helper')
-for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc','consumer_uikit_support.inc','consumer_uikit_effect_scene.inc','consumer_uikit_display_scene.inc','consumer_uikit_scene.inc','test_layer_orientation.m'):
+for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc','consumer_uikit_support.inc','consumer_uikit_effect_scene.inc','consumer_uikit_window.inc','consumer_uikit_display_scene.inc','consumer_uikit_scene.inc','test_layer_orientation.m'):
     (a.out/name).write_bytes((src/name).read_bytes())
 (a.out/'consumer-package.json').write_text(json.dumps(record,indent=2)+'\n')
 print(json.dumps(record))

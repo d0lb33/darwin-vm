@@ -70,7 +70,8 @@ static unsigned nativeLibraryCalls;
 #import "driver_api.h"
 #endif
 static void require(BOOL ok,const char *why){if(!ok){fprintf(stderr,"UIKIT_HOST_FAIL %s\n",why);exit(1);}}
-int main(int argc,const char **argv){@autoreleasepool{
+static UIWindowScene *DVMUIKitHostScene;
+static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
     require(argc==2,"output directory");
     CGColorSpaceRef space=CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
     id<MTLDevice> device=MTLCreateSystemDefaultDevice();require(device!=nil,"native Metal device");
@@ -115,6 +116,7 @@ int main(int argc,const char **argv){@autoreleasepool{
     UIView *view=DVMUIKitScene(space,320,480);
     unsigned effect=getenv("DVM_UIKIT_EFFECT")?(unsigned)atoi(getenv("DVM_UIKIT_EFFECT")):0;
     DVMUIKitAddEffect(view,effect);
+    UIWindow *window=getenv("DVM_UIKIT_WINDOW")?DVMUIKitAttachWindow(view,DVMUIKitHostScene):nil;
     fprintf(stderr,"UIKIT_HOST_EFFECT kind=%u window=%u\n",effect,view.window!=nil);
     [view layoutIfNeeded];UIKitDisplay(view.layer);
     if(getenv("DVM_UIKIT_GUEST_RASTERS")){
@@ -122,10 +124,12 @@ int main(int argc,const char **argv){@autoreleasepool{
         [view layoutIfNeeded];UIKitDisplay(view.layer);
     }
     [CATransaction commit];[CATransaction flush];
+    if(window)[[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.1]];
     UIKitInspect(view.layer,"after-display",0);
     BOOL displayed=getenv("DVM_UIKIT_DISPLAY_FRAME")!=NULL;
     unsigned width=displayed?1179:320,height=displayed?2556:480;
     CALayer *root=displayed?DVMUIKitDisplayScene(view,space):view.layer;
+    if(getenv("DVM_UIKIT_WINDOW_ROOT")){require(window!=nil,"window root requires attachment");root=window.layer;UIKitInspect(root,"window-root",0);}
     if(getenv("DVM_UIKIT_DISPLAY_ANIMATE"))DVMUIKitDisplayUpdate(view,(unsigned)atoi(getenv("DVM_UIKIT_DISPLAY_FRAME")));
     if(displayed){
         unsigned frame=(unsigned)atoi(getenv("DVM_UIKIT_DISPLAY_FRAME"));
@@ -171,5 +175,38 @@ int main(int argc,const char **argv){@autoreleasepool{
     for(unsigned i=0;i<width*height*4;i++){unsigned delta=abs((int)a[i]-(int)b[i]);different+=delta>2;maxError=MAX(maxError,delta);totalError+=delta;}
     fprintf(stderr,"UIKIT_HOST_COMPARE different=%u max=%u total=%llu scope=host-catalyst-only\n",different,maxError,(unsigned long long)totalError);
     if(getenv("DVM_UIKIT_NATIVE_AIR"))require(nativeLibraryCalls>0,"native AIR control was exercised");
-    renderer.layer=nil;renderer=nil;CGContextRelease(context);CGColorSpaceRelease(space);
+    renderer.layer=nil;renderer=nil;window.hidden=YES;window.rootViewController=nil;CGContextRelease(context);CGColorSpaceRelease(space);
+}}
+
+// UIApplicationMain supplies Catalyst's NSApplication and UIKit lifecycle.
+// Rendering runs after launch; the external process deadline still bounds it.
+static int DVMUIKitHostArgc;
+static const char **DVMUIKitHostArgv;
+@interface DVMUIKitHostDelegate : UIResponder <UIApplicationDelegate>
+@end
+@implementation DVMUIKitHostDelegate
+- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)options {
+    (void)application;(void)options;
+    return YES;
+}
+@end
+@interface DVMUIKitHostSceneDelegate : UIResponder <UIWindowSceneDelegate>
+@end
+@implementation DVMUIKitHostSceneDelegate
+- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)options {
+    (void)session;(void)options;require([scene isKindOfClass:UIWindowScene.class],"window scene lifecycle");
+    DVMUIKitHostScene=(UIWindowScene *)scene;
+}
+- (void)sceneDidBecomeActive:(UIScene *)scene {
+    static BOOL rendered=NO;if(rendered)return;rendered=YES;
+    fprintf(stderr,"UIKIT_HOST_SCENE_ACTIVE state=%ld\n",(long)scene.activationState);
+    dispatch_async(dispatch_get_main_queue(),^{DVMRunUIKitHost(DVMUIKitHostArgc,DVMUIKitHostArgv);exit(0);});
+}
+@end
+int main(int argc,const char **argv){@autoreleasepool{
+    if(getenv("DVM_UIKIT_WINDOW")){
+        DVMUIKitHostArgc=argc;DVMUIKitHostArgv=argv;
+        return UIApplicationMain(argc,(char **)argv,nil,NSStringFromClass(DVMUIKitHostDelegate.class));
+    }
+    DVMRunUIKitHost(argc,argv);return 0;
 }}

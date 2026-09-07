@@ -179,7 +179,13 @@ the skips are explicitly recorded, not passes. Native framebuffer-read control
 and private block-write/reuse test also pass. Exact red control and native
 input/display recovery are separate runtime acceptance checks.
 
-Next experiments: attach the actual effect to a real UIKit window, capture
+The following window experiment is now recorded in
+[half-float, mip and glass evidence](gpu-uikit-glass-ios27.md): the original
+guest glass shaders execute, but the glass region is black in both the guest
+and native host offscreen controls. This supersedes the no-window unknown
+above without claiming correct glass appearance.
+
+Original next experiments: attach the actual effect to a real UIKit window, capture
 its resulting layer/filter inputs, and compare the guest blur against a native
 QuartzCore reference built from those inputs. Bound this to one host control
 and one exact-guest configuration; if glass still produces no effect, inspect
