@@ -53,6 +53,7 @@ static void reject(NSString *s) {
 #include "consumer_resource_guest.inc"
 @interface DVMBuffer : DVMResource <MTLBuffer>
 @property(nonatomic, strong) NSMutableData *shadow;
+@property(nonatomic,strong) NSMutableData *renderUploaded;
 @end
 @interface DVMPipeline : DVMObject <MTLComputePipelineState>
 @property(nonatomic, strong) DVMFunction *function;
@@ -63,7 +64,8 @@ static void reject(NSString *s) {
 @property(nonatomic, strong) NSData *pendingUpload;
 @property(nonatomic, strong) NSData *completedShadow;
 @property(nonatomic) NSUInteger width;
-@property(nonatomic) NSUInteger height;
+@property(nonatomic) NSUInteger height,depth;
+@property(nonatomic) MTLTextureType textureType;
 @property(nonatomic) MTLPixelFormat pixelFormat;
 @property(nonatomic) MTLTextureUsage usage;
 @property(nonatomic,strong) DVMBuffer *backingBuffer;
@@ -150,7 +152,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (BOOL)supportsFeatureSet:(MTLFeatureSet)set {(void)set;return NO;}
 - (BOOL)supportsTextureSampleCount:(NSUInteger)count {return count==1;}
 - (NSUInteger)requiredLinearTextureBytesPerRowForDescriptor:(MTLTextureDescriptor *)d {
-    if(!DVMTextureDescriptorValid(d))reject(@"linear descriptor outside forwarding contract");
+    if(!DVMTextureDescriptorValid(d)||d.textureType!=MTLTextureType2D)reject(@"linear descriptor outside forwarding contract");
     NSUInteger a=[self minimumLinearTextureAlignmentForPixelFormat:d.pixelFormat];
     return (d.width*DVMFormatBytes(d.pixelFormat)+a-1)&~(a-1);
 }
@@ -271,7 +273,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     NSDictionary *r = [self call:@{
         @"op" : @"texture",
         @"width" : @(d.width),
-        @"height" : @(d.height),
+        @"height" : @(d.height), @"depth":@(d.depth), @"type":@(d.textureType),
         @"format" : @(d.pixelFormat),
         @"usage" : @(d.usage)
     }
@@ -282,7 +284,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     o.owner = self;
     o.handle = r[@"handle"];
     o.width = d.width;
-    o.height = d.height;
+    o.height = d.height;o.depth=d.depth;o.textureType=d.textureType;
     o.pixelFormat = d.pixelFormat;
     o.usage = d.usage;
     o.acceptedOptions=d.resourceOptions;
@@ -351,13 +353,13 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @end
 @implementation DVMBuffer
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)row {
-    if(!DVMTextureDescriptorValid(d)||d.storageMode!=self.storageMode||d.usage!=MTLTextureUsageShaderRead)return nil;
+    if(!DVMTextureDescriptorValid(d)||d.textureType!=MTLTextureType2D||d.storageMode!=self.storageMode||d.usage!=MTLTextureUsageShaderRead)return nil;
     NSUInteger a=[self.owner minimumLinearTextureAlignmentForPixelFormat:d.pixelFormat];
     if(offset%a||row%a||row<d.width*DVMFormatBytes(d.pixelFormat)||row>DVM_BUFFER_BYTES||offset>self.length||row*d.height>self.length-offset)return nil;
     NSError *e=nil;NSDictionary *r=[self.owner call:@{@"op":@"linearTexture",@"buffer":self.handle,@"width":@(d.width),@"height":@(d.height),@"format":@(d.pixelFormat),@"usage":@(d.usage),@"offset":@(offset),@"row":@(row)} error:&e];
     if(!r)reject(e.description?:@"linear texture allocation");
     DVMTexture *t=[DVMTexture new];t.owner=self.owner;t.handle=r[@"handle"];
-    t.width=d.width;t.height=d.height;t.pixelFormat=d.pixelFormat;t.usage=d.usage;
+    t.width=d.width;t.height=d.height;t.depth=1;t.textureType=MTLTextureType2D;t.pixelFormat=d.pixelFormat;t.usage=d.usage;
     t.acceptedOptions=self.acceptedOptions;t.hostAllocatedSize=[r[@"allocatedSize"] unsignedIntegerValue];
     t.backingBuffer=self;t.backingOffset=offset;t.backingRow=row;return t;
 }
@@ -377,9 +379,6 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (NSUInteger)row {
     return _width * DVMFormatBytes(_pixelFormat);
 }
-- (MTLTextureType)textureType {
-    return MTLTextureType2D;
-}
 - (BOOL)isFramebufferOnly {return NO;}
 - (BOOL)isShareable {return NO;}
 - (BOOL)isSparse {return NO;}
@@ -392,9 +391,6 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (NSUInteger)bufferBytesPerRow {return self.backingRow;}
 - (IOSurfaceRef)iosurface {return NULL;}
 - (NSUInteger)iosurfacePlane {return 0;}
-- (NSUInteger)depth {
-    return 1;
-}
 - (NSUInteger)mipmapLevelCount {
     return 1;
 }
@@ -406,22 +402,27 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (void)check:(MTLRegion)r level:(NSUInteger)level row:(NSUInteger)row pointer:(const void *)p {
     if (!p || level || r.origin.x || r.origin.y || r.origin.z || r.size.width != _width ||
-        r.size.height != _height || r.size.depth != 1 || row < [self row])
+        r.size.height != _height || r.size.depth != self.depth || row < [self row] || row>DVM_TEXTURE_BYTES)
         reject(@"only full texture transfers supported");
 }
 - (void)replaceRegion:(MTLRegion)r
           mipmapLevel:(NSUInteger)level
             withBytes:(const void *)p
           bytesPerRow:(NSUInteger)row {
+    [self replaceRegion:r mipmapLevel:level slice:0 withBytes:p bytesPerRow:row bytesPerImage:row*self.height];
+}
+- (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)p bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
     [self check:r level:level row:row pointer:p];
+    if(!image)image=row*self.height;
+    if(slice||image<row*self.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
     if(self.backingBuffer) {
         if(self.owner.submissionInFlight)reject(@"linear texture upload in flight");
         for(NSUInteger y=0;y<_height;y++)memcpy((uint8_t *)self.backingBuffer.contents+self.backingOffset+y*self.backingRow,(const uint8_t *)p+y*row,[self row]);
         return;
     }
-    NSMutableData *d = [NSMutableData dataWithLength:[self row] * _height];
-    for (NSUInteger y = 0; y < _height; y++)
-        memcpy((uint8_t *)d.mutableBytes + y * [self row], (const uint8_t *)p + y * row,
+    NSMutableData *d = [NSMutableData dataWithLength:[self row] * _height * self.depth];
+    for(NSUInteger z=0;z<self.depth;z++)for (NSUInteger y = 0; y < _height; y++)
+        memcpy((uint8_t *)d.mutableBytes + (z*_height+y) * [self row], (const uint8_t *)p + z*image + y * row,
                [self row]);
     if (self.owner.submissionInFlight) reject(@"texture upload while GPU work is in flight");
     self.pendingUpload = d;
@@ -442,7 +443,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     }
     NSDictionary *r = [self.owner call:@{@"op" : @"read", @"texture" : self.handle} error:&e];
     NSData *d = r ? [[NSData alloc] initWithBase64EncodedString:r[@"data"] options:0] : nil;
-    if (!d || d.length != [self row] * _height || [r[@"row"] unsignedIntegerValue] != [self row])
+    if (!d || d.length != [self row] * _height * self.depth || [r[@"row"] unsignedIntegerValue] != [self row])
         reject(e.description ?: @"bad texture readback");
     return d;
 }
@@ -450,10 +451,15 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
      bytesPerRow:(NSUInteger)row
       fromRegion:(MTLRegion)r
      mipmapLevel:(NSUInteger)level {
+    [self getBytes:p bytesPerRow:row bytesPerImage:row*self.height fromRegion:r mipmapLevel:level slice:0];
+}
+- (void)getBytes:(void *)p bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image fromRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice {
     [self check:r level:level row:row pointer:p];
+    if(!image)image=row*self.height;
+    if(slice||image<row*self.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
     NSData *d = [self read];
-    for (NSUInteger y = 0; y < _height; y++)
-        memcpy((uint8_t *)p + y * row, (const uint8_t *)d.bytes + y * [self row], [self row]);
+    for(NSUInteger z=0;z<self.depth;z++)for(NSUInteger y=0;y<_height;y++)
+        memcpy((uint8_t *)p+z*image+y*row,(const uint8_t *)d.bytes+(z*_height+y)*[self row],[self row]);
 }
 
 @end
@@ -570,10 +576,18 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             @try {
                 NSError *e = nil;
                 if(render)for(DVMBuffer *buffer in buffers) {
+                    // contents may be written directly, without didModifyRange.
+                    // Compare owned bytes; update the cache only after host ACK.
+                    BOOL initialized=buffer.renderUploaded!=nil;
+                    NSMutableData *uploaded=buffer.renderUploaded?:[NSMutableData dataWithLength:buffer.length];
                     for(NSUInteger offset=0;offset<buffer.length;offset+=32768){
-                        NSData *chunk=[buffer.shadow subdataWithRange:NSMakeRange(offset,MIN(32768,buffer.length-offset))];
+                        NSUInteger length=MIN(32768,buffer.length-offset);
+                        if(initialized&&!memcmp((uint8_t *)buffer.contents+offset,(uint8_t *)uploaded.bytes+offset,length))continue;
+                        NSData *chunk=[buffer.shadow subdataWithRange:NSMakeRange(offset,length)];
                         if(!self.commandQueue.owner.transport(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(offset),@"data":[chunk base64EncodedStringWithOptions:0]},&e))reject(e.description?:@"render buffer upload");
+                        memcpy((uint8_t *)uploaded.mutableBytes+offset,chunk.bytes,length);
                     }
+                    buffer.renderUploaded=uploaded;
                 }
                 BOOL blur=self.commands.count&&self.commands[0][@"imageblock"]!=nil;
                 DVMTexture *output=nil;
@@ -600,7 +614,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                             DVMBuffer *owned=nil;
                             for(DVMBuffer *b in buffers)if([b.handle isEqual:handle])owned=b;
                             if(!owned||[seen containsObject:handle]||owned.length>DVM_BUFFER_BYTES-total)reject(@"render writeback ownership/budget");
-                            [seen addObject:handle];total+=owned.length;
+                            [seen addObject:handle];total+=owned.length;owned.renderUploaded=nil;
                             NSMutableData *data=[NSMutableData dataWithLength:owned.length];
                             for(NSUInteger offset=0;offset<owned.length;offset+=32768){
                                 NSUInteger length=MIN(32768,owned.length-offset);
@@ -629,17 +643,20 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                     // Validate all readbacks before publishing any CPU shadow.
                     for(NSUInteger i=0;i<writtenObjects.count;i++){
                         DVMBuffer *b=writtenObjects[i];NSData *data=writtenData[i];
-                        memcpy(b.contents,data.bytes,data.length);
+                        memcpy(b.contents,data.bytes,data.length);b.renderUploaded=[data mutableCopy];
                     }
                     for (NSUInteger i = 0; !render && i < buffers.count; i++) {
                         DVMBuffer *b = buffers[i]; NSData *d = decoded[i];
-                        memcpy(b.contents, d.bytes, d.length);
+                        memcpy(b.contents, d.bytes, d.length);b.renderUploaded=nil;
                     }
                     for (DVMTexture *t in textures) {t.pendingUpload = nil;if(render)t.completedShadow=nil;}
                 }
             } @catch (NSException *e) {
                 self.error = error(e.reason);
             }
+            // Any ambiguous failure may have changed native storage. Never
+            // skip a later upload using an unconfirmed cached CPU image.
+            if(self.error)for(DVMBuffer *buffer in buffers)buffer.renderUploaded=nil;
             NSArray *handlers = nil;
             @synchronized(self) {
                 self.status =

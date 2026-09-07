@@ -31,10 +31,11 @@ static BOOL DVMResourceOptionsValid(MTLResourceOptions options) {
     return !(options&~0x33ful)&&storage<=1&&cache==0&&(hazard==0||hazard==2);
 }
 static BOOL DVMTextureDescriptorValid(MTLTextureDescriptor *d) {
-    if(!d||d.textureType!=MTLTextureType2D||d.depth!=1||d.arrayLength!=1||
+    if(!d||(d.textureType!=MTLTextureType2D&&d.textureType!=MTLTextureType3D)||!d.depth||d.depth>DVM_TEXTURE_DIMENSION||
+       (d.textureType==MTLTextureType2D&&d.depth!=1)||(d.textureType==MTLTextureType3D&&d.usage!=MTLTextureUsageShaderRead)||d.arrayLength!=1||
        d.mipmapLevelCount!=1||d.sampleCount!=1||!DVMResourceOptionsValid(d.resourceOptions)||
        !d.width||!d.height||d.width>DVM_TEXTURE_DIMENSION||d.height>DVM_TEXTURE_DIMENSION||
        !DVMFormatBytes(d.pixelFormat)||!d.usage||(d.usage&~DVM_TEXTURE_USAGE_MASK))return NO;
     if([(id)d respondsToSelector:@selector(protectionOptions)]&&[(id<DVMProtectionMetadata>)d protectionOptions])return NO;
-    return d.width*d.height*DVMFormatBytes(d.pixelFormat)<=DVM_TEXTURE_BYTES;
+    return d.width*d.height*d.depth*DVMFormatBytes(d.pixelFormat)<=DVM_TEXTURE_BYTES;
 }

@@ -30,6 +30,9 @@ int main(int argc, const char **argv) {
             return 2;
         if (!strcmp(argv[1], "native"))
             return DVMRunLuma(MTLCreateSystemDefaultDevice(), air, (unsigned)atoi(argv[3]));
+#ifdef DVM_CA_NATIVE
+        if(!strcmp(argv[1],"consumer-native")){DVMRunQuartzCoreConsumer(MTLCreateSystemDefaultDevice());return 0;}
+#endif
         __block uint64_t seq = 0;
         __block BOOL dead = NO;
         NSObject *lock = [NSObject new];

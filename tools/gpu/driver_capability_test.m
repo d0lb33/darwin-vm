@@ -14,7 +14,7 @@ int main(void){@autoreleasepool{
 #undef CHECK_BOOL
 #undef CHECK_UINT
     check(requests==1,"one negotiation for the complete batch");
-    check([caps maxFragmentTextures]==8&&[caps maxFragmentSamplers]==8&&[caps maxColorAttachments]==1,"bounded implemented render bindings");
+    check([caps maxFragmentTextures]==DVM_FRAGMENT_TEXTURES&&[caps maxFragmentSamplers]==DVM_FRAGMENT_SAMPLERS&&[caps maxColorAttachments]==1,"bounded implemented render bindings");
     check(![device supportsFamily:MTLGPUFamilyApple1]&&![device supportsTextureSampleCount:4],"no unimplemented families/MSAA");
     MTLTextureDescriptor *texture=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:DVM_TEXTURE_DIMENSION+1 height:1 mipmapped:NO];
     texture.storageMode=MTLStorageModeShared;texture.usage=MTLTextureUsageShaderRead;

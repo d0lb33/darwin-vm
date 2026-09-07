@@ -17,7 +17,7 @@ static BOOL RenderBindingsFit(DVMEntry *pipeline,NSDictionary *vertex,NSDictiona
                 [written addObject:b[1]];
             }
         }
-        else if(type==MTLArgumentTypeTexture){if(!textures[index])return NO;}
+        else if(type==MTLArgumentTypeTexture){DVMEntry *t=textures[index];if(!t||[(id<MTLTexture>)t.object textureType]!=[need[5] unsignedIntegerValue])return NO;}
         else if(type==MTLArgumentTypeSampler){if(!samplers[index])return NO;}
     }
     // Buffer/linear-texture cache aliasing needs a separately tested contract.
@@ -56,14 +56,16 @@ static NSDictionary *RenderPipeline(DVMHost *host,uint64_t seq,NSDictionary *r) 
     if(!p)return NSErrorReply(seq,e,@"render pipeline creation");
     NSMutableArray *bindings=[NSMutableArray array];
     NSArray *stages=@[reflection.vertexArguments?:@[],reflection.fragmentArguments?:@[]];
+    if(getenv("DVM_RENDER_REFLECTION"))for(unsigned stage=0;stage<2;stage++)for(MTLArgument *arg in stages[stage])if(arg.active)
+        fprintf(stderr,"DVM_RENDER_BINDING seq=%llu stage=%u name=%s index=%lu type=%lu access=%lu array=%lu size=%lu textureType=%lu\n",(unsigned long long)seq,stage,arg.name.UTF8String,(unsigned long)arg.index,(unsigned long)arg.type,(unsigned long)arg.access,(unsigned long)arg.arrayLength,(unsigned long)(arg.type==MTLArgumentTypeBuffer?arg.bufferDataSize:0),(unsigned long)(arg.type==MTLArgumentTypeTexture?arg.textureType:0));
     for(unsigned stage=0;stage<2;stage++)for(MTLArgument *arg in stages[stage])if(arg.active){
         BOOL writableBuffer=!stage&&arg.type==MTLArgumentTypeBuffer&&[r[@"bufferWriteback"] isEqual:@YES]&&
                             (arg.access==MTLArgumentAccessReadWrite||arg.access==MTLArgumentAccessWriteOnly);
-        if(arg.index>=(arg.type==MTLArgumentTypeBuffer?DVM_RENDER_BUFFERS:8)||arg.arrayLength>1||(arg.access!=MTLArgumentAccessReadOnly&&!writableBuffer)||
+        if(arg.index>=(arg.type==MTLArgumentTypeBuffer?DVM_RENDER_BUFFERS:arg.type==MTLArgumentTypeTexture?DVM_FRAGMENT_TEXTURES:DVM_FRAGMENT_SAMPLERS)||arg.arrayLength>1||(arg.access!=MTLArgumentAccessReadOnly&&!writableBuffer)||
            (arg.type!=MTLArgumentTypeBuffer&&arg.type!=MTLArgumentTypeTexture&&arg.type!=MTLArgumentTypeSampler)||
            (!stage&&arg.type!=MTLArgumentTypeBuffer)||
-           (arg.type==MTLArgumentTypeTexture&&arg.textureType!=MTLTextureType2D))return HostError(seq,ENOTSUP,[NSString stringWithFormat:@"shader binding outside render contract: stage=%u name=%@ index=%lu type=%lu access=%lu array=%lu textureType=%lu",stage,arg.name,(unsigned long)arg.index,(unsigned long)arg.type,(unsigned long)arg.access,(unsigned long)arg.arrayLength,(unsigned long)(arg.type==MTLArgumentTypeTexture?arg.textureType:0)]);
-        [bindings addObject:@[@(stage),@(arg.type),@(arg.index),@(arg.type==MTLArgumentTypeBuffer?arg.bufferDataSize:0),@(arg.access)]];
+           (arg.type==MTLArgumentTypeTexture&&arg.textureType!=MTLTextureType2D&&arg.textureType!=MTLTextureType3D))return HostError(seq,ENOTSUP,[NSString stringWithFormat:@"shader binding outside render contract: stage=%u name=%@ index=%lu type=%lu access=%lu array=%lu textureType=%lu",stage,arg.name,(unsigned long)arg.index,(unsigned long)arg.type,(unsigned long)arg.access,(unsigned long)arg.arrayLength,(unsigned long)(arg.type==MTLArgumentTypeTexture?arg.textureType:0)]);
+        [bindings addObject:@[@(stage),@(arg.type),@(arg.index),@(arg.type==MTLArgumentTypeBuffer?arg.bufferDataSize:0),@(arg.access),@(arg.type==MTLArgumentTypeTexture?arg.textureType:0)]];
     }
     DVMEntry *entry;if(!Add(host,@"renderPipeline",@{@"state":p,@"layouts":layouts,@"format":c[0],@"bindings":bindings},&entry))return HostError(seq,ENOSPC,@"render state table");
     return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle)};
@@ -98,7 +100,7 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
     for(NSDictionary *pass in passes){
         if(![pass isKindOfClass:NSDictionary.class]||![pass[@"kind"] isEqual:@"render"])return HostError(seq,EINVAL,@"mixed render batch");
         DVMEntry *target=Entry(host,pass[@"target"],@"texture");NSArray *clear=pass[@"clear"],*ops=pass[@"operations"];
-        if(!target||!([(id<MTLTexture>)target.object usage]&MTLTextureUsageRenderTarget)||!RenderUInt(pass[@"load"],2)||!RenderUInt(pass[@"store"],1)||!RenderNumbers(clear,4)||![ops isKindOfClass:NSArray.class]||ops.count>256)return HostError(seq,EINVAL,@"render pass descriptor");
+        if(!target||[(id<MTLTexture>)target.object textureType]!=MTLTextureType2D||!([(id<MTLTexture>)target.object usage]&MTLTextureUsageRenderTarget)||!RenderUInt(pass[@"load"],2)||!RenderUInt(pass[@"store"],1)||!RenderNumbers(clear,4)||![ops isKindOfClass:NSArray.class]||ops.count>256)return HostError(seq,EINVAL,@"render pass descriptor");
         MTLRenderPassDescriptor *d=[MTLRenderPassDescriptor renderPassDescriptor];d.colorAttachments[0].texture=target.object;d.colorAttachments[0].loadAction=[pass[@"load"] unsignedIntegerValue];d.colorAttachments[0].storeAction=[pass[@"store"] unsignedIntegerValue];d.colorAttachments[0].clearColor=MTLClearColorMake([clear[0] doubleValue],[clear[1] doubleValue],[clear[2] doubleValue],[clear[3] doubleValue]);
         id<MTLRenderCommandEncoder> encoder=[cb renderCommandEncoderWithDescriptor:d];
         DVMEntry *pipeline=nil;NSMutableDictionary *vertexBuffers=[NSMutableDictionary dictionary],*fragmentBuffers=[NSMutableDictionary dictionary],*fragmentTextures=[NSMutableDictionary dictionary],*fragmentSamplers=[NSMutableDictionary dictionary];NSString *failure=nil;
@@ -124,7 +126,7 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
                 if([name isEqual:@"vertexBuffer"]){[encoder setVertexBuffer:b.object offset:offset atIndex:[op[3] unsignedIntegerValue]];vertexBuffers[op[3]]=@[@(b.textureBytes-offset),@(b.handle)];}else {[encoder setFragmentBuffer:b.object offset:offset atIndex:[op[3] unsignedIntegerValue]];fragmentBuffers[op[3]]=@[@(b.textureBytes-offset),@(b.handle)];}
             } else if(([name isEqual:@"vertexBytes"]||[name isEqual:@"fragmentBytes"])&&op.count==3&&RenderUInt(op[2],DVM_RENDER_BUFFERS-1)){
                 NSData *data=DVMBPayload(op[1]);if(!data.length||data.length>DVM_INLINE_BYTES){failure=@"render inline bounds";break;}if([name isEqual:@"vertexBytes"]){[encoder setVertexBytes:data.bytes length:data.length atIndex:[op[2] unsignedIntegerValue]];vertexBuffers[op[2]]=@[@(data.length)];}else {[encoder setFragmentBytes:data.bytes length:data.length atIndex:[op[2] unsignedIntegerValue]];fragmentBuffers[op[2]]=@[@(data.length)];}
-            } else if(([name isEqual:@"fragmentTexture"]||[name isEqual:@"fragmentSampler"])&&op.count==3&&RenderUInt(op[2],7)){
+            } else if(([name isEqual:@"fragmentTexture"]||[name isEqual:@"fragmentSampler"])&&op.count==3&&RenderUInt(op[2],[name isEqual:@"fragmentTexture"]?DVM_FRAGMENT_TEXTURES-1:DVM_FRAGMENT_SAMPLERS-1)){
                 BOOL texture=[name isEqual:@"fragmentTexture"];DVMEntry *e=Entry(host,op[1],texture?@"texture":@"sampler");if((!e&&![op[1] isEqual:@0])||(texture&&e&&(!([(id<MTLTexture>)e.object usage]&MTLTextureUsageShaderRead)||e==target))){failure=@"fragment resource ownership/usage";break;}if(texture){[encoder setFragmentTexture:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentTextures[op[2]]=e;}else {[encoder setFragmentSamplerState:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentSamplers[op[2]]=e;}
             } else if([name isEqual:@"draw"]&&op.count==5&&RenderUInt(op[1],4)&&RenderUInt(op[2],4096)&&RenderUInt(op[3],4096)&&RenderUInt(op[4],64)&&pipeline){
                 NSUInteger start=[op[2] unsignedIntegerValue],count=[op[3] unsignedIntegerValue],instances=[op[4] unsignedIntegerValue];if(!count||!instances||start+count>4096){failure=@"draw extent";break;}
@@ -154,7 +156,7 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
     }
     NSUInteger totalWritten=0;
     for(NSNumber *handle in written){DVMEntry *b=Entry(host,handle,@"buffer");if(!b||b.textureBytes>DVM_BUFFER_BYTES-totalWritten)return HostError(seq,ENOTSUP,@"render writeback budget");totalWritten+=b.textureBytes;}
-    for(NSArray *transfer in transfers){DVMEntry *e=transfer[0];NSData *data=transfer[1];if([e.kind isEqual:@"buffer"])memcpy([(id<MTLBuffer>)e.object contents],data.bytes,data.length);else [(id<MTLTexture>)e.object replaceRegion:MTLRegionMake2D(0,0,e.width,e.height) mipmapLevel:0 withBytes:data.bytes bytesPerRow:e.row];}
+    for(NSArray *transfer in transfers){DVMEntry *e=transfer[0];NSData *data=transfer[1];if([e.kind isEqual:@"buffer"])memcpy([(id<MTLBuffer>)e.object contents],data.bytes,data.length);else [(id<MTLTexture>)e.object replaceRegion:MTLRegionMake3D(0,0,0,e.width,e.height,[(id<MTLTexture>)e.object depth]) mipmapLevel:0 slice:0 withBytes:data.bytes bytesPerRow:e.row bytesPerImage:e.row*e.height];}
     [cb commit];[cb waitUntilCompleted];host.submissions++;
     if(cb.status!=MTLCommandBufferStatusCompleted)return NSErrorReply(seq,cb.error,@"render GPU completion");
     host.renderPasses+=passes.count;host.renderDraws+=draws;

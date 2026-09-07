@@ -16,14 +16,16 @@ int main(void){@autoreleasepool {
       "vertex O v(uint i[[vertex_id]],device uint *s[[buffer(30)]],constant uint &step[[buffer(8)]]){"
       "if(i%3==0){s[0]+=step;s[16384]+=7;}float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return O{float4(p[i%3],0,1)};}\n"
       "fragment float4 f(constant float4 &color[[buffer(30)]]){return color;}\n"
-      "fragment float4 fw(device uint *s[[buffer(0)]]){s[0]=1;return float4(1,0,0,1);}";
+      "fragment float4 fw(device uint *s[[buffer(0)]]){s[0]=1;return float4(1,0,0,1);}"
+      "fragment float4 ft(texture2d<float> image[[texture(8)]],texture3d<float> lut[[texture(15)]],sampler sam[[sampler(15)]]){return image.sample(sam,float2(.5))*lut.sample(sam,float3(.5,.5,.75));}";
     id<MTLLibrary> native=[host.device newLibraryWithSource:source options:nil error:&error];
     require(native!=nil,error.description.UTF8String);
-    __block uint64_t seq=0;__block BOOL corrupt=NO;__block unsigned chunks=0;
+    __block uint64_t seq=0;__block BOOL corrupt=NO;__block unsigned chunks=0;__block unsigned uploads=0;
     DVMMetalRPC rpc=^NSDictionary *(NSDictionary *request,NSError **outError){
         @synchronized(host) {
         // Round-trip every request/reply through JSON, including writeback IDs.
         NSDictionary *r=[NSJSONSerialization JSONObjectWithData:[NSJSONSerialization dataWithJSONObject:request options:0 error:nil] options:0 error:nil];
+        if([r[@"op"] isEqual:@"writeRenderBuffer"])uploads++;
         NSDictionary *reply;
         if([r[@"op"] isEqual:@"library"]){DVMEntry *e=nil;require(Add(host,@"library",native,&e),"test library allocation");reply=@{@"ok":@YES,@"handle":@(e.handle),@"functionNames":native.functionNames};}
         else reply=ProcessRequest(host,++seq,r);
@@ -52,6 +54,7 @@ int main(void){@autoreleasepool {
             dispatch_semaphore_t done=dispatch_semaphore_create(0);__block BOOL observed=NO;
             [cb addCompletedHandler:^(id<MTLCommandBuffer> completed){observed=completed.status==MTLCommandBufferStatusCompleted&&words[16384]==200+(iteration+2)*7;dispatch_semaphore_signal(done);}];
             [cb commit];[cb waitUntilCompleted];long wait=dispatch_semaphore_wait(done,dispatch_time(DISPATCH_TIME_NOW,NSEC_PER_SEC));fprintf(stderr,"WRITEBACK iteration=%u first=%u last=%u status=%lu callback=%u\n",iteration,words[0],words[16384],(unsigned long)cb.status,observed);require(wait==0&&observed,"completion publishes all chunks");
+            require(uploads==(iteration?4:3),"skip unchanged chunks after GPU writeback and detect direct CPU writes");
             require(words[0]==(iteration?900+iteration*3:106)&&words[16384]==200+(iteration+2)*7,"CPU/GPU reuse coherence");
         }}
         uint8_t pixels[16384];[t getBytes:pixels bytesPerRow:256 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];for(unsigned i=0;i<4096;i++)require(!pixels[i*4]&&!pixels[i*4+1]&&pixels[i*4+2]==255&&pixels[i*4+3]==255,"render pixels");
@@ -71,6 +74,36 @@ int main(void){@autoreleasepool {
         corrupt=YES;uint32_t old0=words[0],oldLast=words[16384];
         id<MTLCommandBuffer> damaged=[q commandBuffer];e=[damaged renderCommandEncoderWithDescriptor:pass];[e setRenderPipelineState:pipeline];[e setVertexBuffer:b offset:0 atIndex:30];[e setVertexBytes:&step length:4 atIndex:8];[e setFragmentBytes:red length:16 atIndex:30];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];[damaged commit];[damaged waitUntilCompleted];
         require(damaged.status==MTLCommandBufferStatusError&&words[0]==old0&&words[16384]==oldLast,"bad later chunk cannot partially publish CPU shadow");
+        corrupt=NO;
+        desc.fragmentFunction=[lib newFunctionWithName:@"ft"];
+        id<MTLRenderPipelineState> textured=[d newRenderPipelineStateWithDescriptor:desc error:&error];require(textured!=nil,"3D sampling pipeline");
+        MTLTextureDescriptor *volume=[MTLTextureDescriptor new];volume.textureType=MTLTextureType3D;volume.pixelFormat=MTLPixelFormatRGBA8Unorm;volume.width=2;volume.height=2;volume.depth=2;volume.usage=MTLTextureUsageShaderRead;volume.storageMode=MTLStorageModeShared;
+        id<MTLTexture> lut=[d newTextureWithDescriptor:volume];require(lut&&lut.depth==2&&lut.textureType==MTLTextureType3D,"3D allocation metadata");
+        uint8_t padded[96],returned[96];memset(padded,0xa5,sizeof(padded));memset(returned,0xa5,sizeof(returned));
+        for(unsigned z=0;z<2;z++)for(unsigned y=0;y<2;y++)for(unsigned x=0;x<2;x++){
+            uint8_t *v=padded+z*48+y*16+x*4;v[0]=0;v[1]=z?255:0;v[2]=z?0:255;v[3]=255;
+        }
+        MTLRegion cube=MTLRegionMake3D(0,0,0,2,2,2);
+        [lut replaceRegion:cube mipmapLevel:0 slice:0 withBytes:padded bytesPerRow:16 bytesPerImage:48];
+        [lut getBytes:returned bytesPerRow:16 bytesPerImage:48 fromRegion:cube mipmapLevel:0 slice:0];
+        require(!memcmp(padded,returned,sizeof(padded)),"3D pitched transfer with intact padding");
+        MTLTextureDescriptor *imageDesc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatRGBA8Unorm width:1 height:1 mipmapped:NO];imageDesc.usage=MTLTextureUsageShaderRead;
+        id<MTLTexture> image=[d newTextureWithDescriptor:imageDesc];uint32_t white=UINT32_MAX;[image replaceRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0 withBytes:&white bytesPerRow:4];
+        id<MTLSamplerState> sampler=[d newSamplerStateWithDescriptor:[MTLSamplerDescriptor new]];
+        for(unsigned wrong=0;wrong<2;wrong++){
+            id<MTLCommandBuffer> tc=[q commandBuffer];id<MTLRenderCommandEncoder> te=[tc renderCommandEncoderWithDescriptor:pass];
+            [te setRenderPipelineState:textured];[te setVertexBuffer:b offset:0 atIndex:30];[te setVertexBytes:&step length:4 atIndex:8];
+            id<MTLTexture> inputs[16]={nil};inputs[8]=image;inputs[15]=wrong?image:lut;
+            id<MTLSamplerState> samplers[16]={nil};samplers[15]=sampler;
+            [te setFragmentTextures:inputs withRange:NSMakeRange(0,16)];[te setFragmentSamplerStates:samplers withRange:NSMakeRange(0,16)];
+            BOOL refused=NO;@try{[te setFragmentTexture:image atIndex:16];}@catch(NSException *ex){refused=YES;}require(refused,"texture boundary 16");
+            refused=NO;@try{[te setFragmentSamplerState:sampler atIndex:16];}@catch(NSException *ex){refused=YES;}require(refused,"sampler boundary 16");
+            [te drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[te endEncoding];uint64_t prior=host.submissions;
+            [tc commit];[tc waitUntilCompleted];
+            if(wrong)require(tc.status==MTLCommandBufferStatusError&&host.submissions==prior,"wrong texture dimension rejected before GPU");
+            else {require(uploads==7&&words[0]==old0+step&&words[16384]==oldLast+7,"failed writeback invalidates upload cache before reuse");require(tc.status==MTLCommandBufferStatusCompleted,"3D sampling completion");[t getBytes:pixels bytesPerRow:256 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];for(unsigned i=0;i<4096;i++)require(pixels[i*4]==0&&pixels[i*4+1]==255&&pixels[i*4+2]==0&&pixels[i*4+3]==255,"3D sample produces green output");}
+        }
+        fprintf(stderr,"PASS texture sampling: 3D pitch/padding, slots 8/15, sampler 15, bulk unbinding, correct GPU pixels, dimension/boundary rejection\n");
         fprintf(stderr,"PASS render writes: GPU pixels, 3-chunk CPU coherence, ordered draws, reuse, completion, slots 8/30, boundary/ownership/inline rejection, atomic error publication\n");
     }
     // Drain queued retirements through a fresh device-independent host check.

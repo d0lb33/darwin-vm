@@ -96,8 +96,16 @@ static id<MTLSamplerState> DVMNewSampler(DVMDevice *device,MTLSamplerDescriptor 
 }
 - (void)setVertexBytes:(const void *)p length:(NSUInteger)n atIndex:(NSUInteger)i {[self bytes:p length:n index:i stage:@"vertexBytes"];}
 - (void)setFragmentBytes:(const void *)p length:(NSUInteger)n atIndex:(NSUInteger)i {[self bytes:p length:n index:i stage:@"fragmentBytes"];}
-- (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i {if(i>=8)reject(@"fragment texture index");[self record:@[@"fragmentTexture",t?[self own:t kind:DVMTexture.class]:@0,@(i)]];}
-- (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {if(i>=8)reject(@"fragment sampler index");[self record:@[@"fragmentSampler",s?[self own:s kind:DVMSampler.class]:@0,@(i)]];}
+- (void)setFragmentTexture:(id<MTLTexture>)t atIndex:(NSUInteger)i {if(i>=DVM_FRAGMENT_TEXTURES)reject(@"fragment texture index");[self record:@[@"fragmentTexture",t?[self own:t kind:DVMTexture.class]:@0,@(i)]];}
+- (void)setFragmentSamplerState:(id<MTLSamplerState>)s atIndex:(NSUInteger)i {if(i>=DVM_FRAGMENT_SAMPLERS)reject(@"fragment sampler index");[self record:@[@"fragmentSampler",s?[self own:s kind:DVMSampler.class]:@0,@(i)]];}
+- (void)setFragmentTextures:(id<MTLTexture> const __unsafe_unretained *)textures withRange:(NSRange)range {
+    if(range.location>DVM_FRAGMENT_TEXTURES||range.length>DVM_FRAGMENT_TEXTURES-range.location||(!textures&&range.length))reject(@"fragment texture range");
+    for(NSUInteger j=0;j<range.length;j++)[self setFragmentTexture:textures[j] atIndex:range.location+j];
+}
+- (void)setFragmentSamplerStates:(id<MTLSamplerState> const __unsafe_unretained *)samplers withRange:(NSRange)range {
+    if(range.location>DVM_FRAGMENT_SAMPLERS||range.length>DVM_FRAGMENT_SAMPLERS-range.location||(!samplers&&range.length))reject(@"fragment sampler range");
+    for(NSUInteger j=0;j<range.length;j++)[self setFragmentSamplerState:samplers[j] atIndex:range.location+j];
+}
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n {[self drawPrimitives:t vertexStart:s vertexCount:n instanceCount:1];}
 - (void)drawPrimitives:(MTLPrimitiveType)t vertexStart:(NSUInteger)s vertexCount:(NSUInteger)n instanceCount:(NSUInteger)instances {
     [self record:@[@"draw",@(t),@(s),@(n),@(instances)]];
@@ -113,7 +121,7 @@ static id<MTLSamplerState> DVMNewSampler(DVMDevice *device,MTLSamplerDescriptor 
 static id<MTLRenderCommandEncoder> DVMNewRenderEncoder(DVMCommand *command,MTLRenderPassDescriptor *d) {
     [command encoding];if(command.openEncoders||!d)reject(@"render pass state");
     MTLRenderPassColorAttachmentDescriptor *a=d.colorAttachments[0];
-    if(![(id)a.texture isKindOfClass:DVMTexture.class]||a.texture.device!=command.device||a.level||a.slice||a.depthPlane||a.resolveTexture||d.depthAttachment.texture||d.stencilAttachment.texture)
+    if(![(id)a.texture isKindOfClass:DVMTexture.class]||a.texture.device!=command.device||a.texture.textureType!=MTLTextureType2D||a.level||a.slice||a.depthPlane||a.resolveTexture||d.depthAttachment.texture||d.stencilAttachment.texture)
         reject(@"render pass outside single owned color target contract");
     for(unsigned i=1;i<8;i++)if(d.colorAttachments[i].texture)reject(@"multiple color attachments");
     [command.resources addObject:a.texture];

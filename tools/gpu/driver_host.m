@@ -231,19 +231,22 @@ static NSDictionary *Pipeline(DVMHost *host, uint64_t seq, NSDictionary *request
     };
 }
 static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request) {
-    uint64_t width, height, format;
+    uint64_t width, height, format,depth,type;
     MTLTextureUsage usage;
     if (!Number(request[@"width"], &width) || !Number(request[@"height"], &height) || !width ||
         !height || width > kMaxDimension || height > kMaxDimension ||
         !Usage(request[@"usage"], &usage))
         return HostError(seq, EINVAL, @"invalid texture descriptor");
+    if(!Number(request[@"depth"]?:@1,&depth)||!depth||depth>kMaxDimension||!Number(request[@"type"]?:@2,&type)||
+       (type!=MTLTextureType2D&&type!=MTLTextureType3D)||(type==MTLTextureType2D&&depth!=1)||
+       (type==MTLTextureType3D&&usage!=MTLTextureUsageShaderRead))return HostError(seq,EINVAL,@"texture type/depth/usage contract");
     MTLPixelFormat pixel;
     NSUInteger bpp;
     if (!Number(request[@"format"], &format))
         return HostError(seq, EINVAL, @"invalid format");
     bpp=DVMFormatBytes(format);pixel=format;
     if(!bpp)return HostError(seq, EINVAL, @"unsupported texture format");
-    NSUInteger bytes = (NSUInteger)width * (NSUInteger)height * bpp;
+    NSUInteger bytes = (NSUInteger)width * (NSUInteger)height * (NSUInteger)depth * bpp;
     if (bytes > DVM_TEXTURE_BYTES)
         return HostError(seq, EINVAL, @"texture exceeds framed transfer limit");
     if (bytes > kMaxTextures - host.textureBytes)
@@ -253,6 +256,7 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
                                                            width:(NSUInteger)width
                                                           height:(NSUInteger)height
                                                        mipmapped:NO];
+    descriptor.textureType=type;descriptor.depth=depth;
     descriptor.storageMode = MTLStorageModeShared;
     descriptor.usage = usage;
     id<MTLTexture> texture = [host.device newTextureWithDescriptor:descriptor];
@@ -284,13 +288,13 @@ static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) 
         return @{@"seq" : @(seq), @"ok" : @YES};
     }
     if (!entry || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
-        data.length != row * entry.height)
+        data.length != row * entry.height * [(id<MTLTexture>)entry.object depth])
         return HostError(seq, EINVAL, @"upload must contain one complete texture");
-    MTLRegion region = MTLRegionMake2D(0, 0, entry.width, entry.height);
+    MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
     [(id<MTLTexture>)entry.object replaceRegion:region
-                                    mipmapLevel:0
+                                    mipmapLevel:0 slice:0
                                       withBytes:data.bytes
-                                    bytesPerRow:(NSUInteger)row];
+                                    bytesPerRow:(NSUInteger)row bytesPerImage:row*entry.height];
     return @{@"seq" : @(seq), @"ok" : @YES};
 }
 static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *request) {
@@ -305,11 +309,11 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
     if (!entry)
         return HostError(seq, ENOENT, @"unknown texture handle");
     NSMutableData *data = [NSMutableData dataWithLength:entry.textureBytes];
-    MTLRegion region = MTLRegionMake2D(0, 0, entry.width, entry.height);
+    MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
     [(id<MTLTexture>)entry.object getBytes:data.mutableBytes
-                               bytesPerRow:entry.row
+                               bytesPerRow:entry.row bytesPerImage:entry.row*entry.height
                                 fromRegion:region
-                               mipmapLevel:0];
+                               mipmapLevel:0 slice:0];
     return @{
         @"seq" : @(seq),
         @"ok" : @YES,
@@ -429,7 +433,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         if (!buffers[@2] || (!average && (!buffers[@1] || buffers[@1] == buffers[@2])))
             return HostError(seq, EINVAL, @"missing or aliased buffer");
         DVMEntry *texture = average ? Entry(host, ts[0], @"texture") : nil;
-        if (average && (!texture || texture.width != 64 || texture.height != 48 ||
+        if (average && (!texture || texture.width != 64 || texture.height != 48 || [(id<MTLTexture>)texture.object textureType]!=MTLTextureType2D ||
                         texture.format != MTLPixelFormatRGBA16Float ||
                         !([(id<MTLTexture>)texture.object usage] & MTLTextureUsageShaderRead)))
             return HostError(seq, EINVAL, @"luma requires 64x48 RGBA16Float input");
@@ -477,8 +481,8 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         if ([entry.kind isEqual:@"buffer"])
             memcpy([(id<MTLBuffer>)entry.object contents], data.bytes, data.length);
         else
-            [(id<MTLTexture>)entry.object replaceRegion:MTLRegionMake2D(0,0,entry.width,entry.height)
-                mipmapLevel:0 withBytes:data.bytes bytesPerRow:entry.row];
+            [(id<MTLTexture>)entry.object replaceRegion:MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth])
+                mipmapLevel:0 slice:0 withBytes:data.bytes bytesPerRow:entry.row bytesPerImage:entry.row*entry.height];
     }
     id<MTLCommandBuffer> cb = [host.queue commandBuffer];
     for (NSDictionary *v in validated) {
