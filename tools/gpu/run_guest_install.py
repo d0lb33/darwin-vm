@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import socket
+import select
 import shutil
 import subprocess
 import sys
@@ -27,6 +28,9 @@ def main():
     a = p.parse_args()
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40:
         p.error('invalid tag')
+    for name in ('ramdisk.dmg', 'system.tc'):
+        if not (a.stage / name).is_file():
+            p.error(f'missing staged input: {a.stage / name}')
     repo = Path(__file__).resolve().parents[2]
     out = Path('/tmp/dvm')/a.tag
     out.mkdir(exist_ok=False)
@@ -73,6 +77,8 @@ def main():
         '-smp', '6', '-accel', 'tcg,thread=multi',
         '-fb', m['qemu_argv'][m['qemu_argv'].index('-fb')+1],
         '-fbmode', m['qemu_argv'][m['qemu_argv'].index('-fbmode')+1]]
+    if (a.stage/'restore.tc').exists():
+        argv[2:2] = ['--tc', str((a.stage/'restore.tc').resolve())]
     (out/'orchestration.json').write_text(json.dumps(dict(argv=argv, manifest=str(a.manifest),
         installer='sh /libexec/gpu-load-install.sh'), indent=2)+'\n')
     with (out/'probe.txt').open('w') as log:
@@ -92,6 +98,10 @@ def main():
                 print('restore shell ready; sent guarded installer', flush=True)
             if b'GPU_LOAD_INSTALLED\r' in data or b'GPU_LOAD_INSTALLED\n' in data:
                 stop.write_text('verified GPU_LOAD_INSTALLED marker\n')
+            if connected and select.select([connected], [], [], 0)[0]:
+                # Drain UART output; otherwise verbose helpers block on the socket
+                # even though QEMU also records their bytes in the serial log.
+                connected.recv(1024 * 1024)
             time.sleep(.2)
         if proc.poll() is None:
             proc.terminate()

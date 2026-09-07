@@ -75,7 +75,7 @@ def profile_config(profile, development_activation=False):
                 development_activation=development_activation,
                 userspace_patches=['display-allocation', 'settings-scale',
                                    'clock-label-and-non-glass'] if patched else [],
-                runtime_helpers=['input'] if patched else [],
+                runtime_helpers=['input', 'cellular-plan'] if patched else [],
                 kernel_adapters=['smp-pv'] if patched else [],
                 battery_source='emulated-smc',
                 clock_source='native-spmi-pmu',
@@ -214,6 +214,15 @@ def prepare(a, out, config, env):
         helpers = [('input', out / 'input/dvm-input')]
         helper_tcs.append(out / 'input/helper.tc')
         cached = original_launchd(a.launchd_cache)
+        # Share the exact endpoint ownership contract with incremental installs.
+        sys.path.insert(0, str(REPO))
+        from tools.comm.prepare import derive as derive_cellular_plan
+        run(sys.executable, REPO / 'tools/comm/build.py', out / 'cellular-plan',
+            '--cache', a.cache_dir / 'dyld_shared_cache_arm64e', env=env)
+        derive_cellular_plan(cached)
+        shutil.copyfile(out / 'cellular-plan/dvm-cellular-plan', payload / 'profile-cellular-plan')
+        additions.append(('/usr/local/libexec/dvm-cellular-plan', 'profile-cellular-plan', '755'))
+        helper_tcs.append(out / 'cellular-plan/service.tc')
         for name, binary in helpers:
             job = service(name)
             path = '/System/Library/LaunchDaemons/com.apple.dvm-' + name + '.plist'
@@ -330,6 +339,8 @@ def main():
                 a.dtree_raw, a.nvram, a.qemu, a.qemu_img]
     required += [a.firmware / name for name in ('bootkc', 'ramdisk.dmg', 'ramdisk.tc', 'sptm', 'txm')]
     required += [a.cache_dir / spec['cache_name'] for spec in specs()]
+    if a.profile != 'native':
+        required.append(a.cache_dir / 'dyld_shared_cache_arm64e')
     if a.base_image:
         if not a.exclave:
             p.error('--base-image requires --exclave')

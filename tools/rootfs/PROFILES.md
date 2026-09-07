@@ -14,7 +14,7 @@ does not install runtime accommodations.
 | Battery / powerd | Native SMC / original | Native SMC / original |
 | Clock | Native SPMI/PMU RTC | Native SPMI/PMU RTC |
 | Apple-userspace edits | None added | Display allocation, Settings scale, software clock rendering |
-| Runtime helpers | None added | Current input helper |
+| Runtime helpers | None added | Current input helper and no-modem cellular-plan service |
 | CPUs / kernel adapter | 6 / native PMGR, stock kernel | 6 / native PMGR, stock kernel (SMP adapter until 2026-09-06) |
 | Setup completion / saved RAM | Unchanged / none | Unchanged / none |
 
@@ -40,6 +40,8 @@ Provide these artifacts explicitly; no old `/tmp` staging names are defaults:
 - Original merged System/cryptex trust cache.
 - Raw device tree and the repository NVRAM blob.
 - Original shared-cache exports `.01`, `.13`, `.21` in `--cache-dir`.
+  Patched builds also require the matching `dyld_shared_cache_arm64e` cache set
+  there to verify the cellular service’s exact import providers.
 - Original `/System/Library/CoreServices/powerd.bundle/powerd` export.
 - Original `/System/Library/xpc/launchd.plist` export (without dvm jobs).
 - Matching decrypted ExclaveOS payload when using `--base-image`.
@@ -256,3 +258,13 @@ and `/tmp/dvm/BP_PATCHED3/{install/result.json,boot1/verdict.json}`. Their logs
 and manifests record the actual launch inputs. The binaries used for these
 runs came from the already tested `warm-runtime-qemu3` build; no QEMU rebuild
 or changes to another task's running VM were performed.
+
+## Cellular-plan service
+
+Compatibility profiles build and sign `tools/comm/plan_service.m`, merge its
+CDHash into the boot trust cache, install it on System, and transfer only
+`com.apple.CellularPlanDaemon.xpc` to its launchd job. It starts on every disk
+boot. Other CommCenter endpoints remain native. It reports no plans/modem;
+this is not radio, voice or mobile-data emulation. Native and positional
+storage-only builds retain their existing no-helper behavior. See
+[the service evidence and limits](../comm/README.md).

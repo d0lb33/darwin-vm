@@ -1,6 +1,6 @@
 # Minimal cellular-plan service (24A5430a)
 
-This is an opt-in provider for `com.apple.CellularPlanDaemon.xpc`, available
+Compatibility bootstrap profiles include this provider for `com.apple.CellularPlanDaemon.xpc`, available
 system-wide. It supplies an empty no-modem plan model through the guest's own
 `CTCellularPlanClient` NSXPC protocol. It does not patch Settings, emulate radio
 hardware, advertise a fake carrier/signal, or replace the other CommCenter
@@ -79,7 +79,7 @@ It moves only the plan endpoint out of the cellular CommCenter launch job;
 the noncellular job did not publish this endpoint in the exact cache.
 
 ```sh
-python3 tools/comm/build.py NEW_BUILD --stubs BOOTSTRAP_BUILD/stubs
+python3 tools/comm/build.py NEW_BUILD --cache EXACT_CACHE_DIR/dyld_shared_cache_arm64e
 python3 tools/comm/prepare.py NEW_BUILD BOOTSTRAP_STAGE/launchd.plist \
   BOOTSTRAP_STAGE/system.tc NEW_STAGE
 python3 tools/gpu/run_guest_install.py --manifest ORIGINAL_GPU_MANIFEST \
@@ -89,8 +89,8 @@ python3 tools/comm/derive_gpu_manifest.py ORIGINAL_GPU_MANIFEST \
 python3 tools/comm/test_prepare.py
 ```
 
-Retain the original manifest as rollback. This is not enabled in the default
-rootfs profiles. Keep exact guest runtime results separate from host tests.
+Retain the original manifest as rollback. Compatibility rootfs profiles install this automatically; native and positional
+storage-only profiles do not. Keep exact guest runtime results separate from host tests.
 
 ## Preserved validated package
 
@@ -102,3 +102,38 @@ not include that GPU revision.
 
 The accepted `build4/dvm-cellular-plan` binary SHA-256 is
 `6f04455f0ef856236ad87d4f2361894209480f6b502ca8e1972b2c7f6448c3d5`.
+
+## Default bootstrap and prepared base (2026-09-07)
+
+`rebuild_persistent_parent.sh --profile patched-native-battery` (and `patched`)
+now builds this service without preexisting linker stubs, checks import providers
+against `--cache-dir/dyld_shared_cache_arm64e`, installs the binary and cached
+launchd job, and merges its CDHash into the boot trust cache. The native and
+positional storage-only paths retain their no-helper behavior.
+
+The prepared default is updated by selecting an immutable child, not overwriting
+its prior disk. Local package:
+`/Users/jdolbe1/dvm-artifacts/native-smc/cellular-plan-20260907/`.
+Rollback manifest: `../default.json.pre-cellular-20260907`. `run.sh` continues
+using `native-smc/default.json`; existing running VMs keep their original inputs.
+`promote_base.py CANDIDATE DEFAULT BACKUP` checks direct lineage, fixed boot
+configuration and hashes, saves the original manifest, then replaces the default.
+Run cold-boot validation before this publication step; it is not a runtime test.
+
+Evidence: `/Users/jdolbe1/dvm-artifacts/research/cellular-bootstrap-20260907`.
+`CELL_BASE_INSTALL2` passed the guarded installer: STOPPED ON CONDITION,
+zero XNU panics, reached shell yes. `CELL_BASE_BOOT1` independently cold-booted
+this candidate with the unchanged stock kernel, SPTM/TXM, native SMC, device tree
+and software renderer: early boot 13.410 s, first 1179×2556 BGRA presentation
+129.132 s, zero panics, and `final.png` shows the lock screen. It stopped at the
+first presentation (completion count zero); this is not another About/input or
+sustained-pacing test. The installed binary is byte-identical to the prior
+About/Home-verified build4 recorded above. All 84 host regressions and four
+cellular ownership/publication tests passed. The fresh-Data rebuild pipeline
+was not rerun.
+
+Export tooling corrections: the restore runner now accepts a stage's `restore.tc`
+and drains UART output. The initial trials exposed a rejected exporter signature
+and socket backpressure. The final export's contiguous offsets, length and CRC
+were checked after removing two identified interleaved kernel log lines; raw and
+normalized logs are retained. No full System volume was mounted on the host.

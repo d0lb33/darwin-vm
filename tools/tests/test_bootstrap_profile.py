@@ -57,7 +57,7 @@ class BootstrapProfileTests(unittest.TestCase):
         patched = bp.profile_config('patched')
         self.assertTrue(native['development_activation'])
         self.assertFalse(patched['development_activation'])
-        self.assertEqual(patched['runtime_helpers'], ['input'])
+        self.assertEqual(patched['runtime_helpers'], ['input', 'cellular-plan'])
         self.assertEqual(patched['env']['DARWIN_RTC_PV'], '0')
         self.assertEqual(patched['kernel_adapters'], ['smp-pv'])
         self.assertEqual(patched['cpus'], 6)
@@ -69,7 +69,7 @@ class BootstrapProfileTests(unittest.TestCase):
         self.assertEqual(hybrid['cpus'], 6)
         self.assertEqual(hybrid['kernel_adapters'], ['smp-pv'])
         self.assertEqual(hybrid['env'], patched['env'])
-        self.assertEqual(hybrid['runtime_helpers'], ['input'])
+        self.assertEqual(hybrid['runtime_helpers'], ['input', 'cellular-plan'])
         self.assertNotIn('powerd-null-guard', hybrid['userspace_patches'])
         self.assertEqual(set(patched['userspace_patches']) - set(hybrid['userspace_patches']),
                          set())
