@@ -34,6 +34,8 @@ enum {
 @property(nonatomic,strong) DVMEntry *parent;
 @property(nonatomic,strong) DVMSharedRender *sharedRender;
 @property(nonatomic) uint32_t guestProcessBits;
+@property(nonatomic,strong) NSMutableData *textureUpload;
+@property(nonatomic) uint64_t textureUploadToken;
 @end
 @implementation DVMEntry
 - (void)dealloc {_object=nil;_sharedRender=nil;}
@@ -293,7 +295,7 @@ static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) 
         memcpy([(id<MTLBuffer>)b.object contents], data.bytes, data.length);
         return @{@"seq" : @(seq), @"ok" : @YES};
     }
-    if (!entry || entry.sharedRender || [(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
+    if (!entry || entry.sharedRender || entry.textureUpload || [(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
         data.length != row * entry.height * [(id<MTLTexture>)entry.object depth])
         return HostError(seq, EINVAL, @"upload must contain one complete texture");
     MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
@@ -315,7 +317,12 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
     if (!entry)
         return HostError(seq, ENOENT, @"unknown texture handle");
     if(entry.sharedRender)return HostError(seq,ENOTSUP,@"shared render pixels use owned mapping, not readback RPC");
+    if(entry.textureUpload)return HostError(seq,EBUSY,@"texture upload not committed");
     if([(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate)return HostError(seq,ENOTSUP,@"private texture has no CPU read access");
+    uint64_t offset=0,length=entry.textureBytes;
+    BOOL ranged=request[@"offset"]!=nil||request[@"length"]!=nil;
+    if(ranged&&(!Number(request[@"offset"],&offset)||!Number(request[@"length"],&length)||!length||length>DVM_TEXTURE_TRANSFER_CHUNK||offset>entry.textureBytes||length>entry.textureBytes-offset))
+        return HostError(seq,EINVAL,@"texture read range");
     NSMutableData *data = [NSMutableData dataWithLength:entry.textureBytes];
     MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
     [(id<MTLTexture>)entry.object getBytes:data.mutableBytes
@@ -325,9 +332,36 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
     return @{
         @"seq" : @(seq),
         @"ok" : @YES,
-        @"data" : [data base64EncodedStringWithOptions:0],
+        @"data" : [[data subdataWithRange:NSMakeRange(offset,length)] base64EncodedStringWithOptions:0],
         @"row" : @(entry.row)
     };
+}
+static NSDictionary *TextureChunk(DVMHost *host,uint64_t seq,NSDictionary *r){
+    DVMEntry *e=Entry(host,r[@"texture"],@"texture");uint64_t token,offset;
+    if(!e||e.sharedRender||e.parent||[(id<MTLTexture>)e.object storageMode]==MTLStorageModePrivate||!Number(r[@"token"],&token))
+        return HostError(seq,EINVAL,@"texture upload ownership/storage/token");
+    if([r[@"op"] isEqual:@"abortTextureUpload"]){
+        if(!e.textureUpload||token!=e.textureUploadToken)return HostError(seq,EINVAL,@"texture upload abort token");
+        e.textureUpload=nil;return @{@"seq":@(seq),@"ok":@YES};
+    }
+    NSData *data=DVMBPayload(r[@"data"]);
+    if(!data.length||data.length>DVM_TEXTURE_TRANSFER_CHUNK||!Number(r[@"offset"],&offset)||offset>e.textureBytes||data.length>e.textureBytes-offset)
+        return HostError(seq,EINVAL,@"texture upload chunk extent");
+    if(!token){
+        if(offset)return HostError(seq,EINVAL,@"texture upload must start at zero");
+        // One bounded CPU staging allocation; never expose partially uploaded
+        // content to GPU commands. The existing native image changes only once.
+        for(DVMEntry *other in host.entries.allValues)if(other.textureUpload)return HostError(seq,EBUSY,@"texture upload already active");
+        e.textureUpload=[NSMutableData dataWithCapacity:e.textureBytes];e.textureUploadToken=seq;
+    }else if(!e.textureUpload||token!=e.textureUploadToken||offset!=e.textureUpload.length)
+        return HostError(seq,EINVAL,@"texture upload chunk order/token");
+    [e.textureUpload appendData:data];BOOL complete=e.textureUpload.length==e.textureBytes;
+    if(complete){
+        id<MTLTexture> texture=e.object;
+        [texture replaceRegion:MTLRegionMake3D(0,0,0,e.width,e.height,texture.depth) mipmapLevel:0 slice:0 withBytes:e.textureUpload.bytes bytesPerRow:e.row bytesPerImage:e.row*e.height];
+        e.textureUpload=nil;
+    }
+    return @{@"seq":@(seq),@"ok":@YES,@"token":@(e.textureUploadToken),@"accepted":@(offset+data.length),@"complete":@(complete)};
 }
 static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request) {
     uint64_t handle;
@@ -547,6 +581,9 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     NSString *op = request[@"op"];
     if (![op isKindOfClass:NSString.class])
         return HostError(seq, EINVAL, @"request lacks op");
+    if([op isEqual:@"writeTextureChunk"]||[op isEqual:@"abortTextureUpload"])return TextureChunk(host,seq,request);
+    if([op isEqual:@"renderSubmit"]||[op isEqual:@"submit"]||[op isEqual:@"blurSubmit"])
+        for(DVMEntry *e in host.entries.allValues)if(e.textureUpload)return HostError(seq,EBUSY,@"GPU submission during incomplete texture upload");
     if([op isEqual:@"capabilities"])return @{@"seq":@(seq),@"ok":@YES,@"contract":DVMContractProfile()};
     if([op hasPrefix:@"resident"])return ResidentRequest(host,seq,request);
     if([op hasPrefix:@"sharedRender"])return SharedRenderRequest(host,seq,request);

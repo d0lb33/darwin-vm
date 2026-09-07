@@ -59,6 +59,12 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
    final pixels, native DCP bytes and ownership return. Next: actual UIKit view
    content, controls, text and visual effects in the persistent runner; this
    is not yet a Liquid Glass or system-compositor claim.
+3. **UIKit content:** the actual guest UIKit layer tree now submits three host
+   GPU passes/seven draws, and bounded V8 transfers capture the full 320×480
+   target. Pixel correctness fails: missing label text and a checker orientation
+   difference from guest CPU rendering. Explicit redraw leaves identical output;
+   labels have backing contents. This is an offscreen diagnostic, not a displayed
+   UIKit or Liquid Glass pass. See [UIKit evidence](gpu-uikit-ios27.md).
 
 The displayed scenes, partial transfers and interactive session evidence are in
 [shared scene verification](gpu-shared-scenes-regions-ios27.md). Group-opacity

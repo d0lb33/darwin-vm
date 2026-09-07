@@ -14,7 +14,9 @@ p.add_argument('--hz',type=int,choices=(0,30,60),default=0)
 p.add_argument('--scene',type=int,choices=range(5),default=0,help='0 moving, 1 alpha, 2 clip/transform, 3 image, 4 group opacity')
 p.add_argument('--shared-surface',action='store_true',help='owned IOSurface CARenderer/display test; requires mapping-provider helper')
 p.add_argument('--regions',action='store_true',help='append a public region-transfer probe after the single red CALayer control')
+p.add_argument('--uikit',action='store_true',help='actual guest UIKit view tree and independent CPU reference; offscreen diagnostic')
 a=p.parse_args()
+if a.uikit and (a.frames!=1 or a.shared_surface or a.regions or a.scene):p.error('UIKit requires --frames 1, offscreen, no other scene mode')
 if a.regions and (a.frames!=1 or a.shared_surface):p.error('region probe requires --frames 1 without --shared-surface')
 if a.frames!=1 and not 3<=a.frames<=4096:p.error('frames must be 1 or 3..4096')
 if a.hz and a.frames==1:p.error('pacing requires a sequence')
@@ -22,11 +24,12 @@ if a.scene and a.frames==1:p.error('scene requires a sequence')
 if a.shared_surface and not 3<=a.frames<=1024:p.error('shared display test requires 3..1024 frames')
 root=Path(__file__).resolve().parents[2];src=root/'tools/gpu'
 subprocess.run(['python3',str(src/'build_driver_revision.py'),str(a.base),str(a.out)],check=True)
-sdk=subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip()
+sdk=subprocess.check_output(['xcrun','--sdk','iphoneos' if a.uikit else 'macosx','--show-sdk-path'],text=True).strip()
 flags=['-target','arm64-apple-ios27.0','-isysroot',sdk,'-Wno-incompatible-sysroot',
        '-fobjc-arc','-fobjc-arc-exceptions','-O1','-Wall','-Wextra','-Werror',
        '-Wno-deprecated-declarations','-fno-objc-msgsend-selector-stubs']
-subprocess.run(['xcrun','clang',*flags,*(['-DDVM_CA_SHARED'] if a.shared_surface else []),*(['-DDVM_CA_REGIONS'] if a.regions else []),f'-DDVM_CA_FRAMES={a.frames}',f'-DDVM_CA_HZ={a.hz}',f'-DDVM_CA_SCENE={a.scene}','-c',str(src/'consumer_package.m'),'-o',str(a.out/'consumer_package.o')],check=True)
+uikit_headers=['-DDVM_CA_UIKIT'] if a.uikit else []
+subprocess.run(['xcrun','clang',*flags,*uikit_headers,*(['-DDVM_CA_SHARED'] if a.shared_surface else []),*(['-DDVM_CA_REGIONS'] if a.regions else []),f'-DDVM_CA_FRAMES={a.frames}',f'-DDVM_CA_HZ={a.hz}',f'-DDVM_CA_SCENE={a.scene}','-c',str(src/'consumer_package.m'),'-o',str(a.out/'consumer_package.o')],check=True)
 symbols=subprocess.check_output(['nm','-u',str(a.out/'consumer_package.o')],text=True).split()
 stub=a.out/'stubs/usr/lib/libobjc.tbd';text=stub.read_text()
 added=[s for s in symbols if s.startswith('_objc_') and '"'+s+'"' not in text]
@@ -35,19 +38,23 @@ stub=a.out/'stubs/usr/lib/libSystem.tbd';text=stub.read_text()
 added=[s for s in ('_task_info','_mach_task_self_','_backtrace','_sigaction','_memset_pattern16') if '"'+s+'"' not in text]
 stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))
 for framework,names in {
-    'Foundation':['_NSSetUncaughtExceptionHandler'],
-    'CoreFoundation':['_CFDataCreate'],
-    'CoreGraphics':['_CGPointZero','_CGDataProviderCreateWithCFData','_CGDataProviderRelease','_CGImageCreate','_CGImageRelease'],
-    'QuartzCore':['_CATransform3DMakeScale','_kCAFilterNearest'],
+    'Foundation':['_NSSetUncaughtExceptionHandler',*(['_OBJC_CLASS_$_NSThread'] if a.uikit else [])],
+    'CoreFoundation':['_CFDataCreate',*(['_CFGetTypeID','_CFCopyDescription'] if a.uikit else [])],
+    'CoreGraphics':['_CGPointZero','_CGDataProviderCreateWithCFData','_CGDataProviderRelease','_CGImageCreate','_CGImageRelease',*(['_CGBitmapContextCreate','_CGBitmapContextCreateImage','_CGContextRelease','_CGContextTranslateCTM','_CGContextScaleCTM'] if a.uikit else [])],
+    'QuartzCore':['_CATransform3DMakeScale','_kCAFilterNearest',*(['_CACurrentMediaTime'] if a.uikit else [])],
 }.items():
     stub=a.out/f'stubs/System/Library/Frameworks/{framework}.framework/{framework}.tbd'
     text=stub.read_text();added=[s for s in names if '"'+s+'"' not in text]
     stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))
 binary=a.out/'DVMProxy.bundle/DVMProxy'
+if a.uikit:
+    stub=a.out/'stubs/System/Library/Frameworks/UIKit.framework/UIKit.tbd';stub.parent.mkdir(exist_ok=True)
+    names=[s for s in symbols if s.startswith('_OBJC_CLASS_$_UI')]
+    stub.write_text('--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-ios ]\ninstall-name: /System/Library/Frameworks/UIKit.framework/UIKit\nexports:\n  - targets: [ arm64-ios ]\n    symbols: [ '+', '.join('"'+s+'"' for s in names)+' ]\n...\n')
 subprocess.run(['xcrun','clang',*flags,'-F',str(a.out/'stubs/System/Library/Frameworks'),'-L',str(a.out/'stubs/usr/lib'),
     '-dynamiclib','-Wl,-install_name,/usr/local/libexec/DVMProxy.bundle/DVMProxy',str(a.out/'driver_guest.o'),str(a.out/'consumer_package.o'),
     '-framework','Foundation','-framework','CoreFoundation','-framework','IOSurface','-framework','Metal',
-    '-framework','QuartzCore','-framework','CoreGraphics','-lobjc','-o',str(binary)],check=True)
+    '-framework','QuartzCore','-framework','CoreGraphics',*(['-framework','UIKit'] if a.uikit else []),'-lobjc','-o',str(binary)],check=True)
 subprocess.run(['codesign','--force','--sign','-','--timestamp=none',str(binary.parent)],check=True)
 subprocess.run(['codesign','--verify','--strict',str(binary.parent)],check=True)
 signature=subprocess.run(['codesign','-d','-vvv',str(binary.parent)],capture_output=True,text=True,check=True).stderr
@@ -65,12 +72,12 @@ revision['consumer_package_relinked']=True
 imports=a.out/'consumer-package.nm-u';imports.write_bytes(subprocess.check_output(['nm','-u',str(binary)]))
 (a.out/'DVMProxy.nm-u').write_bytes(imports.read_bytes())
 subprocess.run(['python3',str(src/'verify_guest_imports.py'),'--output',str(a.out/'consumer-package-imports.tsv'),str(imports)],check=True)
-record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,uikit=a.uikit,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
             helper_sha256=hashlib.sha256((a.out/'dvm-gpu-load').read_bytes()).hexdigest(),
             scope='test export compiled; guest execution untested')
 if record['helper_sha256']!=hashlib.sha256((a.base/'dvm-gpu-load').read_bytes()).hexdigest():
     raise ValueError('package unexpectedly changed the pinned helper')
-for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc'):
+for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc'):
     (a.out/name).write_bytes((src/name).read_bytes())
 (a.out/'consumer-package.json').write_text(json.dumps(record,indent=2)+'\n')
 print(json.dumps(record))

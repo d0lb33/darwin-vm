@@ -166,8 +166,9 @@ idle owned VM to trigger QEMU's one-shot final DMA export, verifies it, and
 resumes. The pause/collection takes 1.634 seconds outside every timed batch.
 This is not checkpoint/migration support, and QEMU only exports once per VM.
 The subsequent fresh-process installed control 1788767893272035 passes.
-The interactive VM stays live for further UIKit development; no session expiry
-or automatic teardown is claimed for this evidence snapshot.
+The interactive VM was still live at this evidence snapshot. A later UIKit
+experiment ended the session at 917.69 seconds with `ValueError: host reply
+length`, not a session expiry. See [the UIKit transfer failure and correction](gpu-uikit-ios27.md).
 
 Durable runtime packages: `~/dvm-artifacts/gpu-quartzcore-group-ios27`.
 GUEST4 evidence and final host tests: research package

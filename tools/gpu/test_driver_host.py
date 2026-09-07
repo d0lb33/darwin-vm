@@ -92,6 +92,35 @@ class HostTests(unittest.TestCase):
         self.assertTrue(tiny['ok'])
         for handle in handles+[tiny['handle']]:self.assertTrue(self.rpc('release',handle=handle)['ok'])
         self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
+
+    def test_texture_chunks_bound_replies_and_commit_atomically(self):
+        encoded=lambda data:base64.b64encode(data).decode()
+        handle=self.rpc('texture',width=320,height=480,format=80,usage=5)['handle']
+        original=bytes([17])*(320*480*4)
+        self.assertTrue(self.rpc('upload',texture=handle,row=1280,data=encoded(original))['ok'])
+        started=self.rpc('writeTextureChunk',texture=handle,token=0,offset=0,data=encoded(b'X'*32768))
+        self.assertTrue(started['ok']);token=started['token']
+        self.assertFalse(self.rpc('read',texture=handle,offset=0,length=16)['ok'])
+        self.assertFalse(self.rpc('upload',texture=handle,row=1280,data=encoded(original))['ok'])
+        self.assertFalse(self.rpc('writeTextureChunk',texture=handle,token=token,offset=1,data=encoded(b'X'))['ok'])
+        self.assertFalse(self.rpc('renderSubmit',commands=[],uploads=[],readbacks=[])['ok'])
+        self.assertEqual(self.rpc('stats')['submissions'],0)
+        self.assertTrue(self.rpc('abortTextureUpload',texture=handle,token=token)['ok'])
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=handle,offset=0,length=32)['data']),original[:32])
+        data=bytes(i%251 for i in range(len(original)));token=0
+        for offset in range(0,len(data),32768):
+            chunk=data[offset:offset+32768]
+            r=self.rpc('writeTextureChunk',texture=handle,token=token,offset=offset,data=encoded(chunk))
+            self.assertTrue(r['ok']);token=r['token']
+            self.assertEqual(r['accepted'],offset+len(chunk));self.assertEqual(r['complete'],offset+len(chunk)==len(data))
+        actual=bytearray()
+        for offset in range(0,len(data),32768):
+            r=self.rpc('read',texture=handle,offset=offset,length=min(32768,len(data)-offset))
+            self.assertTrue(r['ok']);self.assertLess(len(json.dumps(r).encode()),65536)
+            actual.extend(base64.b64decode(r['data']))
+        self.assertEqual(actual,data)
+        for offset,length in ((-1,1),(len(data),1),(0,32769),(0,0)):
+            self.assertFalse(self.rpc('read',texture=handle,offset=offset,length=length)['ok'])
     def test_bad_second_encoder_cannot_execute_first(self):
         lib=self.rpc('library',length=AIR.stat().st_size,sha256=SHA)['handle']
         avg=self.rpc('pipeline',library=lib,function='compute_average_luma')['handle']

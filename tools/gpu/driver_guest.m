@@ -99,6 +99,22 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @property(nonatomic, strong) DVMDevice *owner;
 @property(atomic, copy) NSString *label;
 @end
+static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
+    NSData *data=texture.pendingUpload;NSNumber *token=@0;NSError *failure=nil;
+    @try{
+        for(NSUInteger offset=0;offset<data.length;offset+=DVM_TEXTURE_TRANSFER_CHUNK){
+            NSUInteger length=MIN(DVM_TEXTURE_TRANSFER_CHUNK,data.length-offset);
+            NSDictionary *r=rpc(@{@"op":@"writeTextureChunk",@"texture":texture.handle,@"token":token,@"offset":@(offset),@"data":[[data subdataWithRange:NSMakeRange(offset,length)] base64EncodedStringWithOptions:0]},&failure);
+            if(!r||![r[@"token"] isKindOfClass:NSNumber.class]||![r[@"token"] unsignedLongLongValue]||
+               (token.unsignedLongLongValue&&![r[@"token"] isEqual:token])||![r[@"accepted"] isEqual:@(offset+length)]||
+               ![r[@"complete"] isEqual:@(offset+length==data.length)])reject(failure.description?:@"texture chunk acknowledgement");
+            token=r[@"token"];
+        }
+    }@catch(NSException *exception){
+        if(token.unsignedLongLongValue)rpc(@{@"op":@"abortTextureUpload",@"texture":texture.handle,@"token":token},NULL);
+        @throw exception;
+    }
+}
 @interface DVMEncoder : NSObject <MTLComputeCommandEncoder>
 @property(nonatomic, strong) DVMCommand *command;
 @property(nonatomic, strong) DVMPipeline *pipeline;
@@ -513,10 +529,26 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
         if(![self.owner call:@{@"op":@"upload",@"buffer":self.backingBuffer.handle,@"data":[[self.backingBuffer cpuData] base64EncodedStringWithOptions:0]} error:&e])reject(e.description?:@"linear upload");
     }
     if (self.pendingUpload) {
-        if (![self.owner call:@{@"op":@"upload", @"texture":self.handle,
+        if(self.pendingUpload.length>DVM_TEXTURE_TRANSFER_CHUNK){
+            __block NSException *caught=nil;
+            dispatch_sync(self.owner.serial,^{@try{DVMUploadTextureChunks(self,self.owner.transport);}@catch(NSException *exception){caught=exception;}});
+            if(caught)@throw caught;
+        }else if (![self.owner call:@{@"op":@"upload", @"texture":self.handle,
               @"row":@([self row]), @"data":[self.pendingUpload base64EncodedStringWithOptions:0]} error:&e])
             reject(e.description ?: @"texture upload failed");
         self.pendingUpload = nil;
+    }
+    NSUInteger total=[self row]*_height*self.depth;
+    if(total>DVM_TEXTURE_TRANSFER_CHUNK){
+        NSMutableData *data=[NSMutableData dataWithCapacity:total];
+        for(NSUInteger offset=0;offset<total;offset+=DVM_TEXTURE_TRANSFER_CHUNK){
+            NSUInteger length=MIN(DVM_TEXTURE_TRANSFER_CHUNK,total-offset);
+            NSDictionary *part=[self.owner call:@{@"op":@"read",@"texture":self.handle,@"offset":@(offset),@"length":@(length)} error:&e];
+            NSData *bytes=part?[[NSData alloc] initWithBase64EncodedString:part[@"data"] options:0]:nil;
+            if(bytes.length!=length||![part[@"row"] isEqual:@([self row])])reject(e.description?:@"texture read chunk");
+            [data appendData:bytes];
+        }
+        return data;
     }
     NSDictionary *r = [self.owner call:@{@"op" : @"read", @"texture" : self.handle} error:&e];
     NSData *d = r ? [[NSData alloc] initWithBase64EncodedString:r[@"data"] options:0] : nil;
@@ -657,9 +689,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                 if(!render)for(DVMBuffer *b in buffers)
                     [uploads addObject:@{@"op":@"upload",@"buffer":b.handle,
                         @"data":self.commandQueue.owner.binaryPayloads?[b cpuData]:[[b cpuData] base64EncodedStringWithOptions:0]}];
-                for(DVMTexture *t in textures)if(t.pendingUpload)
-                    [uploads addObject:@{@"texture":t.handle,@"row":@([t row]),
+                for(DVMTexture *t in textures)if(t.pendingUpload){
+                    if(t.pendingUpload.length>DVM_TEXTURE_TRANSFER_CHUNK)DVMUploadTextureChunks(t,self.commandQueue.owner.transport);
+                    else [uploads addObject:@{@"texture":t.handle,@"row":@([t row]),
                         @"data":self.commandQueue.owner.binaryPayloads&&!render?t.pendingUpload:[t.pendingUpload base64EncodedStringWithOptions:0]}];
+                }
                 if(render)for(DVMBuffer *buffer in buffers) {
                     // contents may be written directly, without didModifyRange.
                     // Compare owned bytes; update the cache only after host ACK.
