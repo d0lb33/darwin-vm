@@ -78,7 +78,7 @@ static NSDictionary *Sampler(DVMHost *host,uint64_t seq,NSDictionary *r) {
     if(!s||!Add(host,@"sampler",s,&entry))return HostError(seq,ENOMEM,@"sampler allocation");
     return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle)};
 }
-static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
+static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r,BOOL preflight) {
     NSArray *tasks=r[@"guestTaskIDs"]?:@[];
     if(![tasks isKindOfClass:NSArray.class]||tasks.count>16)return HostError(seq,EINVAL,@"guest attribution extent");
     for(id task in tasks)if(!RenderUInt(task,UINT32_MAX))return HostError(seq,EINVAL,@"guest task ID");
@@ -96,7 +96,7 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
     // Encode into an uncommitted command buffer. Validate every pass before any
     // upload or commit, so a bad later operation cannot execute an earlier pass.
     id<MTLCommandBuffer> cb=[host.queue commandBuffer];NSUInteger draws=0;
-    NSMutableSet *written=[NSMutableSet set];
+    NSMutableSet *written=[NSMutableSet set];BOOL serialIndices=NO;
     for(NSDictionary *pass in passes){
         if(![pass isKindOfClass:NSDictionary.class]||![pass[@"kind"] isEqual:@"render"])return HostError(seq,EINVAL,@"mixed render batch");
         DVMEntry *target=Entry(host,pass[@"target"],@"texture");NSArray *clear=pass[@"clear"],*ops=pass[@"operations"];
@@ -138,15 +138,27 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
                 if(written.count)[encoder memoryBarrierWithScope:MTLBarrierScopeBuffers afterStages:MTLRenderStageVertex beforeStages:MTLRenderStageVertex|MTLRenderStageFragment];
             } else if([name isEqual:@"indexed"]&&op.count==6&&RenderUInt(op[1],4)&&RenderUInt(op[2],4096)&&RenderUInt(op[3],1)&&pipeline){
                 DVMEntry *b=Entry(host,op[4],@"buffer");uint64_t offset;NSUInteger count=[op[2] unsignedIntegerValue],size=[op[3] unsignedIntegerValue]?4:2;
-                if(!b||[written containsObject:@(b.handle)]||!count||!Number(op[5],&offset)||offset%size||offset>b.textureBytes||count*size>b.textureBytes-offset){failure=@"index buffer bounds";break;}
+                if(!b||!count||!Number(op[5],&offset)||offset%size||offset>b.textureBytes||count*size>b.textureBytes-offset){failure=@"index buffer bounds";break;}
+                BOOL priorWrite=[written containsObject:@(b.handle)];
                 const uint8_t *data=[(id<MTLBuffer>)b.object contents];
                 for(NSArray *transfer in transfers)if(transfer[0]==b)data=[(NSData *)transfer[1] bytes];
                 NSUInteger maximum=0;for(NSUInteger i=0;i<count;i++){uint32_t value=0;memcpy(&value,data+offset+i*size,size);maximum=MAX(maximum,value);}
-                if(maximum>=4096){failure=@"index value bounds";break;}
-                for(NSArray *layout in pipeline.object[@"layouts"]){NSUInteger elements=[layout[2] unsignedIntegerValue]==1?maximum+1:1;NSArray *bound=vertexBuffers[layout[0]];if(!bound||elements*[layout[1] unsignedIntegerValue]>[bound[0] unsignedIntegerValue]){failure=@"indexed vertex footprint exceeds binding";break;}}
+                if(!(preflight&&priorWrite)) {
+                    if(maximum>=4096){failure=@"index value bounds";break;}
+                    for(NSArray *layout in pipeline.object[@"layouts"]){NSUInteger elements=[layout[2] unsignedIntegerValue]==1?maximum+1:1;NSArray *bound=vertexBuffers[layout[0]];if(!bound||elements*[layout[1] unsignedIntegerValue]>[bound[0] unsignedIntegerValue]){failure=@"indexed vertex footprint exceeds binding";break;}}
+                }
                 if(!RenderBindingsFit(pipeline,vertexBuffers,fragmentBuffers,fragmentTextures,fragmentSamplers,written))failure=@"missing or undersized indexed binding";
-                if([written containsObject:@(b.handle)])failure=@"GPU-written index input needs a separate completed submission";
-                if(failure)break;[encoder drawIndexedPrimitives:[op[1] unsignedIntegerValue] indexCount:count indexType:[op[3] unsignedIntegerValue] indexBuffer:b.object indexBufferOffset:offset];draws++;
+                serialIndices|=[written containsObject:@(b.handle)];
+                if(failure)break;
+                // Resolve indices after previous dependent draws complete. A
+                // native immutable snapshot prevents this draw's writable
+                // buffer aliases from racing the index fetch or CPU validation.
+                id<MTLBuffer> indices=b.object;NSUInteger indexOffset=offset;
+                if(!preflight&&serialIndices){
+                    indices=[host.device newBufferWithBytes:data+offset length:count*size options:MTLResourceStorageModeShared];indexOffset=0;
+                    if(!indices){failure=@"index snapshot allocation";break;}
+                }
+                [encoder drawIndexedPrimitives:[op[1] unsignedIntegerValue] indexCount:count indexType:[op[3] unsignedIntegerValue] indexBuffer:indices indexBufferOffset:indexOffset];draws++;
                 // Apple TBDR cannot wait for fragment stores within this pass.
                 // Only vertex writes are admitted; order their later consumers.
                 if(written.count)[encoder memoryBarrierWithScope:MTLBarrierScopeBuffers afterStages:MTLRenderStageVertex beforeStages:MTLRenderStageVertex|MTLRenderStageFragment];
@@ -156,6 +168,7 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
     }
     NSUInteger totalWritten=0;
     for(NSNumber *handle in written){DVMEntry *b=Entry(host,handle,@"buffer");if(!b||b.textureBytes>DVM_BUFFER_BYTES-totalWritten)return HostError(seq,ENOTSUP,@"render writeback budget");totalWritten+=b.textureBytes;}
+    if(preflight)return @{@"ok":@YES,@"serialIndices":@(serialIndices),@"writtenBuffers":[[written allObjects] sortedArrayUsingSelector:@selector(compare:)]};
     for(NSArray *transfer in transfers){DVMEntry *e=transfer[0];NSData *data=transfer[1];if([e.kind isEqual:@"buffer"])memcpy([(id<MTLBuffer>)e.object contents],data.bytes,data.length);else [(id<MTLTexture>)e.object replaceRegion:MTLRegionMake3D(0,0,0,e.width,e.height,[(id<MTLTexture>)e.object depth]) mipmapLevel:0 slice:0 withBytes:data.bytes bytesPerRow:e.row bytesPerImage:e.row*e.height];}
     [cb commit];[cb waitUntilCompleted];host.submissions++;
     if(cb.status!=MTLCommandBufferStatusCompleted)return NSErrorReply(seq,cb.error,@"render GPU completion");
@@ -164,6 +177,44 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
     fprintf(stderr,"DVM_DRIVER_RENDER seq=%llu passes=%lu draws=%lu status=%lu gpu_us=%.3f\n",(unsigned long long)seq,(unsigned long)passes.count,(unsigned long)draws,(unsigned long)cb.status,(cb.GPUEndTime-cb.GPUStartTime)*1e6);
     return @{@"seq":@(seq),@"ok":@YES,@"status":@(cb.status),@"buffers":result,@"passes":@(passes.count),@"draws":@(draws),@"gpu_us":@((cb.GPUEndTime-cb.GPUStartTime)*1e6),
         @"writtenBuffers":[[written allObjects] sortedArrayUsingSelector:@selector(compare:)],@"gpu_start":@(cb.GPUStartTime),@"gpu_end":@(cb.GPUEndTime),@"kernel_start":@(cb.kernelStartTime),@"kernel_end":@(cb.kernelEndTime)};
+}
+static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
+    NSDictionary *check=RenderSubmitPart(host,seq,r,YES);
+    if(![check[@"ok"] boolValue])return check;
+    if(![check[@"serialIndices"] boolValue])return RenderSubmitPart(host,seq,r,NO);
+    // This bounded profile has one single-sample color target and no depth,
+    // tile shaders or visibility queries. Store/load preserves it across native
+    // command buffers. Split only batches with writable/index aliases; retain
+    // encoded state and wait before inspecting GPU-produced index bytes.
+    NSMutableArray *parts=[NSMutableArray array];
+    for(NSDictionary *pass in r[@"commands"]){
+        NSMutableArray *state=[NSMutableArray array],*passParts=[NSMutableArray array];
+        for(NSArray *op in pass[@"operations"]){
+            if([op[0] isEqual:@"draw"]||[op[0] isEqual:@"indexed"]){
+                NSMutableDictionary *part=[pass mutableCopy];part[@"operations"]=[state arrayByAddingObject:op];
+                part[@"load"]=passParts.count?@(MTLLoadActionLoad):pass[@"load"];
+                part[@"store"]=@(MTLStoreActionStore);[passParts addObject:part];
+            }else [state addObject:op];
+        }
+        if(!passParts.count)[passParts addObject:[pass mutableCopy]];
+        [passParts lastObject][@"store"]=pass[@"store"];
+        [parts addObjectsFromArray:passParts];
+    }
+    NSDictionary *last=nil;double gpuUs=0;id gpuStart=nil,kernelStart=nil;
+    uint64_t initialPasses=host.renderPasses,initialDraws=host.renderDraws;
+    for(NSUInteger i=0;i<parts.count;i++){
+        NSMutableDictionary *part=[r mutableCopy];part[@"commands"]=@[parts[i]];
+        part[@"uploads"]=i?@[]:r[@"uploads"];part[@"readbacks"]=i+1==parts.count?r[@"readbacks"]:@[];
+        last=RenderSubmitPart(host,seq,part,NO);
+        if(![last[@"ok"] boolValue])return last;
+        if(!i){gpuStart=last[@"gpu_start"];kernelStart=last[@"kernel_start"];}
+        gpuUs+=[last[@"gpu_us"] doubleValue];
+    }
+    host.renderPasses=initialPasses+[r[@"commands"] count];
+    NSMutableDictionary *result=[last mutableCopy];result[@"passes"]=@([r[@"commands"] count]);
+    result[@"draws"]=@(host.renderDraws-initialDraws);result[@"writtenBuffers"]=check[@"writtenBuffers"];
+    result[@"gpu_us"]=@(gpuUs);result[@"gpu_start"]=gpuStart;result[@"kernel_start"]=kernelStart;
+    result[@"nativeCommandBuffers"]=@(parts.count);return result;
 }
 static NSDictionary *WriteRenderBuffer(DVMHost *host,uint64_t seq,NSDictionary *r) {
     DVMEntry *b=Entry(host,r[@"buffer"],@"buffer");uint64_t offset;NSData *data=DVMBPayload(r[@"data"]);

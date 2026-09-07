@@ -5,6 +5,9 @@
 #include "driver_host.m"
 #undef main
 #import "driver_api.h"
+@protocol DVMLinearTest
+- (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)o bytesPerRow:(NSUInteger)r bytesPerImage:(NSUInteger)i;
+@end
 
 static void require(BOOL ok,const char *why){if(!ok){fprintf(stderr,"FAIL %s\n",why);exit(1);}}
 int main(void){@autoreleasepool {
@@ -17,6 +20,7 @@ int main(void){@autoreleasepool {
       "if(i%3==0){s[0]+=step;s[16384]+=7;}float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return O{float4(p[i%3],0,1)};}\n"
       "fragment float4 f(constant float4 &color[[buffer(30)]]){return color;}\n"
       "fragment float4 fw(device uint *s[[buffer(0)]]){s[0]=1;return float4(1,0,0,1);}"
+      "vertex O vg(uint i[[vertex_id]],device uint *s[[buffer(30)]],constant uint &step[[buffer(8)]]){if(i==0){s[0]+=1;s[4]=step;s[5]=1;s[6]=0;}float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return O{float4(p[i%3],0,1)};}"
       "fragment float4 ft(texture2d<float> image[[texture(8)]],texture3d<float> lut[[texture(15)]],sampler sam[[sampler(15)]]){return image.sample(sam,float2(.5))*lut.sample(sam,float3(.5,.5,.75));}";
     id<MTLLibrary> native=[host.device newLibraryWithSource:source options:nil error:&error];
     require(native!=nil,error.description.UTF8String);
@@ -105,6 +109,54 @@ int main(void){@autoreleasepool {
         }
         fprintf(stderr,"PASS texture sampling: 3D pitch/padding, slots 8/15, sampler 15, bulk unbinding, correct GPU pixels, dimension/boundary rejection\n");
         fprintf(stderr,"PASS render writes: GPU pixels, 3-chunk CPU coherence, ordered draws, reuse, completion, slots 8/30, boundary/ownership/inline rejection, atomic error publication\n");
+        void *client=NULL;require(!posix_memalign(&client,16384,16384),"client aligned allocation");
+        memset(client,0,16384);__block unsigned freed=0;
+        void (^deallocator)(void *,NSUInteger)=^(void *pointer,NSUInteger length){require(pointer==client&&length==16384,"client deallocator identity");freed++;free(pointer);};
+        require(![d newBufferWithBytesNoCopy:(char *)client+1 length:16384 options:0 deallocator:deallocator],"unaligned client pointer rejected");
+        require(![d newBufferWithBytesNoCopy:client length:16383 options:0 deallocator:deallocator],"unaligned client extent rejected");
+        require(freed==0,"failed allocation does not take ownership");
+        @autoreleasepool {
+            id<MTLBuffer> clientBuffer=[d newBufferWithBytesNoCopy:client length:16384 options:0 deallocator:deallocator];
+            fprintf(stderr,"CLIENT_BUFFER pointer=%p contents=%p object=%p length=%lu\n",client,clientBuffer.contents,(__bridge void *)clientBuffer,(unsigned long)clientBuffer.length);require(clientBuffer.contents==client,"client buffer retains original CPU storage");
+            MTLTextureDescriptor *linearDesc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:1 height:1 mipmapped:NO];linearDesc.storageMode=MTLStorageModeShared;linearDesc.usage=MTLTextureUsageShaderRead;
+            NSUInteger row=[d minimumLinearTextureAlignmentForPixelFormat:MTLPixelFormatBGRA8Unorm];
+            id<MTLTexture> linear=[(id<DVMLinearTest>)clientBuffer newLinearTextureWithDescriptor:linearDesc offset:0 bytesPerRow:row bytesPerImage:row];
+            require(linear!=nil&&linear.buffer==clientBuffer,"private linear view retains client buffer");
+            require(![(id<DVMLinearTest>)clientBuffer newLinearTextureWithDescriptor:linearDesc offset:0 bytesPerRow:row bytesPerImage:row+1],"inconsistent image pitch rejected");
+            ((uint32_t *)client)[0]=0xff00ff00;uint32_t sample=0;
+            [linear getBytes:&sample bytesPerRow:4 fromRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0];
+            require(sample==0xff00ff00,"client CPU update reaches native linear texture");
+            desc.vertexFunction=[lib newFunctionWithName:@"vg"];desc.fragmentFunction=[lib newFunctionWithName:@"f"];
+            id<MTLRenderPipelineState> generated=[d newRenderPipelineStateWithDescriptor:desc error:&error];require(generated!=nil,"generated index pipeline");
+            @autoreleasepool {
+                uint32_t next=2;id<MTLCommandBuffer> cb=[q commandBuffer];id<MTLRenderCommandEncoder> re=[cb renderCommandEncoderWithDescriptor:pass];
+                [re setRenderPipelineState:generated];[re setVertexBuffer:clientBuffer offset:0 atIndex:30];[re setVertexBytes:&next length:4 atIndex:8];[re setFragmentBytes:red length:16 atIndex:30];
+                [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [re setVertexBytes:&next length:4 atIndex:30];
+                [re drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt32 indexBuffer:clientBuffer indexBufferOffset:16];[re endEncoding];
+                uint64_t before=host.submissions;[cb commit];[cb waitUntilCompleted];
+                require(cb.status==MTLCommandBufferStatusError&&host.submissions==before,"bad later alias binding rejected before any GPU draw");
+            }
+            for(unsigned invalid=0;invalid<2;invalid++)@autoreleasepool {
+                memset(client,0,16384);uint32_t next=invalid?5000:2;
+                id<MTLCommandBuffer> cb=[q commandBuffer];id<MTLRenderCommandEncoder> re=[cb renderCommandEncoderWithDescriptor:pass];
+                [re setRenderPipelineState:generated];[re setVertexBuffer:clientBuffer offset:0 atIndex:30];[re setVertexBytes:&next length:4 atIndex:8];[re setFragmentBytes:red length:16 atIndex:30];
+                [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];
+                [re drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt32 indexBuffer:clientBuffer indexBufferOffset:16];[re endEncoding];
+                uint64_t before=host.submissions;[cb commit];[cb waitUntilCompleted];
+                require(freed==0,"in-flight and retained client lifetime");
+                if(invalid)require(cb.status==MTLCommandBufferStatusError&&host.submissions==before+1,"GPU-generated invalid indices rejected before dependent draw");
+                else {
+                    require(cb.status==MTLCommandBufferStatusCompleted&&host.submissions==before+2,"dependent indexed draws split at completed GPU boundary");
+                    require(((uint32_t *)client)[0]==2&&((uint32_t *)client)[4]==2,"GPU writes published directly to client storage");
+                    [t getBytes:pixels bytesPerRow:256 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];
+                    for(unsigned i=0;i<4096;i++)require(pixels[i*4]==0&&pixels[i*4+1]==0&&pixels[i*4+2]==255&&pixels[i*4+3]==255,"GPU-generated indices retain correct render pixels");
+                }
+            }
+        }
+        for(unsigned i=0;i<1000&&!freed;i++)usleep(1000);
+        require(freed==1,"client deallocator exactly once after final reference");
+        fprintf(stderr,"PASS client storage and index dependencies: original pointer, GPU writeback, valid generated indices, invalid-index stop, final deallocator\n");
     }
     // Drain queued retirements through a fresh device-independent host check.
     NSUInteger remaining=1;

@@ -6,6 +6,9 @@
 #ifndef DVM_CA_HZ
 #define DVM_CA_HZ 0
 #endif
+#ifndef DVM_CA_SCENE
+#define DVM_CA_SCENE 0
+#endif
 static double DVMConsumerTime(void) {
     struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);
     return t.tv_sec+t.tv_nsec*1e-9;
@@ -21,10 +24,15 @@ static void DVMConsumerCheck(id<MTLTexture> texture,unsigned frame) {
     for(unsigned y=0;y<64;y++)for(unsigned x=0;x<64;x++){
         const uint8_t *p=pixels+(y*64+x)*4;
         BOOL green=x>=28&&x<36,red=!green&&x>=x0&&x<x0+16;
-        if(p[0]!=(green||red?0:255)||p[1]!=(green?255:0)||p[2]!=(red?255:0)||p[3]!=255)bad++;
+        if(DVM_CA_SCENE==2)red=red&&x>=8&&x<56;
+        if(DVM_CA_SCENE==3&&red&&x>=x0+8){red=NO;green=YES;}
+        unsigned b=green||red?0:255,g=green?255:0,r=red?255:0;
+        if(DVM_CA_SCENE==1&&red){b=128;r=128;}
+        int tolerance=DVM_CA_SCENE==1?1:0;
+        if(abs((int)p[0]-(int)b)>tolerance||abs((int)p[1]-(int)g)>tolerance||abs((int)p[2]-(int)r)>tolerance||p[3]!=255)bad++;
     }
     fprintf(stderr,"GPU_LOAD_CA_SEQUENCE_PIXELS frame=%u bad_pixels=%u\n",frame,bad);
-    if(bad)fail("consumer-sequence-pixels");
+    if(bad){fprintf(stderr,"GPU_LOAD_CA_PIXEL_DETAIL scene=%u sample=%u,%u,%u,%u\n",DVM_CA_SCENE,pixels[0],pixels[1],pixels[2],pixels[3]);fail("consumer-sequence-pixels");}
 }
 static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {
     const char *stage="sequence-init";CARenderer *renderer=nil;
@@ -44,7 +52,25 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {
         CALayer *root=[CALayer layer],*moving=[CALayer layer],*front=[CALayer layer];
         root.frame=CGRectMake(0,0,64,64);moving.frame=CGRectMake(0,0,16,64);front.frame=CGRectMake(28,0,8,64);
         DVMConsumerColor(root,space,0,0,1);DVMConsumerColor(moving,space,1,0,0);DVMConsumerColor(front,space,0,1,0);
-        CGColorSpaceRelease(space);[root addSublayer:moving];[root addSublayer:front];
+        CALayer *clip=nil;
+        if(DVM_CA_SCENE==1)moving.opacity=.5;
+        if(DVM_CA_SCENE==2){
+            clip=[CALayer layer];clip.frame=CGRectMake(8,0,48,64);clip.masksToBounds=YES;
+            [root addSublayer:clip];[clip addSublayer:moving];
+            moving.anchorPoint=CGPointZero;moving.bounds=CGRectMake(0,0,8,64);
+            moving.transform=CATransform3DMakeScale(2,1,1);
+        }else [root addSublayer:moving];
+        if(DVM_CA_SCENE==3){
+            const uint8_t imageBytes[]={255,0,0,255,0,255,0,255};
+            CFDataRef data=CFDataCreate(NULL,imageBytes,sizeof(imageBytes));
+            CGDataProviderRef provider=CGDataProviderCreateWithCFData(data);
+            CGImageRef image=CGImageCreate(2,1,8,32,8,space,kCGBitmapByteOrder32Big|kCGImageAlphaPremultipliedLast,provider,NULL,false,kCGRenderingIntentDefault);
+            if(!image)fail("consumer-image");moving.backgroundColor=NULL;moving.contents=(__bridge id)image;
+            moving.magnificationFilter=kCAFilterNearest;moving.minificationFilter=kCAFilterNearest;
+            CGImageRelease(image);CGDataProviderRelease(provider);CFRelease(data);
+        }
+        CGColorSpaceRelease(space);[root addSublayer:front];
+        fprintf(stderr,"GPU_LOAD_CA_SCENE id=%u\n",DVM_CA_SCENE);
         renderer.layer=root;renderer.bounds=root.frame;[CATransaction commit];
         setup=DVMConsumerTime()-setup;
         NSDictionary *last=nil;
@@ -57,7 +83,9 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {
             }
             double start=DVMConsumerTime();
             [CATransaction begin];[CATransaction setDisableActions:YES];
-            moving.frame=CGRectMake((frame*7)%49,0,16,64);[CATransaction commit];
+            if(DVM_CA_SCENE==2)moving.position=CGPointMake((int)((frame*7)%49)-8,0);
+            else moving.frame=CGRectMake((frame*7)%49,0,16,64);
+            [CATransaction commit];
             stage="sequence-begin";[renderer beginFrameAtTime:frame/60.0 timeStamp:NULL];
             [renderer addUpdateRect:root.frame];
             stage="sequence-render";[renderer render];[renderer endFrame];

@@ -54,6 +54,10 @@ static void reject(NSString *s) {
 @interface DVMBuffer : DVMResource <MTLBuffer>
 @property(nonatomic, strong) NSMutableData *shadow;
 @property(nonatomic,strong) NSMutableData *renderUploaded;
+@property(nonatomic,copy) void (^clientDeallocator)(void *,NSUInteger);
+@property(nonatomic) void *clientBytes;
+@property(nonatomic) NSUInteger clientLength;
+- (NSData *)cpuData;
 @end
 @interface DVMPipeline : DVMObject <MTLComputePipelineState>
 @property(nonatomic, strong) DVMFunction *function;
@@ -170,6 +174,15 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(MTLPixelFormat)format {
     (void)format;reject(@"texture-buffer views unsupported by forwarding profile");return 0;
+}
+- (NSUInteger)deviceLinearReadOnlyTextureAlignmentBytes {
+    // Exact QuartzCore update_image +0x1fc tests both pointer and row pitch.
+    // All supported format alignments are powers of two: their maximum is
+    // sufficient for our existing linear-texture allocation contract.
+    NSUInteger alignment=16;
+    for(NSNumber *format in DVMContractProfile()[@"textureFormats"])
+        alignment=MAX(alignment,[self minimumLinearTextureAlignmentForPixelFormat:format.unsignedIntegerValue]);
+    return alignment;
 }
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err {
     __block NSDictionary *reply = nil;
@@ -324,6 +337,15 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     if(!bytes)return nil;id<MTLBuffer> b=[self newBufferWithLength:length options:options];
     if(b)memcpy(b.contents,bytes,length);return b;
 }
+- (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)bytes length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *,NSUInteger))deallocator {
+    if(!bytes||(uintptr_t)bytes%DVM_MANAGED_PAGE_BYTES||!length||length%DVM_MANAGED_PAGE_BYTES)return nil;
+    DVMBuffer *b=(id)[self newBufferWithLength:length options:options];
+    if(!b)return nil;
+    // NSMutableData may copy even its bytesNoCopy input on mutable access.
+    // Preserve the API's pointer identity explicitly until final retirement.
+    b.clientBytes=bytes;b.clientLength=length;b.shadow=nil;
+    b.clientDeallocator=deallocator;return b;
+}
 @end
 @implementation DVMLibrary
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)d error:(NSError **)e {
@@ -352,6 +374,12 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @implementation DVMPipeline
 @end
 @implementation DVMBuffer
+- (void)dealloc {if(_clientDeallocator)_clientDeallocator(_clientBytes,_clientLength);}
+- (NSData *)cpuData {return [NSData dataWithBytes:self.contents length:self.length];}
+- (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
+    if(d.textureType!=MTLTextureType2D||(image&&image!=row*d.height))return nil;
+    return [self newTextureWithDescriptor:d offset:offset bytesPerRow:row];
+}
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)offset bytesPerRow:(NSUInteger)row {
     if(!DVMTextureDescriptorValid(d)||d.textureType!=MTLTextureType2D||d.storageMode!=self.storageMode||d.usage!=MTLTextureUsageShaderRead)return nil;
     NSUInteger a=[self.owner minimumLinearTextureAlignmentForPixelFormat:d.pixelFormat];
@@ -364,10 +392,10 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     t.backingBuffer=self;t.backingOffset=offset;t.backingRow=row;return t;
 }
 - (NSUInteger)length {
-    return _shadow.length;
+    return _clientBytes?_clientLength:_shadow.length;
 }
 - (void *)contents {
-    return _shadow.mutableBytes;
+    return _clientBytes?:_shadow.mutableBytes;
 }
 - (void)didModifyRange:(NSRange)range {
     if(self.owner.submissionInFlight||range.location>self.length||range.length>self.length-range.location)
@@ -433,7 +461,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     if(self.completedShadow)return self.completedShadow;
     NSError *e = nil;
     if(self.backingBuffer) {
-        if(![self.owner call:@{@"op":@"upload",@"buffer":self.backingBuffer.handle,@"data":[self.backingBuffer.shadow base64EncodedStringWithOptions:0]} error:&e])reject(e.description?:@"linear upload");
+        if(![self.owner call:@{@"op":@"upload",@"buffer":self.backingBuffer.handle,@"data":[[self.backingBuffer cpuData] base64EncodedStringWithOptions:0]} error:&e])reject(e.description?:@"linear upload");
     }
     if (self.pendingUpload) {
         if (![self.owner call:@{@"op":@"upload", @"texture":self.handle,
@@ -560,7 +588,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             if(!render)[uploads addObject:@{
                 @"op" : @"upload",
                 @"buffer" : b.handle,
-                @"data" : self.commandQueue.owner.binaryPayloads&&!render ? [b.shadow copy] : [b.shadow base64EncodedStringWithOptions:0]
+                @"data" : self.commandQueue.owner.binaryPayloads&&!render ? [b cpuData] : [[b cpuData] base64EncodedStringWithOptions:0]
             }];
         }
     for (id o in _resources)
@@ -583,7 +611,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                     for(NSUInteger offset=0;offset<buffer.length;offset+=32768){
                         NSUInteger length=MIN(32768,buffer.length-offset);
                         if(initialized&&!memcmp((uint8_t *)buffer.contents+offset,(uint8_t *)uploaded.bytes+offset,length))continue;
-                        NSData *chunk=[buffer.shadow subdataWithRange:NSMakeRange(offset,length)];
+                        NSData *chunk=[NSData dataWithBytes:(uint8_t *)buffer.contents+offset length:length];
                         if(!self.commandQueue.owner.transport(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(offset),@"data":[chunk base64EncodedStringWithOptions:0]},&e))reject(e.description?:@"render buffer upload");
                         memcpy((uint8_t *)uploaded.mutableBytes+offset,chunk.bytes,length);
                     }

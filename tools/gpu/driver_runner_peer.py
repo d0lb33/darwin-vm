@@ -129,7 +129,7 @@ class RunnerPeer(MMIOPeer):
                 from consumer_verify import verify_records
                 child=[x['line'] for x in audits]
                 end=child.index('GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0')
-                result['consumer']=verify_records(directory,child[:end+1],records,c['job'].get('frames',1))
+                result['consumer']=verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
                 result['verified']=True
             else:
                 result['failure_evidence']=[x['line'] for x in audits if 'ERROR' in x['line'] or 'FAULT' in x['line']]

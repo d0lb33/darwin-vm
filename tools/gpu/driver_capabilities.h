@@ -1,7 +1,7 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 4u
+#define DVM_CONTRACT_VERSION 5u
 #define DVM_TEXTURE_DIMENSION 512u
 #define DVM_BUFFER_BYTES (1024u*1024u)
 #define DVM_TEXTURE_BYTES (1024u*1024u)
@@ -45,18 +45,21 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
  B(supportsSIMDShuffleAndFill,NO) \
  B(supportsSIMDReduction,NO) \
  B(supportsCorrectTextureUsageBits,NO) \
- B(isFramebufferReadSupported,NO)
+ B(isFramebufferReadSupported,NO) \
+ B(supportsBufferlessClientStorageTexture,NO) \
+ U(minBufferNoCopyAlignmentBytes,DVM_MANAGED_PAGE_BYTES)
 
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"bounded-render-bindings-v4",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"bounded-client-storage-v5",
         @"queries":@{DVM_CAPABILITY_QUERIES(DVM_BOOL_VALUE,DVM_UINT_VALUE)},
         @"computeBindings":@DVM_COMPUTE_BINDINGS,@"inlineBytes":@DVM_INLINE_BYTES,
         @"bufferBytes":@DVM_BUFFER_BYTES,@"textureBytes":@DVM_TEXTURE_BYTES,@"textureUsageMask":@DVM_TEXTURE_USAGE_MASK,
         @"renderEncoders":@YES,@"linearTextures":@YES,@"generalIOSurfaceTextureImport":@NO,
         @"resourceMetadataVersion":@1,@"textureFormats":@[@10,@30,@70,@80,@115],@"textureTypes":@[@2,@7],@"texture3DUsageMask":@1,
         @"logicalStorageModes":@[@0,@1],@"protectedResources":@NO,@"heaps":@NO,
+        @"clientBufferStorage":@"retained-guest-pages-upload-before-submit-writeback-before-completion",
         @"renderTimestampDomain":@"host-mach-absolute-seconds",
         @"linearTextureUsageMask":@1,@"renderBufferAccess":@"vertex-completion-writeback",@"renderBuffers":@DVM_RENDER_BUFFERS,@"renderWritebackBytes":@DVM_BUFFER_BYTES,
         @"taskAttribution":@"opaque-guest-u32-metadata-host-process-owns-execution",

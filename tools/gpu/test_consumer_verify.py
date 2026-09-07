@@ -99,6 +99,24 @@ class SequenceAcceptanceTests(unittest.TestCase):
     def test_leaked_resources_rejected(self):
         self.records[-1]['reply']['live']['objects']=1
         with self.assertRaisesRegex(ValueError,'not retired'):self.check()
+    def test_wrong_scene_identity_rejected(self):
+        self.lines.insert(0,'GPU_LOAD_CA_SCENE id=1')
+        with self.assertRaisesRegex(ValueError,'scene identity'):self.check()
+    def test_alpha_oracle_and_alpha_channel_rejection(self):
+        self.lines.insert(0,'GPU_LOAD_CA_SCENE id=1')
+        for record in self.records:
+            if record['op']=='read':
+                data=bytearray(base64.b64decode(record['reply']['data']))
+                for i in range(0,len(data),4):
+                    if data[i:i+4]==bytes([0,0,255,255]):data[i:i+4]=bytes([127,0,128,255])
+                record['reply']['data']=base64.b64encode(data).decode()
+        self.assertTrue(verify_records(self.out,self.lines,self.records,4,1)['verified'])
+        record=next(x for x in self.records if x['op']=='read');data=bytearray(base64.b64decode(record['reply']['data']));data[3]=254
+        record['reply']['data']=base64.b64encode(data).decode()
+        with self.assertRaisesRegex(ValueError,'oracle'):verify_records(self.out,self.lines,self.records,4,1)
+    def test_opaque_scene_cannot_pass_as_image(self):
+        self.lines.insert(0,'GPU_LOAD_CA_SCENE id=3')
+        with self.assertRaisesRegex(ValueError,'oracle'):verify_records(self.out,self.lines,self.records,4,3)
 
 
 if __name__ == '__main__':
