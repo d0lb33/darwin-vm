@@ -27,7 +27,7 @@ def verify(path):
             raise ValueError('upload capture changed')
     if job.get('shared_surface'):
         from shared_consumer_verify import verify_records as verify_shared
-        evidence=verify_shared(p,lines[:end+1],records,job['frames'],job.get('hz',0))
+        evidence=verify_shared(p,lines[:end+1],records,job['frames'],job.get('hz',0),job.get('scene',0))
     else:evidence=verify_records(p,lines[:end+1],records,job.get('frames',1),job.get('scene',0))
     output=dict(job=job['job'],guest_pid=result['pid'],audit_crc_verified=True,audit_capture=audit_mode,consumer=evidence)
     if job.get('surface_handoff'):

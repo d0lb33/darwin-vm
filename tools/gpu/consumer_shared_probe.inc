@@ -14,13 +14,25 @@ static void sharedColor(CALayer *layer,CGColorSpaceRef space,uint32_t bgra){
     CGFloat values[]={((bgra>>16)&255)/255.,((bgra>>8)&255)/255.,(bgra&255)/255.,((bgra>>24)&255)/255.};
     CGColorRef color=CGColorCreate(space,values);layer.backgroundColor=color;CGColorRelease(color);
 }
+#include "consumer_shared_scene.inc"
 static unsigned sharedPixels(IOSurfaceRef surface,unsigned frame){
     uint32_t marker[]={0xff44564d,0xff505253,0xff424c52,0xff000000|frame};
     uint32_t background=frame%3==1?0xffff0000:frame%3==2?0xff00ff00:0xff0000ff;
     const uint8_t *data=IOSurfaceGetBaseAddress(surface);unsigned bad=0;
     for(unsigned y=0;y<DVM_PRESENT_HEIGHT;y++)for(unsigned x=0;x<DVM_PRESENT_WIDTH;x++){
         uint32_t pixel;memcpy(&pixel,data+y*DVM_PRESENT_ROW+x*4,4);
-        if(pixel!=(y==0&&x<4?marker[x]:background))bad++;
+        uint32_t expected=background;int tolerance=0;
+        if(DVM_CA_SCENE){
+            unsigned left=(frame*17)%(DVM_PRESENT_WIDTH-159);
+            BOOL green=x>=280&&x<360,red=!green&&x>=left&&x<left+160;
+            if(DVM_CA_SCENE==2)red=red&&x>=80&&x<DVM_PRESENT_WIDTH-80;
+            if(DVM_CA_SCENE==3&&red&&x>=left+80){red=NO;green=YES;}
+            expected=green?0xff00ff00:red?0xffff0000:0xff0000ff;
+            if(DVM_CA_SCENE==1&&red){expected=0xff800080;tolerance=1;}
+        }
+        if(y==0&&x<4){expected=marker[x];tolerance=0;}
+        if((pixel>>24)!=255)bad++;
+        else for(unsigned c=0;c<3;c++)if(abs((int)((pixel>>(c*8))&255)-(int)((expected>>(c*8))&255))>tolerance){bad++;break;}
     }
     return bad;
 }
@@ -57,6 +69,7 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         if(!renderer)fail("shared-renderer");
         [CATransaction begin];[CATransaction setDisableActions:YES];
         CALayer *root=[CALayer layer];root.frame=CGRectMake(0,0,DVM_PRESENT_WIDTH,DVM_PRESENT_HEIGHT);
+        CALayer *moving=sharedSceneCreate(root,space);
         NSMutableArray *markers=[NSMutableArray array];
         for(unsigned i=0;i<4;i++){CALayer *m=[CALayer layer];m.frame=CGRectMake(i,0,1,1);[root addSublayer:m];[markers addObject:m];}
         renderer.layer=root;renderer.bounds=root.frame;[CATransaction commit];
@@ -69,7 +82,7 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         int (*wait)(void *,uint32_t,uint32_t,double)=dlsym(lib,"IOMobileFramebufferSwapWaitWithTimeout");
         if(!get||!power||!begin||!layer||!end||!wait)fail("shared-display-symbols");
         void *fb=NULL;if(get(&fb)||!fb||power(fb,1))fail("shared-display-open");
-        fprintf(stderr,"GPU_LOAD_CA_SHARED_SETUP us=%.3f width=%u height=%u row=%u surface=%u frames=%u hz=%u warmup=2 profile=1\n",(sharedNow()-start)*1e6,DVM_PRESENT_WIDTH,DVM_PRESENT_HEIGHT,DVM_PRESENT_ROW,IOSurfaceGetID(surface),DVM_CA_FRAMES,DVM_CA_HZ);
+        fprintf(stderr,"GPU_LOAD_CA_SHARED_SETUP us=%.3f width=%u height=%u row=%u surface=%u frames=%u hz=%u warmup=2 profile=1 scene=%u\n",(sharedNow()-start)*1e6,DVM_PRESENT_WIDTH,DVM_PRESENT_HEIGHT,DVM_PRESENT_ROW,IOSurfaceGetID(surface),DVM_CA_FRAMES,DVM_CA_HZ,DVM_CA_SCENE);
         double origin=sharedNow(),pacingStart=0;
         for(unsigned frame=1;frame<=DVM_CA_FRAMES;frame++){@autoreleasepool {
             double target=-1;
@@ -84,7 +97,7 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
             double t0=sharedNow();stage="acquire";if(IOSurfaceLock(surface,0,NULL))fail("shared-lock");DVMSharedTextureAcquire(texture,frame);
             double acquired=sharedNow();
             stage="layer-update";[CATransaction begin];[CATransaction setDisableActions:YES];
-            sharedColor(root,space,frame%3==1?0xffff0000:frame%3==2?0xff00ff00:0xff0000ff);
+            sharedSceneUpdate(root,moving,space,frame);
             uint32_t words[]={0xff44564d,0xff505253,0xff424c52,0xff000000|frame};
             for(unsigned i=0;i<4;i++)sharedColor(markers[i],space,words[i]);[CATransaction commit];
             double updated=sharedNow();

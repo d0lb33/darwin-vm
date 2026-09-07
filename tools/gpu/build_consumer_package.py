@@ -13,24 +13,26 @@ p.add_argument('--frames',type=int,default=4)
 p.add_argument('--hz',type=int,choices=(0,30,60),default=0)
 p.add_argument('--scene',type=int,choices=range(4),default=0,help='0 moving, 1 alpha, 2 clip/transform, 3 image')
 p.add_argument('--shared-surface',action='store_true',help='owned IOSurface CARenderer/display test; requires mapping-provider helper')
+p.add_argument('--regions',action='store_true',help='append a public region-transfer probe after the single red CALayer control')
 a=p.parse_args()
+if a.regions and (a.frames!=1 or a.shared_surface):p.error('region probe requires --frames 1 without --shared-surface')
 if a.frames!=1 and not 3<=a.frames<=4096:p.error('frames must be 1 or 3..4096')
 if a.hz and a.frames==1:p.error('pacing requires a sequence')
 if a.scene and a.frames==1:p.error('scene requires a sequence')
-if a.shared_surface and (a.scene or not 3<=a.frames<=1024):p.error('shared display test requires 3..1024 frames and scene 0')
+if a.shared_surface and not 3<=a.frames<=1024:p.error('shared display test requires 3..1024 frames')
 root=Path(__file__).resolve().parents[2];src=root/'tools/gpu'
 subprocess.run(['python3',str(src/'build_driver_revision.py'),str(a.base),str(a.out)],check=True)
 sdk=subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip()
 flags=['-target','arm64-apple-ios27.0','-isysroot',sdk,'-Wno-incompatible-sysroot',
        '-fobjc-arc','-fobjc-arc-exceptions','-O1','-Wall','-Wextra','-Werror',
        '-Wno-deprecated-declarations','-fno-objc-msgsend-selector-stubs']
-subprocess.run(['xcrun','clang',*flags,*(['-DDVM_CA_SHARED'] if a.shared_surface else []),f'-DDVM_CA_FRAMES={a.frames}',f'-DDVM_CA_HZ={a.hz}',f'-DDVM_CA_SCENE={a.scene}','-c',str(src/'consumer_package.m'),'-o',str(a.out/'consumer_package.o')],check=True)
+subprocess.run(['xcrun','clang',*flags,*(['-DDVM_CA_SHARED'] if a.shared_surface else []),*(['-DDVM_CA_REGIONS'] if a.regions else []),f'-DDVM_CA_FRAMES={a.frames}',f'-DDVM_CA_HZ={a.hz}',f'-DDVM_CA_SCENE={a.scene}','-c',str(src/'consumer_package.m'),'-o',str(a.out/'consumer_package.o')],check=True)
 symbols=subprocess.check_output(['nm','-u',str(a.out/'consumer_package.o')],text=True).split()
 stub=a.out/'stubs/usr/lib/libobjc.tbd';text=stub.read_text()
 added=[s for s in symbols if s.startswith('_objc_') and '"'+s+'"' not in text]
 stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))
 stub=a.out/'stubs/usr/lib/libSystem.tbd';text=stub.read_text()
-added=[s for s in ('_task_info','_mach_task_self_','_backtrace','_sigaction') if '"'+s+'"' not in text]
+added=[s for s in ('_task_info','_mach_task_self_','_backtrace','_sigaction','_memset_pattern16') if '"'+s+'"' not in text]
 stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))
 for framework,names in {
     'Foundation':['_NSSetUncaughtExceptionHandler'],
@@ -63,12 +65,12 @@ revision['consumer_package_relinked']=True
 imports=a.out/'consumer-package.nm-u';imports.write_bytes(subprocess.check_output(['nm','-u',str(binary)]))
 (a.out/'DVMProxy.nm-u').write_bytes(imports.read_bytes())
 subprocess.run(['python3',str(src/'verify_guest_imports.py'),'--output',str(a.out/'consumer-package-imports.tsv'),str(imports)],check=True)
-record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surface,regions=a.regions,binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
             helper_sha256=hashlib.sha256((a.out/'dvm-gpu-load').read_bytes()).hexdigest(),
             scope='test export compiled; guest execution untested')
 if record['helper_sha256']!=hashlib.sha256((a.base/'dvm-gpu-load').read_bytes()).hexdigest():
     raise ValueError('package unexpectedly changed the pinned helper')
-for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc'):
+for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc'):
     (a.out/name).write_bytes((src/name).read_bytes())
 (a.out/'consumer-package.json').write_text(json.dumps(record,indent=2)+'\n')
 print(json.dumps(record))

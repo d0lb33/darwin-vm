@@ -144,7 +144,7 @@ class RunnerPeer(MMIOPeer):
                     from shared_consumer_verify import verify_records as verify_shared
                 child=[x['line'] for x in audits]
                 end=child.index('GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0')
-                result['consumer']=verify_shared(directory,child[:end+1],records,c['job']['frames'],c['job'].get('hz',0)) if c['job'].get('shared_surface') else verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
+                result['consumer']=verify_shared(directory,child[:end+1],records,c['job']['frames'],c['job'].get('hz',0),c['job'].get('scene',0)) if c['job'].get('shared_surface') else verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
                 if c['job'].get('surface_handoff'):
                     from shared_consumer_verify import verify_handoff
                     result['handoff']=verify_handoff(directory,child,c['job']['job'],result['pid'])

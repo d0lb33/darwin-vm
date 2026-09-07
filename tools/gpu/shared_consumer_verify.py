@@ -1,5 +1,6 @@
 """Exact-guest shared IOSurface consumer evidence, separate from host tests."""
 import hashlib
+import json
 import math
 import re
 import struct
@@ -13,9 +14,15 @@ def fields(line):
     return dict(re.findall(r'(\w+)=([^ ]+)', line))
 
 
-def verify_records(directory, lines, records, count, hz=0):
+def verify_records(directory, lines, records, count, hz=0, scene=None):
     directory=Path(directory)
-    if type(count) is not int or not 3<=count<=1024 or hz not in (0,30,60):
+    # A running supervisor imports this verifier on its first completed job.
+    # Retain the earlier call signature: derive a missing scene from the
+    # immutable staged job, never from the guest's claimed setup line.
+    if scene is None:
+        job=directory/'job.json'
+        scene=json.loads(job.read_text()).get('scene',0) if job.exists() else 0
+    if type(count) is not int or not 3<=count<=1024 or hz not in (0,30,60) or scene not in range(4):
         raise ValueError('shared consumer frame scope')
     if lines[-1]!='GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0':
         raise ValueError('shared consumer completion')
@@ -33,6 +40,7 @@ def verify_records(directory, lines, records, count, hz=0):
         raise ValueError('shared setup geometry')
     if not math.isfinite(float(setup[0]['us'])) or float(setup[0]['us'])<0:
         raise ValueError('shared setup timing')
+    if int(setup[0].get('scene',0))!=scene:raise ValueError('shared requested scene contract')
     measured='hz' in setup[0]
     if (hz or count>16) and not measured:
         raise ValueError('missing shared pacing instrumentation')
@@ -74,12 +82,7 @@ def verify_records(directory, lines, records, count, hz=0):
     pixels=(directory/'managed-final.bgra').read_bytes()
     if len(pixels)!=759*16384 or hashlib.sha256(pixels[:BYTES]).hexdigest()!=final[0]['sha']:
         raise ValueError('shared backing/guest hash mismatch')
-    color=(0xffff0000,0xff00ff00,0xff0000ff)[(count-1)%3].to_bytes(4,'little')
-    markers=b''.join(x.to_bytes(4,'little') for x in (0xff44564d,0xff505253,0xff424c52,0xff000000|count))
-    for y in range(HEIGHT):
-        wanted=(markers+color*(WIDTH-4)) if not y else color*WIDTH
-        if pixels[y*ROW:y*ROW+WIDTH*4]!=wanted:
-            raise ValueError(f'shared independent pixel oracle row {y}')
+    verify_pixels(pixels,count,scene)
     log=(directory/'display.log').read_text(errors='replace')
     witnesses=re.findall(r'iomfb: gpu-present frame=(\d+) swap=(\d+) dva=(0x[0-9a-f]+) monotonic_ns=(\d+)',log)
     if [(int(w[0]),int(w[1])) for w in witnesses]!=[(int(f['frame']),int(f['swap'])) for f in frames]:
@@ -87,7 +90,7 @@ def verify_records(directory, lines, records, count, hz=0):
     last=log.rfind(f'iomfb: gpu-present frame={count} ')
     if 'D594 nested completed, status 0x0' not in log[last:] or 'GPU_LOAD_CA_SHARED_POWER_RESET rc=0' not in lines:
         raise ValueError('shared native completion/power reset')
-    result=dict(scope='exact-guest-CARenderer-owned-IOSurface-native-scanout-events',verified=True,frames=count,
+    result=dict(scope='exact-guest-CARenderer-owned-IOSurface-native-scanout-events',verified=True,frames=count,scene=scene,
                 bytes=BYTES,sha256=final[0]['sha'],setup_us=float(setup[0]['us']),timings=frames,final_scanout_export_checked=False,
                 caveat='compare final stopped-VM scanout export separately; display/input recovery is a separate check')
     if measured:
@@ -113,6 +116,31 @@ def verify_records(directory, lines, records, count, hz=0):
         result['memory_samples']=memory
         result['memory_change']={k:int(memory[-1][k])-int(memory[0][k]) for k in ('resident','footprint','objects','resource_bytes')}
     return result
+
+
+def verify_pixels(pixels, frame, scene):
+    if len(pixels)<BYTES or scene not in range(4):raise ValueError('shared pixel extent/scene')
+    colors=[(0xffff0000,0xff00ff00,0xff0000ff)[(frame-1)%3]]*WIDTH
+    normalize=bytearray(range(256));normalize[127]=128;normalize[129]=128
+    if scene:
+        colors=[0xff0000ff]*WIDTH;left=(frame*17)%(WIDTH-159)
+        for x in range(left,left+160):
+            if scene==2 and not 80<=x<WIDTH-80:continue
+            colors[x]=0xff800080 if scene==1 else 0xff00ff00 if scene==3 and x>=left+80 else 0xffff0000
+        colors[280:360]=[0xff00ff00]*80
+    row=b''.join(c.to_bytes(4,'little') for c in colors)
+    markers=b''.join(x.to_bytes(4,'little') for x in (0xff44564d,0xff505253,0xff424c52,0xff000000|frame))
+    for y in range(HEIGHT):
+        actual=pixels[y*ROW:y*ROW+WIDTH*4];wanted=markers+row[16:] if y==0 else row
+        if scene==1:
+            # One RGB code tolerance only in the expected half-opacity region.
+            # Marker bytes, alpha and all other colors remain exact.
+            adjusted=bytearray(actual)
+            for x,c in enumerate(colors):
+                if c==0xff800080 and (y or x>=4):
+                    for channel in (0,2):adjusted[x*4+channel]=normalize[adjusted[x*4+channel]]
+            actual=bytes(adjusted)
+        if actual!=wanted:raise ValueError(f'shared independent pixel oracle row {y}')
 
 
 def distribution(values):

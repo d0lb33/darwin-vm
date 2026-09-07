@@ -12,6 +12,9 @@ static int (*report)(FILE *,const char *,...) __attribute__((format(printf,2,3))
 #define fprintf report
 static void fail(const char *reason){fprintf(stderr,"GPU_LOAD_ERROR package=%s\n",reason);exit(1);}
 #include "consumer_probe.inc"
+#ifdef DVM_CA_REGIONS
+#include "consumer_region_probe.inc"
+#endif
 // Test-package-only diagnosis. No production driver signal interception.
 // The supervisor still bounds/reaps a failed child. Prewarm the unwinder;
 // if diagnostic unwinding itself fails, the original failed run stays failed.
@@ -40,5 +43,8 @@ void DVMRunGuestTest(id<MTLDevice> device) {
     NSSetUncaughtExceptionHandler(exceptionReport);
     memoryReport("before");
     @autoreleasepool {DVMRunQuartzCoreConsumer(device);}
+#ifdef DVM_CA_REGIONS
+    @autoreleasepool {DVMRunRegionProbe(device);}
+#endif
     memoryReport("after-scene");
 }

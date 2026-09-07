@@ -10,6 +10,26 @@
 @end
 
 static void require(BOOL ok,const char *why){if(!ok){fprintf(stderr,"FAIL %s\n",why);exit(1);}}
+static void testRegions(id<MTLDevice> device,id<MTLTexture> target){
+    uint32_t patch[]={0xff00ff00,0xff00ff00,0xcccccccc,0xff00ff00,0xff00ff00,0xcccccccc};
+    MTLRegion region=MTLRegionMake2D(7,9,2,2);
+    [target replaceRegion:region mipmapLevel:0 withBytes:patch bytesPerRow:12];
+    uint32_t result[64*64];[target getBytes:result bytesPerRow:256 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];
+    for(unsigned y=0;y<64;y++)for(unsigned x=0;x<64;x++)require(result[y*64+x]==(x>=7&&x<9&&y>=9&&y<11?0xff00ff00:0xffff0000),"partial update preserves completed GPU pixels");
+    uint32_t sub[6];memset(sub,0xcc,sizeof(sub));[target getBytes:sub bytesPerRow:12 fromRegion:region mipmapLevel:0];
+    require(!memcmp(sub,patch,sizeof(sub)),"region read preserves destination row padding");
+    BOOL rejected=NO;@try{[target replaceRegion:MTLRegionMake2D(NSUIntegerMax,0,1,1) mipmapLevel:0 withBytes:patch bytesPerRow:4];}@catch(NSException *e){rejected=YES;}
+    require(rejected,"overflow region rejected before pointer arithmetic");
+    MTLTextureDescriptor *d=[MTLTextureDescriptor new];d.textureType=MTLTextureType3D;d.pixelFormat=MTLPixelFormatRGBA8Unorm;
+    d.width=2;d.height=3;d.depth=2;d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead;
+    id<MTLTexture> volume=[device newTextureWithDescriptor:d];require(volume!=nil,"region volume");
+    uint32_t initial[12];for(unsigned i=0;i<12;i++)initial[i]=0xff123456+i;
+    [volume replaceRegion:MTLRegionMake3D(0,0,0,2,3,2) mipmapLevel:0 slice:0 withBytes:initial bytesPerRow:8 bytesPerImage:24];
+    uint32_t one=0xffabcdef;[volume replaceRegion:MTLRegionMake3D(1,1,1,1,1,1) mipmapLevel:0 slice:0 withBytes:&one bytesPerRow:4 bytesPerImage:4];
+    initial[9]=one;uint32_t actual[12];[volume getBytes:actual bytesPerRow:8 bytesPerImage:24 fromRegion:MTLRegionMake3D(0,0,0,2,3,2) mipmapLevel:0 slice:0];
+    require(!memcmp(actual,initial,sizeof(initial)),"pending full upload plus 3D offset update");
+    fprintf(stderr,"PASS texture regions: GPU content preservation, partial reads, padded rows, pending writes, 3D offsets and overflow rejection\n");
+}
 int main(void){@autoreleasepool {
     DVMHost *host=[DVMHost new];host.device=MTLCreateSystemDefaultDevice();
     host.queue=[host.device newCommandQueue];host.entries=[NSMutableDictionary dictionary];
@@ -141,6 +161,14 @@ int main(void){@autoreleasepool {
             ((uint32_t *)client)[0]=0xff00ff00;uint32_t sample=0;
             [linear getBytes:&sample bytesPerRow:4 fromRegion:MTLRegionMake2D(0,0,1,1) mipmapLevel:0];
             require(sample==0xff00ff00,"client CPU update reaches native linear texture");
+            linearDesc.width=2;linearDesc.height=2;
+            id<MTLTexture> rectangle=[(id<DVMLinearTest>)clientBuffer newLinearTextureWithDescriptor:linearDesc offset:0 bytesPerRow:row bytesPerImage:row*2];
+            require(rectangle!=nil,"linear region view");
+            uint32_t replacement=0xff102030;
+            [rectangle replaceRegion:MTLRegionMake2D(1,1,1,1) mipmapLevel:0 withBytes:&replacement bytesPerRow:4];
+            require(*(uint32_t *)((uint8_t *)client+row+4)==replacement&&((uint32_t *)client)[0]==0xff00ff00,"partial linear update aliases only selected client bytes");
+            [rectangle getBytes:&sample bytesPerRow:4 fromRegion:MTLRegionMake2D(1,1,1,1) mipmapLevel:0];
+            require(sample==replacement,"partial linear read includes backing row and origin");
             desc.vertexFunction=[lib newFunctionWithName:@"vg"];desc.fragmentFunction=[lib newFunctionWithName:@"f"];
             id<MTLRenderPipelineState> generated=[d newRenderPipelineStateWithDescriptor:desc error:&error];require(generated!=nil,"generated index pipeline");
             @autoreleasepool {
@@ -173,6 +201,7 @@ int main(void){@autoreleasepool {
         for(unsigned i=0;i<1000&&!freed;i++)usleep(1000);
         require(freed==1,"client deallocator exactly once after final reference");
         fprintf(stderr,"PASS client storage and index dependencies: original pointer, GPU writeback, valid generated indices, invalid-index stop, final deallocator\n");
+        testRegions(d,t);
     }
     // Drain queued retirements through a fresh device-independent host check.
     NSUInteger remaining=1;

@@ -164,7 +164,8 @@ and page registration. Run the installed control and display/input recovery,
 then `runner_control.py TRIAL --stop`. Compare the final stopped-VM export with
 `shared_consumer_verify.verify_scanout_export`.
 
-Next: longer paced displayed batches with first-use costs separated, bounded
-timing capture that survives audit-ring wrap, and memory/resource observations.
-Then extend the shared target to the broader scene suite. Crash recovery and
-multi-surface ownership need their own tests before system-compositor use.
+Follow-on results are in `gpu-shared-pacing-ios27.md` and
+`gpu-shared-scenes-regions-ios27.md`: longer paced displayed batches, audit-ring
+wrap, memory/resource observations, alpha, clipping/scaling and image content.
+Crash recovery and multi-surface ownership still need their own tests before
+system-compositor use.

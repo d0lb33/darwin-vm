@@ -36,7 +36,7 @@ def verify_batch(trial, jobs):
     return dict(verified=True,supervisor_pid=int(owners[0]['pid']),surface_id=handoffs[0]['surface_id'],
                 registration_sha256=handoffs[0]['registration_sha256'],jobs=results,
                 frames=sum(r['consumer']['frames'] for r in results),
-                scope='sequential successful process handoff, exact guest rendering and native presentation; crash recovery and sustained pacing untested')
+                scope='sequential successful process handoff, exact guest rendering and native presentation; pacing distributions are per job, crash recovery is untested')
 
 
 if __name__=='__main__':

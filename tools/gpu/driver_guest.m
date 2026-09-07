@@ -445,30 +445,39 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (void)check:(MTLRegion)r level:(NSUInteger)level row:(NSUInteger)row pointer:(const void *)p {
     if(self.surfaceMapping)reject(@"owned IOSurface CPU access uses its lock and lease contract");
-    if (!p || level || r.origin.x || r.origin.y || r.origin.z || r.size.width != _width ||
-        r.size.height != _height || r.size.depth != self.depth || row < [self row] || row>DVM_TEXTURE_BYTES)
-        reject(@"only full texture transfers supported");
+    if (!p || level || !r.size.width || !r.size.height || !r.size.depth ||
+        r.origin.x>_width || r.size.width>_width-r.origin.x ||
+        r.origin.y>_height || r.size.height>_height-r.origin.y ||
+        r.origin.z>self.depth || r.size.depth>self.depth-r.origin.z ||
+        row<r.size.width*DVMFormatBytes(self.pixelFormat) || row>DVM_TEXTURE_BYTES)
+        reject(@"texture transfer region/row bounds");
 }
 - (void)replaceRegion:(MTLRegion)r
           mipmapLevel:(NSUInteger)level
             withBytes:(const void *)p
           bytesPerRow:(NSUInteger)row {
-    [self replaceRegion:r mipmapLevel:level slice:0 withBytes:p bytesPerRow:row bytesPerImage:row*self.height];
+    [self replaceRegion:r mipmapLevel:level slice:0 withBytes:p bytesPerRow:row bytesPerImage:row*r.size.height];
 }
 - (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)p bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
     [self check:r level:level row:row pointer:p];
-    if(!image)image=row*self.height;
-    if(slice||image<row*self.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
+    if(!image)image=row*r.size.height;
+    if(slice||image<row*r.size.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
+    NSUInteger bpp=DVMFormatBytes(self.pixelFormat),length=r.size.width*bpp;
     if(self.backingBuffer) {
         if(self.owner.submissionInFlight)reject(@"linear texture upload in flight");
-        for(NSUInteger y=0;y<_height;y++)memcpy((uint8_t *)self.backingBuffer.contents+self.backingOffset+y*self.backingRow,(const uint8_t *)p+y*row,[self row]);
+        for(NSUInteger y=0;y<r.size.height;y++)memcpy((uint8_t *)self.backingBuffer.contents+self.backingOffset+(r.origin.y+y)*self.backingRow+r.origin.x*bpp,(const uint8_t *)p+y*row,length);
         return;
     }
-    NSMutableData *d = [NSMutableData dataWithLength:[self row] * _height * self.depth];
-    for(NSUInteger z=0;z<self.depth;z++)for (NSUInteger y = 0; y < _height; y++)
-        memcpy((uint8_t *)d.mutableBytes + (z*_height+y) * [self row], (const uint8_t *)p + z*image + y * row,
-               [self row]);
     if (self.owner.submissionInFlight) reject(@"texture upload while GPU work is in flight");
+    BOOL full=r.size.width==_width&&r.size.height==_height&&r.size.depth==self.depth;
+    // A partial update must preserve completed GPU writes outside its region.
+    // Reuse an unsubmitted CPU image, otherwise fetch the completed native
+    // contents through the existing bounded full-transfer contract. This is
+    // correctness-first support, not a claim of efficient partial wire uploads.
+    NSMutableData *d=full?[NSMutableData dataWithLength:[self row]*_height*self.depth]:[(self.pendingUpload?:[self read]) mutableCopy];
+    for(NSUInteger z=0;z<r.size.depth;z++)for(NSUInteger y=0;y<r.size.height;y++)
+        memcpy((uint8_t *)d.mutableBytes+((z+r.origin.z)*_height+y+r.origin.y)*[self row]+r.origin.x*bpp,
+               (const uint8_t *)p+z*image+y*row,length);
     self.pendingUpload = d;
     self.completedShadow=nil;
 }
@@ -496,15 +505,16 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
      bytesPerRow:(NSUInteger)row
       fromRegion:(MTLRegion)r
      mipmapLevel:(NSUInteger)level {
-    [self getBytes:p bytesPerRow:row bytesPerImage:row*self.height fromRegion:r mipmapLevel:level slice:0];
+    [self getBytes:p bytesPerRow:row bytesPerImage:row*r.size.height fromRegion:r mipmapLevel:level slice:0];
 }
 - (void)getBytes:(void *)p bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image fromRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice {
     [self check:r level:level row:row pointer:p];
-    if(!image)image=row*self.height;
-    if(slice||image<row*self.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
+    if(!image)image=row*r.size.height;
+    if(slice||image<row*r.size.height||image>DVM_TEXTURE_BYTES)reject(@"texture image pitch/slice");
     NSData *d = [self read];
-    for(NSUInteger z=0;z<self.depth;z++)for(NSUInteger y=0;y<_height;y++)
-        memcpy((uint8_t *)p+z*image+y*row,(const uint8_t *)d.bytes+(z*_height+y)*[self row],[self row]);
+    NSUInteger bpp=DVMFormatBytes(self.pixelFormat);
+    for(NSUInteger z=0;z<r.size.depth;z++)for(NSUInteger y=0;y<r.size.height;y++)
+        memcpy((uint8_t *)p+z*image+y*row,(const uint8_t *)d.bytes+((z+r.origin.z)*_height+y+r.origin.y)*[self row]+r.origin.x*bpp,r.size.width*bpp);
 }
 
 @end

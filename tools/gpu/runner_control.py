@@ -28,7 +28,7 @@ def main():
     a=p.parse_args()
     if (a.frames!=1 and not 3<=a.frames<=4096) or (a.test=='builtin' and a.frames!=1):p.error('invalid test frame count')
     if a.scene and a.frames==1:p.error('scene requires sequence frames')
-    if a.shared_surface and (a.test!='package' or a.scene or not 3<=a.frames<=1024):p.error('shared surface requires package, scene 0, 3..1024 frames')
+    if a.shared_surface and (a.test!='package' or not 3<=a.frames<=1024):p.error('shared surface requires package, 3..1024 frames')
     if a.hz and not a.shared_surface:p.error('this pacing verifier requires shared surface')
     if a.surface_handoff and not a.shared_surface:p.error('surface handoff requires shared surface')
     trial=a.trial.resolve();pid=int((trial/'qemu.pid').read_text())

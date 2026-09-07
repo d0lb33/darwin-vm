@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import struct
-from shared_consumer_verify import verify_records,verify_scanout_export,verify_handoff,verify_pacing,BYTES,WIDTH,HEIGHT,ROW
+from shared_consumer_verify import verify_records,verify_scanout_export,verify_handoff,verify_pacing,verify_pixels,BYTES,WIDTH,HEIGHT,ROW
 
 
 class SharedConsumerVerification(unittest.TestCase):
@@ -42,6 +42,20 @@ class SharedConsumerVerification(unittest.TestCase):
         wrong=bytearray(self.data[:BYTES]);wrong[-4]^=1
         (self.out/'last-presented.bgra').write_bytes(wrong)
         with self.assertRaisesRegex(ValueError,'actual final DCP'):verify_scanout_export(self.out,self.out)
+
+    def test_scene_identity_is_not_taken_from_guest_claim(self):
+        lines=list(self.lines);lines[0]+=' scene=1'
+        with self.assertRaisesRegex(ValueError,'requested scene'):verify_records(self.out,lines,self.records,3,scene=0)
+
+    def test_alpha_tolerance_does_not_cover_markers_or_other_colors(self):
+        # Frame 8: moving stripe [136,296), front opaque stripe [280,360).
+        row=bytes([255,0,0,255])*136+bytes([127,0,129,255])*144+bytes([0,255,0,255])*80+bytes([255,0,0,255])*(WIDTH-360)
+        data=bytearray((row+bytes(ROW-len(row)))*HEIGHT)
+        data[:16]=struct.pack('<4I',0xff44564d,0xff505253,0xff424c52,0xff000008)
+        verify_pixels(data,8,1)
+        for offset,value in ((0,0),(4*136,126),(4*136+1,1),(4*136+3,254),(4*280+1,254)):
+            bad=bytearray(data);bad[offset]=value
+            with self.assertRaisesRegex(ValueError,'pixel oracle'):verify_pixels(bad,8,1)
 
     def test_false_completion_wrong_target_and_early_retirement(self):
         for mutate in (lambda r:r[3]['reply'].update(status=3),lambda r:r[3]['request']['commands'][0].update(target=9),
