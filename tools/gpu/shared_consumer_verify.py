@@ -13,9 +13,9 @@ def fields(line):
     return dict(re.findall(r'(\w+)=([^ ]+)', line))
 
 
-def verify_records(directory, lines, records, count):
+def verify_records(directory, lines, records, count, hz=0):
     directory=Path(directory)
-    if type(count) is not int or not 3<=count<=16:
+    if type(count) is not int or not 3<=count<=1024 or hz not in (0,30,60):
         raise ValueError('shared consumer frame scope')
     if lines[-1]!='GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0':
         raise ValueError('shared consumer completion')
@@ -33,6 +33,11 @@ def verify_records(directory, lines, records, count):
         raise ValueError('shared setup geometry')
     if not math.isfinite(float(setup[0]['us'])) or float(setup[0]['us'])<0:
         raise ValueError('shared setup timing')
+    measured='hz' in setup[0]
+    if (hz or count>16) and not measured:
+        raise ValueError('missing shared pacing instrumentation')
+    if measured and (setup[0]['hz']!=str(hz) or setup[0].get('warmup')!='2'):
+        raise ValueError('shared requested pacing contract')
     transitions=[r for r in records if r['op'] in ('sharedRenderAcquire','sharedRenderSeal','sharedRenderRetire')]
     expected=[(op, epoch) for epoch in range(1,count+1) for op in ('sharedRenderAcquire','sharedRenderSeal','sharedRenderRetire')]
     if [(r['op'],r['request']['epoch']) for r in transitions]!=expected or any(r['request']['handle']!=target for r in transitions):
@@ -82,9 +87,70 @@ def verify_records(directory, lines, records, count):
     last=log.rfind(f'iomfb: gpu-present frame={count} ')
     if 'D594 nested completed, status 0x0' not in log[last:] or 'GPU_LOAD_CA_SHARED_POWER_RESET rc=0' not in lines:
         raise ValueError('shared native completion/power reset')
-    return dict(scope='exact-guest-CARenderer-owned-IOSurface-native-scanout-events',verified=True,frames=count,
+    result=dict(scope='exact-guest-CARenderer-owned-IOSurface-native-scanout-events',verified=True,frames=count,
                 bytes=BYTES,sha256=final[0]['sha'],setup_us=float(setup[0]['us']),timings=frames,final_scanout_export_checked=False,
                 caveat='compare final stopped-VM scanout export separately; display/input recovery is a separate check')
+    if measured:
+        result['pacing']=verify_pacing(frames,hz,[int(w[3])/1000 for w in witnesses])
+        if setup[0].get('profile')=='1':
+            names=('acquire_us','update_us','encode_us','seal_us','enqueue_us','wait_us','retire_us')
+            for f in frames:
+                values=[float(f[k]) for k in names]
+                if any(not math.isfinite(v) or v<0 for v in values) or abs(sum(values[:4])-float(f['render_us']))>.02 or abs(sum(values[4:])-float(f['display_us']))>.02:
+                    raise ValueError('shared stage profile accounting')
+            result['pacing']['stage_us']={k:distribution([float(f[k]) for f in frames[2:]]) for k in names}
+        memory=[fields(x) for x in lines if x.startswith('GPU_LOAD_CA_SHARED_MEMORY ')]
+        wanted=sorted({2,count,*range(128,count+1,128)})
+        if [int(m['frame']) for m in memory]!=wanted:raise ValueError('shared memory sample coverage')
+        for sample in memory:
+            frame=int(sample['frame']);low=transitions[3*frame-1]['seq']
+            high=transitions[3*frame]['seq'] if frame<count else math.inf
+            snapshots=[r['reply']['live'] for r in records if r['op']=='stats' and low<r['seq']<high]
+            if not snapshots or int(sample['objects'])!=snapshots[0]['objects'] or int(sample['resource_bytes'])!=snapshots[0]['resourceBytes']:
+                raise ValueError('shared resource sample differs from backend')
+            if min(int(sample[k]) for k in ('resident','footprint','objects','resource_bytes'))<=0:
+                raise ValueError('shared memory sample values')
+        result['memory_samples']=memory
+        result['memory_change']={k:int(memory[-1][k])-int(memory[0][k]) for k in ('resident','footprint','objects','resource_bytes')}
+    return result
+
+
+def distribution(values):
+    values=sorted(values)
+    if not values:return dict(samples=0)
+    n=len(values)
+    return dict(samples=n,min=min(values),mean=sum(values)/n,p50=values[math.ceil(n*.5)-1],
+                p95=values[math.ceil(n*.95)-1],p99=values[math.ceil(n*.99)-1],max=max(values))
+
+
+def verify_pacing(frames,hz,scanout_us):
+    if len(scanout_us)!=len(frames) or any(b<=a for a,b in zip(scanout_us,scanout_us[1:])):
+        raise ValueError('nonmonotonic native scanout timestamps')
+    starts=[];finishes=[];targets=[]
+    previous=0
+    for i,frame in enumerate(frames):
+        start,finish,target=[float(frame[k]) for k in ('start_us','finish_us','target_us')]
+        if any(not math.isfinite(x) for x in (start,finish,target)) or start<previous-.01 or finish<start or abs(finish-start-float(frame['total_us']))>.02:
+            raise ValueError('shared frame clock interval')
+        if hz and i>=2:
+            expected=float(frames[2]['target_us'])+(i-2)*1e6/hz
+            if target<0 or abs(target-expected)>.02 or start+.02<target:
+                raise ValueError('shared absolute pacing targets')
+        elif target!=-1:raise ValueError('unexpected shared pacing target')
+        starts.append(start);finishes.append(finish);targets.append(target);previous=finish
+    steady=frames[2:];late=[max(0,f-t-1e6/hz) for f,t in zip(finishes[2:],targets[2:])] if hz else []
+    elapsed=finishes[-1]-starts[2]
+    return dict(hz=hz,warmup_frames=2,measured_frames=len(steady),first_use_us=[float(f['total_us']) for f in frames[:2]],
+                work_us=distribution([float(f['total_us']) for f in steady]),
+                render_us=distribution([float(f['render_us']) for f in steady]),
+                display_us=distribution([float(f['display_us']) for f in steady]),
+                elapsed_us=elapsed,completed_frames_per_second=len(steady)*1e6/elapsed if elapsed else None,
+                over_60hz_work_budget=sum(float(f['total_us'])>1e6/60 for f in steady),
+                deadline_misses=sum(x>0 for x in late),deadline_lateness_us=distribution(late),
+                start_lateness_us=distribution([max(0,s-t) for s,t in zip(starts[2:],targets[2:])]) if hz else dict(samples=0),
+                native_scanout_frames_per_second=(len(steady)-1)*1e6/(scanout_us[-1]-scanout_us[2]) if len(steady)>1 else None,
+                scanout_intervals_us=distribution([b-a for a,b in zip(scanout_us[2:],scanout_us[3:])]),
+                caveat='guest work excludes post-frame audit/memory sampling; absolute schedule and native intervals include its effect; every frame rendered, no target skipping')
 
 
 def verify_scanout_export(trial, job):

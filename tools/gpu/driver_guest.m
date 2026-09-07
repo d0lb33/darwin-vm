@@ -5,6 +5,7 @@
 #import <IOSurface/IOSurface.h>
 #include "present_layout.h"
 #include "driver_capabilities.h"
+#include "dirty_buffer_range.h"
 
 static NSError *error(NSString *s) {
     return [NSError errorWithDomain:@"DVMMetalDriver"
@@ -626,10 +627,12 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                     NSMutableData *uploaded=buffer.renderUploaded?:[NSMutableData dataWithLength:buffer.length];
                     for(NSUInteger offset=0;offset<buffer.length;offset+=32768){
                         NSUInteger length=MIN(32768,buffer.length-offset);
-                        if(initialized&&!memcmp((uint8_t *)buffer.contents+offset,(uint8_t *)uploaded.bytes+offset,length))continue;
-                        NSData *chunk=[NSData dataWithBytes:(uint8_t *)buffer.contents+offset length:length];
-                        if(!self.commandQueue.owner.transport(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(offset),@"data":[chunk base64EncodedStringWithOptions:0]},&e))reject(e.description?:@"render buffer upload");
-                        memcpy((uint8_t *)uploaded.mutableBytes+offset,chunk.bytes,length);
+                        DVMDirtyRange changed=initialized?DVMFindDirtyRange((uint8_t *)buffer.contents+offset,(uint8_t *)uploaded.bytes+offset,length):(DVMDirtyRange){0,length};
+                        if(!changed.length)continue;
+                        NSUInteger start=offset+changed.offset;
+                        NSData *chunk=[NSData dataWithBytes:(uint8_t *)buffer.contents+start length:changed.length];
+                        if(!self.commandQueue.owner.transport(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(start),@"data":[chunk base64EncodedStringWithOptions:0]},&e))reject(e.description?:@"render buffer upload");
+                        memcpy((uint8_t *)uploaded.mutableBytes+start,chunk.bytes,changed.length);
                     }
                     buffer.renderUploaded=uploaded;
                 }

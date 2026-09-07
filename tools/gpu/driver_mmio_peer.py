@@ -4,6 +4,7 @@ Socket readiness joins the runner's select set: no mailbox polling interval.
 The inherited verifier checks actual Metal completions and a nonce CPU oracle.
 """
 import hashlib
+import base64
 import json
 import mmap
 import os
@@ -147,7 +148,12 @@ class MMIOPeer(DriverPeer):
             line=raw.decode('utf-8').strip()
             if not line.startswith('GPU_LOAD_') or '\n' in line:raise ValueError('audit record format')
             self.audit_seen=seq;lines.append(line)
-            with (self.out/'driver-audit.jsonl').open('a') as f:f.write(json.dumps(dict(seq=seq,line=line))+'\n')
+            # Preserve the exact consumed header/payload BEFORE acknowledging
+            # the slot. The producer may then reuse it; final RAM alone cannot
+            # verify a job spanning more than one ring revolution.
+            slot=struct.pack('<QII',seq,n,c)+raw
+            capture=dict(head=head,session=self.header.hex(),bytes=base64.b64encode(slot).decode())
+            with (self.out/'driver-audit.jsonl').open('a') as f:f.write(json.dumps(dict(seq=seq,line=line,slot_v1=capture))+'\n')
             if ring:struct.pack_into('<Q',self.ram,0x188,self.audit_seen)
         return lines
     def verify(self,events):

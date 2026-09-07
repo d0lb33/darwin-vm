@@ -5,7 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 import struct
-from shared_consumer_verify import verify_records,verify_scanout_export,verify_handoff,BYTES,WIDTH,HEIGHT,ROW
+from shared_consumer_verify import verify_records,verify_scanout_export,verify_handoff,verify_pacing,BYTES,WIDTH,HEIGHT,ROW
 
 
 class SharedConsumerVerification(unittest.TestCase):
@@ -74,6 +74,42 @@ class SharedConsumerVerification(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'order'):verify_handoff(self.out,lines[::-1],7,100)
         self.data[BYTES+8]^=1;(self.out/'managed-final.bgra').write_bytes(self.data)
         with self.assertRaisesRegex(ValueError,'independent shared-memory'):verify_handoff(self.out,lines,7,100)
+
+    def test_pacing_reports_slow_frames_without_hiding_them(self):
+        frames=[]
+        for i,(start,finish,target) in enumerate(((0,100000,-1),(100000,140000,-1),(150000,160000,150000),(166667,200000,166666.667))):
+            total=finish-start
+            frames.append(dict(start_us=str(start),finish_us=str(finish),target_us=str(target),total_us=str(total),render_us=str(total-1000),display_us='1000'))
+        result=verify_pacing(frames,60,[10,20,30,40000])
+        self.assertEqual(result['deadline_misses'],1)
+        self.assertEqual(result['over_60hz_work_budget'],1)
+        self.assertEqual(result['work_us']['max'],33333)
+        with self.assertRaisesRegex(ValueError,'targets'):verify_pacing(frames,30,[10,20,30,40000])
+        with self.assertRaisesRegex(ValueError,'scanout'):verify_pacing(frames,60,[10,20,30,29])
+
+    def test_shared_memory_and_pacing_complete_fixture(self):
+        lines=self.lines[:];lines[0]+=' hz=60 warmup=2'
+        frame=0
+        for i,line in enumerate(lines):
+            if line.startswith('GPU_LOAD_CA_SHARED_FRAME '):
+                frame+=1;start=frame*20000
+                lines[i]+=f' start_us={start} finish_us={start+3000} target_us={start if frame==3 else -1}'
+        lines[-1:-1]=[f'GPU_LOAD_CA_SHARED_MEMORY frame={f} resident=16000000 footprint=15000000 objects=2 resource_bytes=12435456' for f in (2,3)]
+        records=[]
+        for r in copy.deepcopy(self.records):
+            records.append(r)
+            if r['op']=='sharedRenderRetire' and r['request']['epoch'] in (2,3):
+                records.append(dict(op='stats',request={},reply=dict(ok=True,live=dict(objects=2,resourceBytes=12435456))))
+        for i,r in enumerate(records):r['seq']=i+1
+        result=verify_records(self.out,lines,records,3,60)
+        self.assertEqual(result['memory_change']['resource_bytes'],0)
+        profiled=[x+' acquire_us=100 update_us=100 encode_us=100 seal_us=1700 enqueue_us=400 wait_us=200 retire_us=400' if x.startswith('GPU_LOAD_CA_SHARED_FRAME ') else x for x in lines]
+        profiled[0]+=' profile=1'
+        self.assertEqual(verify_records(self.out,profiled,records,3,60)['pacing']['stage_us']['seal_us']['mean'],1700)
+        with self.assertRaisesRegex(ValueError,'profile accounting'):
+            verify_records(self.out,[x.replace('seal_us=1700','seal_us=1699') for x in profiled],records,3,60)
+        bad=[x.replace('resource_bytes=12435456','resource_bytes=100') for x in lines]
+        with self.assertRaisesRegex(ValueError,'differs from backend'):verify_records(self.out,bad,records,3,60)
 
 
 if __name__=='__main__':unittest.main()

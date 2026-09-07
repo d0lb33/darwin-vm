@@ -5,6 +5,7 @@ repo=$(cd "$(dirname "$0")/../.." && pwd)
 out=${1:?new output directory}
 test ! -e "$out"
 mkdir -p "$out"
+xcrun clang -O1 -Wall -Wextra -Werror -fsanitize=address,undefined "$repo/tools/gpu/test_dirty_buffer_range.c" -o "$out/test_dirty_buffer_range"
 flags=(-fobjc-arc -fobjc-arc-exceptions -O1 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-protocol -Wno-objc-protocol-property-synthesis)
 xcrun clang "${flags[@]}" "$repo/tools/gpu/driver_host.m" -framework Metal -framework Foundation -o "$out/driver_host"
 for name in driver_contract_test driver_capability_test test_render_writeback test_owned_surface_frontend; do

@@ -1,5 +1,7 @@
 """Audit ring wrap and immutable revision staging without a guest boot."""
 import json
+import base64
+import copy
 import mmap
 from pathlib import Path
 import struct
@@ -9,6 +11,7 @@ import zlib
 
 from driver_mmio_peer import MMIOPeer
 from driver_runner_peer import RunnerPeer
+from verify_audit_capture import verify_audits
 
 
 class AuditRingTests(unittest.TestCase):
@@ -42,6 +45,21 @@ class AuditRingTests(unittest.TestCase):
         self.peer.ram[0x1010]=0
         with self.assertRaisesRegex(ValueError,'CRC'):self.peer.audit()
         self.assertEqual(struct.unpack_from('<Q',self.peer.ram,0x188)[0],120)
+
+    def test_drained_capture_verifies_overwritten_slots(self):
+        for seq in range(120,381):
+            self.put(seq,f'GPU_LOAD_FRAME frame={seq}');self.peer.audit()
+        records=[json.loads(x) for x in (self.peer.out/'driver-audit.jsonl').read_text().splitlines()]
+        raw=self.peer.ram[:]
+        self.assertEqual(verify_audits(records,raw),'drained-slots-v1')
+        bad=copy.deepcopy(records);slot=bytearray(base64.b64decode(bad[0]['slot_v1']['bytes']));slot[-1]^=1
+        bad[0]['slot_v1']['bytes']=base64.b64encode(slot).decode()
+        with self.assertRaisesRegex(ValueError,'CRC'):verify_audits(bad,raw)
+        with self.assertRaisesRegex(ValueError,'sequence'):verify_audits(records[:10]+records[11:],raw)
+        bad=copy.deepcopy(records);bad[0]['slot_v1']['session']='00'*16
+        with self.assertRaisesRegex(ValueError,'session'):verify_audits(bad,raw)
+        bad=copy.deepcopy(records);del bad[0]['slot_v1']
+        with self.assertRaisesRegex(ValueError,'mixed'):verify_audits(bad,raw)
 
 
 class RunnerVerdictTests(unittest.TestCase):

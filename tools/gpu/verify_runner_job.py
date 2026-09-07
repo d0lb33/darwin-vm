@@ -4,8 +4,7 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import struct
-import zlib
+from verify_audit_capture import verify_audits
 
 from consumer_verify import verify_records
 
@@ -17,15 +16,7 @@ def verify(path):
     digest=hashlib.sha256((p/'DVMProxy.bundle/DVMProxy').read_bytes()).hexdigest()
     if digest!=job['sha256']:raise ValueError('staged package changed')
     audits=[json.loads(x) for x in (p/'driver-audit.jsonl').read_text().splitlines()]
-    raw=(p/'shared-ram.bin').read_bytes();head,=struct.unpack_from('<Q',raw,0x180)
-    if not audits or len(audits)>120:raise ValueError('job audit extent')
-    for i,a in enumerate(audits):
-        seq=a['seq'];offset=0x1000+((seq-1)%120)*512
-        actual,n,crc=struct.unpack_from('<QII',raw,offset)
-        if seq>head or head-seq>=120 or (i and seq!=audits[i-1]['seq']+1) or seq!=actual or not 0<n<480:
-            raise ValueError('audit sequence/retention')
-        data=raw[offset+16:offset+16+n]
-        if zlib.crc32(data)!=crc or data.decode().strip()!=a['line']:raise ValueError('audit content/CRC')
+    audit_mode=verify_audits(audits,(p/'shared-ram.bin').read_bytes())
     lines=[a['line'] for a in audits]
     staged=[x for x in lines if x.startswith(f'GPU_LOAD_RUNNER_STAGED job={job["job"]} ')]
     if len(staged)!=1 or f'sha256={digest} ' not in staged[0]:raise ValueError('guest staging witness')
@@ -36,9 +27,9 @@ def verify(path):
             raise ValueError('upload capture changed')
     if job.get('shared_surface'):
         from shared_consumer_verify import verify_records as verify_shared
-        evidence=verify_shared(p,lines[:end+1],records,job['frames'])
+        evidence=verify_shared(p,lines[:end+1],records,job['frames'],job.get('hz',0))
     else:evidence=verify_records(p,lines[:end+1],records,job.get('frames',1),job.get('scene',0))
-    output=dict(job=job['job'],guest_pid=result['pid'],audit_crc_verified=True,consumer=evidence)
+    output=dict(job=job['job'],guest_pid=result['pid'],audit_crc_verified=True,audit_capture=audit_mode,consumer=evidence)
     if job.get('surface_handoff'):
         from shared_consumer_verify import verify_handoff
         output['handoff']=verify_handoff(p,lines,job['job'],result['pid'])

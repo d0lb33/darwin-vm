@@ -3,7 +3,12 @@
 #import <IOSurface/IOSurface.h>
 #import <CommonCrypto/CommonDigest.h>
 #include <time.h>
+#include <mach/mach.h>
+#include <unistd.h>
 #include "present_layout.h"
+#ifndef DVM_CA_HZ
+#define DVM_CA_HZ 0
+#endif
 static double sharedNow(void){struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
 static void sharedColor(CALayer *layer,CGColorSpaceRef space,uint32_t bgra){
     CGFloat values[]={((bgra>>16)&255)/255.,((bgra>>8)&255)/255.,(bgra&255)/255.,((bgra>>24)&255)/255.};
@@ -18,6 +23,16 @@ static unsigned sharedPixels(IOSurfaceRef surface,unsigned frame){
         if(pixel!=(y==0&&x<4?marker[x]:background))bad++;
     }
     return bad;
+}
+static void sharedMemory(id<MTLDevice> device,unsigned frame){
+    task_vm_info_data_t info={0};mach_msg_type_number_t count=TASK_VM_INFO_COUNT;
+    kern_return_t kr=task_info(mach_task_self(),TASK_VM_INFO,(task_info_t)&info,&count);
+    if(kr||count<TASK_VM_INFO_REV1_COUNT)fail("shared-memory-query");
+    NSDictionary *stats=[(id<DVMConsumerCompletion>)device consumerCompletion];
+    if(!stats[@"live"])fail("shared-resource-query");
+    fprintf(stderr,"GPU_LOAD_CA_SHARED_MEMORY frame=%u resident=%llu footprint=%llu objects=%llu resource_bytes=%llu\n",frame,
+        (unsigned long long)info.resident_size,(unsigned long long)info.phys_footprint,
+        [stats[@"live"][@"objects"] unsignedLongLongValue],[stats[@"live"][@"resourceBytes"] unsignedLongLongValue]);
 }
 static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
     double start=sharedNow();const char *stage="mapping";CARenderer *renderer=nil;
@@ -54,21 +69,39 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         int (*wait)(void *,uint32_t,uint32_t,double)=dlsym(lib,"IOMobileFramebufferSwapWaitWithTimeout");
         if(!get||!power||!begin||!layer||!end||!wait)fail("shared-display-symbols");
         void *fb=NULL;if(get(&fb)||!fb||power(fb,1))fail("shared-display-open");
-        fprintf(stderr,"GPU_LOAD_CA_SHARED_SETUP us=%.3f width=%u height=%u row=%u surface=%u frames=%u\n",(sharedNow()-start)*1e6,DVM_PRESENT_WIDTH,DVM_PRESENT_HEIGHT,DVM_PRESENT_ROW,IOSurfaceGetID(surface),DVM_CA_FRAMES);
+        fprintf(stderr,"GPU_LOAD_CA_SHARED_SETUP us=%.3f width=%u height=%u row=%u surface=%u frames=%u hz=%u warmup=2 profile=1\n",(sharedNow()-start)*1e6,DVM_PRESENT_WIDTH,DVM_PRESENT_HEIGHT,DVM_PRESENT_ROW,IOSurfaceGetID(surface),DVM_CA_FRAMES,DVM_CA_HZ);
+        double origin=sharedNow(),pacingStart=0;
         for(unsigned frame=1;frame<=DVM_CA_FRAMES;frame++){@autoreleasepool {
+            double target=-1;
+            if(frame>=3){
+                if(frame==3)pacingStart=sharedNow();
+                if(DVM_CA_HZ){
+                    target=pacingStart+(frame-3)/(double)(DVM_CA_HZ?DVM_CA_HZ:1);
+                    double remaining;
+                    while((remaining=target-sharedNow())>0)usleep((useconds_t)(remaining*1e6)+1);
+                }
+            }
             double t0=sharedNow();stage="acquire";if(IOSurfaceLock(surface,0,NULL))fail("shared-lock");DVMSharedTextureAcquire(texture,frame);
+            double acquired=sharedNow();
             stage="layer-update";[CATransaction begin];[CATransaction setDisableActions:YES];
             sharedColor(root,space,frame%3==1?0xffff0000:frame%3==2?0xff00ff00:0xff0000ff);
             uint32_t words[]={0xff44564d,0xff505253,0xff424c52,0xff000000|frame};
             for(unsigned i=0;i<4;i++)sharedColor(markers[i],space,words[i]);[CATransaction commit];
+            double updated=sharedNow();
             stage="render";[renderer beginFrameAtTime:frame/60. timeStamp:NULL];[renderer addUpdateRect:root.frame];[renderer render];[renderer endFrame];
+            double encoded=sharedNow();
             stage="GPU-completion";NSDictionary *completion=DVMSharedTextureSeal(texture,frame);double t1=sharedNow();
             if(IOSurfaceUnlock(surface,0,NULL))fail("shared-unlock");
             stage="display";uint32_t swap=UINT32_MAX;CGRect rect=root.frame;
             if(begin(fb,&swap)||layer(fb,0,surface,rect,rect,0)||end(fb))fail("shared-swap-submit");
+            double enqueued=sharedNow();
             int rc=wait(fb,swap,1,2.0);if(rc){fprintf(stderr,"GPU_LOAD_ERROR shared_wait=0x%x frame=%u swap=%u\n",rc,frame,swap);fail("shared-swap-wait");}
+            double waited=sharedNow();
             DVMSharedTextureRetire(texture,frame,swap,rc);double t2=sharedNow();
-            fprintf(stderr,"GPU_LOAD_CA_SHARED_FRAME frame=%u swap=%u completed_writes=%llu render_us=%.3f display_us=%.3f total_us=%.3f\n",frame,swap,[completion[@"completedWrites"] unsignedLongLongValue],(t1-t0)*1e6,(t2-t1)*1e6,(t2-t0)*1e6);
+            fprintf(stderr,"GPU_LOAD_CA_SHARED_FRAME frame=%u swap=%u completed_writes=%llu render_us=%.3f display_us=%.3f total_us=%.3f start_us=%.3f finish_us=%.3f target_us=%.3f acquire_us=%.3f update_us=%.3f encode_us=%.3f seal_us=%.3f enqueue_us=%.3f wait_us=%.3f retire_us=%.3f\n",frame,swap,[completion[@"completedWrites"] unsignedLongLongValue],(t1-t0)*1e6,(t2-t1)*1e6,(t2-t0)*1e6,(t0-origin)*1e6,(t2-origin)*1e6,target<0?-1:(target-origin)*1e6,(acquired-t0)*1e6,(updated-acquired)*1e6,(encoded-updated)*1e6,(t1-encoded)*1e6,(enqueued-t1)*1e6,(waited-enqueued)*1e6,(t2-waited)*1e6);
+            // Sampling is outside the measured work interval. Its cost still
+            // contributes to the next paced frame's schedule lateness.
+            if(frame==2||frame%128==0||frame==DVM_CA_FRAMES)sharedMemory(device,frame);
         }}
         stage="final-pixels";if(IOSurfaceLock(surface,kIOSurfaceLockReadOnly,NULL))fail("shared-final-lock");
         unsigned bad=sharedPixels(surface,DVM_CA_FRAMES);uint8_t digest[32];char sha[65];

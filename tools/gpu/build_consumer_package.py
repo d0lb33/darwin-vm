@@ -17,7 +17,7 @@ a=p.parse_args()
 if a.frames!=1 and not 3<=a.frames<=4096:p.error('frames must be 1 or 3..4096')
 if a.hz and a.frames==1:p.error('pacing requires a sequence')
 if a.scene and a.frames==1:p.error('scene requires a sequence')
-if a.shared_surface and (a.scene or a.hz or not 3<=a.frames<=16):p.error('initial shared display test requires 3..16 frames, scene 0 and no pacing')
+if a.shared_surface and (a.scene or not 3<=a.frames<=1024):p.error('shared display test requires 3..1024 frames and scene 0')
 root=Path(__file__).resolve().parents[2];src=root/'tools/gpu'
 subprocess.run(['python3',str(src/'build_driver_revision.py'),str(a.base),str(a.out)],check=True)
 sdk=subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip()
