@@ -37,6 +37,15 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 
 ## Current priority and evidence classes
 
+Latest: [RGhA compositor scanout](gpu-rgha-compositor-ios27.md) proves four
+actual backboardd presentations/completions and exact final imported-source to
+console delivery. The subsequent V22 run passes the 128-object boundary and renders with an
+actual 2.39 MiB uploaded RG8 texture. It stops at the missing descriptor-based
+compute pipeline entry point for compute_average_luma, before dispatch. Sustained system pacing,
+full ownership retirement, input response and an independent system-scene
+color oracle remain separate open gates. The older paragraphs below describe
+the evidence sequence; they do not override this latest result.
+
 [Compositor gaps](gpu-compositor-gaps-ios27.md) separates **statically referenced,
 runtime observed, implemented, verified, unsupported and unknown** behavior.
 It prioritizes existing IOSurface memory, formats/geometry, ownership and

@@ -26,6 +26,9 @@ static DVMMetalSurfaceProvider DVMImportedSurfaceProvider(Namespace *ns){
     return ^id<DVMMetalImportedMapping>(IOSurfaceRef s,NSError **e){
         NSNumber *key=@(IOSurfaceGetID(s));DVMImportedMapping *m=[cache objectForKey:key];
         if(m&&!m.retired)return m;
+        id color=CFBridgingRelease(IOSurfaceCopyValue(s,kIOSurfaceColorSpace));
+        NSString *description=[[color description] stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
+        DVMReport(stderr,"GPU_LOAD_SURFACE_COLOR surface=%u colorspace=%.330s\n",IOSurfaceGetID(s),description.UTF8String?:"(absent)");
         m=[DVMImportedMapping new];m.owner=ns;m.surfaceObject=(__bridge id)s;
         // Native usage count protects a pool consumer from reusing this surface
         // while our texture aliases survive. It is not a GPU or DCP fence.

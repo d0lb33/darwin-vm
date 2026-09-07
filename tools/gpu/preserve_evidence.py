@@ -17,6 +17,7 @@ def main():
     p.add_argument('--output',type=Path,required=True)
     p.add_argument('--reference-streams',action='store_true',help='include captured LIBREF streams (skip full-library uploads)')
     p.add_argument('--mmio-frames',action='store_true',help='include owned 16 MiB transport RAM and bounded luma/blur frames, never full guest RAM')
+    p.add_argument('--compositor-scanout',action='store_true',help='include final A408/RGhA/BGRA/PPM witnesses matching the scanout verification hashes, at most 64 MiB each')
     p.add_argument('sources',type=Path,nargs='+')
     a=p.parse_args()
     a.output.mkdir(exist_ok=False)
@@ -35,6 +36,11 @@ def main():
                 if ledger.is_file():
                     compressed=any(x['compressed']==path.name and x['compressed_sha256']==hashlib.sha256(path.read_bytes()).hexdigest() for x in json.loads(ledger.read_text()))
             mmio=False
+            scanout=False
+            if a.compositor_scanout and path.name in ('last-scanout.a408','last-scanout.rgha','last-scanout.bgra','scanout.ppm') and path.stat().st_size<=64*1024*1024:
+                ledger=path.with_name('scanout-verification.json')
+                if ledger.is_file():
+                    scanout=hashlib.sha256(path.read_bytes()).hexdigest()==json.loads(ledger.read_text()).get('hashes',{}).get(path.name)
             if a.mmio_frames:
                 if path.name=='shared-ram.bin' and path.stat().st_size==16*1024*1024:
                     with path.open('rb') as f:mmio=f.read(4)==b'1MVD'
@@ -65,7 +71,7 @@ def main():
                 request=path.with_name('guest-requests.bin').read_bytes()
                 if not request.startswith(b'LIBREF ') and request:
                     continue # legacy captures can contain the full Apple library
-            if (path.suffix not in ALLOWED and not stream and not mmio and not compressed) or path.stat().st_size>16*1024*1024:
+            if not scanout and ((path.suffix not in ALLOWED and not stream and not mmio and not compressed) or path.stat().st_size>16*1024*1024):
                 continue
             relative=Path(source.name)/(path.relative_to(source) if source.is_dir() else Path(path.name))
             target=a.output/relative
@@ -75,7 +81,7 @@ def main():
             shutil.copyfile(path,target)
             data=target.read_bytes()
             entries.append(dict(path=str(relative),source=str(path.resolve()),bytes=len(data),sha256=hashlib.sha256(data).hexdigest()))
-    (a.output/'index.json').write_text(json.dumps(dict(files=entries,reference_streams=a.reference_streams,mmio_frames=a.mmio_frames,excluded='disks, full guest RAM, executables, libraries, full shader upload captures, files over 16 MiB, and unlisted extensions'),indent=2)+'\n')
+    (a.output/'index.json').write_text(json.dumps(dict(files=entries,reference_streams=a.reference_streams,mmio_frames=a.mmio_frames,compositor_scanout=a.compositor_scanout,excluded='disks, full guest RAM, executables, libraries, full shader upload captures, files over 16 MiB except explicitly verified final scanout, and unlisted extensions'),indent=2)+'\n')
     print(f'preserved {len(entries)} records, {sum(e["bytes"] for e in entries)} bytes in {a.output}')
 
 

@@ -18,7 +18,7 @@
 
 enum {
     kMaxFrame = 2 * 1024 * 1024,
-    kMaxObjects = 128,
+    kMaxObjects = DVM_OBJECTS,
     kMaxTextures = 32 * 1024 * 1024,
     kMaxDispatches = 32,
     kMaxDimension = DVM_TEXTURE_DIMENSION,
@@ -345,6 +345,8 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
     if([(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate)return HostError(seq,ENOTSUP,@"private texture has no CPU read access");
     uint64_t offset=0,length=entry.textureBytes;
     BOOL ranged=request[@"offset"]!=nil||request[@"length"]!=nil;
+    if(!ranged&&length>DVM_TEXTURE_DIRECT_READ_BYTES)
+        return HostError(seq,EINVAL,@"large texture read requires bounded chunks");
     if(ranged&&(!Number(request[@"offset"],&offset)||!Number(request[@"length"],&length)||!length||length>DVM_TEXTURE_TRANSFER_CHUNK||offset>entry.textureBytes||length>entry.textureBytes-offset))
         return HostError(seq,EINVAL,@"texture read range");
     NSMutableData *data = [NSMutableData dataWithLength:entry.textureBytes];

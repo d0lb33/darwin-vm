@@ -17,6 +17,49 @@ AIR = Path('/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib')
 SHA = '8860e4a17d89783da06429a302db0bc61b2939963f202c0c6ad31189a1021364'
 
 class HostTests(unittest.TestCase):
+    def test_negotiated_object_table_capacity_and_reuse(self):
+        limit=self.rpc('capabilities')['contract']['maximumLiveObjects']
+        self.assertEqual(limit,256)
+        handles=[self.rpc('buffer',length=16)['handle'] for _ in range(limit)]
+        self.assertEqual(self.rpc('stats')['live']['objects'],limit)
+        self.assertFalse(self.rpc('buffer',length=16)['ok'])
+        self.assertTrue(self.rpc('release',handle=handles.pop(0))['ok'])
+        new=self.rpc('buffer',length=16)['handle'];self.assertGreater(new,max(handles));handles.append(new)
+        for handle in handles:self.assertTrue(self.rpc('release',handle=handle)['ok'])
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
+        self.assertEqual(self.rpc('stats')['live']['objects'],0)
+
+    def test_large_copied_textures_chunk_completion_and_gpu_copy(self):
+        encode=lambda b:base64.b64encode(b).decode()
+        contract=self.rpc('capabilities')['contract']
+        self.assertEqual(contract['textureBytes'],4*1024*1024)
+        self.assertEqual(contract['textureDirectReadBytes'],1024*1024)
+        for width,height,fmt,bpp in ((1280,932,30,2),(1024,1024,80,4)):
+            src=self.rpc('texture',width=width,height=height,format=fmt,usage=1)['handle']
+            dst=self.rpc('texture',width=width,height=height,format=fmt,usage=1)['handle']
+            data=bytes(range(251))*(width*height*bpp//251+1);data=data[:width*height*bpp]
+            token=0
+            for offset in range(0,len(data),32768):
+                chunk=data[offset:offset+32768]
+                reply=self.rpc('writeTextureChunk',texture=src,token=token,offset=offset,data=encode(chunk))
+                self.assertTrue(reply['ok'],reply);token=reply['token']
+                self.assertEqual(reply['complete'],offset+len(chunk)==len(data))
+                if offset==0:
+                    self.assertFalse(self.rpc('read',texture=src,offset=0,length=32)['ok'])
+                    self.assertFalse(self.rpc('renderSubmit',commands=[],uploads=[],readbacks=[])['ok'])
+            copied=self.rpc('renderSubmit',commands=[dict(kind='blit',operations=[['copyTexture',src,0,[0,0],[width,height],dst,0,[0,0]]])],uploads=[],readbacks=[])
+            self.assertTrue(copied['ok'],copied);self.assertEqual(copied['status'],4)
+            self.assertFalse(self.rpc('read',texture=dst)['ok'])
+            actual=bytearray()
+            for offset in range(0,len(data),32768):
+                reply=self.rpc('read',texture=dst,offset=offset,length=min(32768,len(data)-offset))
+                self.assertTrue(reply['ok'],reply);self.assertLess(len(json.dumps(reply)),65536)
+                actual.extend(base64.b64decode(reply['data']))
+            self.assertEqual(actual,data)
+            for handle in (src,dst):self.assertTrue(self.rpc('release',handle=handle)['ok'])
+            self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
+        self.assertFalse(self.rpc('texture',width=1024,height=1025,format=80,usage=1)['ok'])
+
     def test_native_purgeability_and_alias_reacquisition(self):
         b=self.rpc('buffer',length=65536)['handle']
         t=self.rpc('linearTexture',buffer=b,width=16,height=16,format=80,offset=0,row=64,usage=1)['handle']
@@ -345,7 +388,7 @@ class HostTests(unittest.TestCase):
         self.assertEqual(self.rpc('stats')['live']['objects'],0)
     def test_resource_limits_and_typed_counts(self):
         self.assertFalse(self.rpc('buffer',length=True)['ok'])
-        self.assertFalse(self.rpc('texture',width=512,height=512,format=115,usage=1)['ok'])
+        self.assertFalse(self.rpc('texture',width=1024,height=513,format=115,usage=1)['ok'])
         self.rpc('buffer',length=16)
         live=self.rpc('stats')['live']
         self.assertEqual(live['buffers'],1)

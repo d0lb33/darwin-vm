@@ -44,7 +44,7 @@ def main():
       'usr/lib/libobjc.tbd':[s for s in symbols if s.startswith('_objc_') or s.startswith('_class_') or s.startswith('_sel_')],
       'usr/lib/libSystem.tbd':['_getprogname'],
       'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL','_OBJC_CLASS_$_NSMapTable'],
-      'System/Library/Frameworks/IOSurface.framework/IOSurface.tbd':[s for s in symbols if s.startswith('_IOSurface')],
+      'System/Library/Frameworks/IOSurface.framework/IOSurface.tbd':[s for s in symbols if s.startswith(('_IOSurface','_kIOSurface'))],
     }
     for rel,names in additions.items():
         f=a.out/'stubs'/rel;t=f.read_text();names=[s for s in names if '"'+s+'"' not in t]

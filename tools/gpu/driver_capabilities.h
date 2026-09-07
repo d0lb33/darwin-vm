@@ -1,7 +1,8 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 21u
+#define DVM_CONTRACT_VERSION 22u
+#define DVM_OBJECTS 256u
 #define DVM_RENDER_REQUEST_BYTES (2u*1024u*1024u)
 #define DVM_RENDER_REQUEST_CHUNK 32768u
 #define DVM_RENDER_DIRECT_BYTES 60000u
@@ -9,7 +10,10 @@
 #define DVM_QUEUED_COMMAND_BUFFERS 32u
 #define DVM_TEXTURE_DIMENSION 4096u
 #define DVM_BUFFER_BYTES (1024u*1024u)
-#define DVM_TEXTURE_BYTES (1024u*1024u)
+// Exact compositor requests a 1280x932 RG8 sampled texture (2,385,920 bytes).
+// Allocation is distinct from the 32 KiB chunk and 1 MiB legacy reply bounds.
+#define DVM_TEXTURE_BYTES (4u*1024u*1024u)
+#define DVM_TEXTURE_DIRECT_READ_BYTES (1024u*1024u)
 // Private images never cross the framed CPU-transfer channel. Keep their
 // allocation budget separate; total live ordinary/shared resources stay capped.
 #define DVM_PRIVATE_TEXTURE_BYTES (16u*1024u*1024u)
@@ -119,7 +123,7 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-owned-resource-purgeability-v21",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-chunked-texture-allocations-v22",
         @"resourcePurgeabilityVersion":@1,@"resourcePurgeabilityStates":@[@1,@2,@3,@4],
         @"pinnedSurfacePurgeabilityStates":@[@1,@2],@"volatileResourceAccess":@"reacquire-nonvolatile-before-use",
         @"texture1DFormats":@[@23,@25,@55,@105],@"texture1DUsageMask":@1,@"texture1DStorageModes":@[@0],
@@ -129,8 +133,8 @@ static inline NSDictionary *DVMContractProfile(void) {
         @"private2DMipFormats":@[@10,@30,@70,@80,@115,@554],@"maximumMipLevels":@13,@"mipRenderAttachments":@YES,@"privateMipReadWrite":@"application-guaranteed-disjoint-subresources-native-hazard-tracking",@"mipGeneration":@YES,@"mipGenerationFormats":@[@10,@30,@70,@80,@115,@554],@"textureViews":@NO,
         @"renderRequestBytes":@DVM_RENDER_REQUEST_BYTES,@"renderRequestChunkBytes":@DVM_RENDER_REQUEST_CHUNK,@"renderRequestTransactions":@1,
         @"framebufferRead":@"current-fragment-single-color-attachment-ordered-programmable-blending",
-        @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureUploadTransactions":@1,
-        @"queuedCommandBuffers":@DVM_QUEUED_COMMAND_BUFFERS,@"executionQueues":@1,
+        @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureDirectReadBytes":@DVM_TEXTURE_DIRECT_READ_BYTES,@"textureUploadTransactions":@1,
+        @"queuedCommandBuffers":@DVM_QUEUED_COMMAND_BUFFERS,@"executionQueues":@1,@"maximumLiveObjects":@DVM_OBJECTS,
         @"queries":@{DVM_CAPABILITY_QUERIES(DVM_BOOL_VALUE,DVM_UINT_VALUE)},
         @"computeBindings":@DVM_COMPUTE_BINDINGS,@"inlineBytes":@DVM_INLINE_BYTES,
         @"bufferBytes":@DVM_BUFFER_BYTES,@"textureBytes":@DVM_TEXTURE_BYTES,@"privateTextureBytes":@DVM_PRIVATE_TEXTURE_BYTES,@"textureUsageMask":@DVM_TEXTURE_USAGE_MASK,

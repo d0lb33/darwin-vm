@@ -126,7 +126,11 @@ Final imported bytes have SHA256
 A clamped linear-to-sRGB diagnostic preview shows a dark lock-screen clock,
 date and controls. RGB maximum is 1/256; alpha is one. The preview applies no
 exposure normalization and is **not a DCP screenshot or color oracle**.
-The acceleration acceptance test remains incomplete.
+Later exact transfer-tag analysis shows that this surface is sRGB encoded;
+the historical linear-to-sRGB preview must not be used as its color oracle.
+[Subsequent RGhA work](gpu-rgha-compositor-ios27.md) records actual native
+presentation/completion and final console verification. Full acceleration
+acceptance remains incomplete.
 
 ## Next bounded implementation
 
