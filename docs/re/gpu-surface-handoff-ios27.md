@@ -127,9 +127,33 @@ build and signed linked revision; all launch inputs/backing files are durable.
 Use disposable children, never boot the installed overlay writable.
 
 ```
-python3 tools/gpu/run_guest_load.py PACKAGE/control.json --tag UNIQUE --seconds 600 --driver-mmio --driver-present --driver-consumer --driver-runner --driver-wait-display --driver-worker PACKAGE/installed-build/driver_host --library-cache /Users/jdolbe1/dvm-artifacts/gpu-managed-pool-ios27/QuartzCore.metallib
+python3 tools/gpu/run_guest_load.py PACKAGE/control.json --tag UNIQUE --interactive --driver-mmio --driver-present --driver-consumer --driver-runner --driver-wait-display --driver-worker PACKAGE/installed-build/driver_host --library-cache /Users/jdolbe1/dvm-artifacts/gpu-managed-pool-ios27/QuartzCore.metallib
 python3 tools/gpu/runner_control.py /tmp/dvm/UNIQUE --bundle PACKAGE/guest-validated-linked/DVMProxy.bundle --mode data --development --test package --frames 16 --shared-surface --surface-handoff --worker PACKAGE/runtime-build/driver_host
 ```
+
+Interactive development uses `--interactive`: the session has no overall time
+limit and can remain ready between tests while results are inspected or a
+revision is built. `session-policy.json` records the mode and a null global
+deadline before launch. Automated regressions omit that flag and retain the
+600-second default; `run_shared_matrix.py` explicitly uses `--seconds 600`.
+
+Both runner modes retain independent safeguards: 300 seconds from launch to
+runner readiness, the existing post-release activation and 60-second no-RPC-or-
+guest-stage-progress watchdogs, and a 100-second host deadline from staging to
+test result (including the guest child's existing 90-second watchdog). Idle
+`runnerNext` polling is progress; elapsed time since the last completed test is
+not a failure. Individual MMIO requests retain their 15-second completion
+deadline. Failed shared-resource verification continues to prohibit further
+pool reuse. Session mode changes none of the GPU, native display completion,
+ownership or synchronization checks.
+
+When development finishes, use `runner_control.py TRIAL --stop` and wait for the
+runner to reap its owned VM. Ctrl-C also executes owned-VM cleanup, but records
+an interrupted trial rather than a successful acceptance run. Merely finishing
+a test or spending time analyzing it does not stop an interactive VM.
+`test_runner_deadlines.py` advances the host clock through 600 seconds and a
+day, and independently exercises stalled readiness and active-test deadlines;
+this is host policy evidence, not a day-long guest endurance measurement.
 
 Build another revision with `build_consumer_package.py --shared-surface
 --frames 3` and `sign_linked_revision.py --parent

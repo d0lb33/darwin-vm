@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bounded exact-System load trial with a continuously drained, private UART.
+"""Exact-System load trial with a continuously drained, private UART.
 
 Uses a fresh child of a hash-pinned installed parent. Never restores old RAM,
 publishes a GPU, changes guest registers/memory, or targets another VM.
@@ -29,13 +29,16 @@ from aux_ready import AuxReady
 from surface_peer import SurfacePeer
 from driver_peer import DriverPeer
 from driver_mmio_peer import MMIOPeer
+from runner_deadlines import RunnerDeadlines
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('manifest', type=Path)
     p.add_argument('--tag', required=True)
-    p.add_argument('--seconds', type=int, default=600)
+    p.add_argument('--seconds', type=int, default=600, help='automated trial lifetime (default: 600); ignored by --interactive')
+    p.add_argument('--interactive', action='store_true',
+        help='MMIO driver runner only: no session lifetime limit; use runner_control.py TRIAL --stop for cleanup')
     p.add_argument('--keep-paused', action='store_true')
     p.add_argument('--probe-observe-display',action='store_true',
         help='after a standalone probe completes, require native presentation and stable input with a fresh ACK')
@@ -72,6 +75,9 @@ def main():
     p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.interactive and (not a.driver_runner or not a.driver_mmio or a.driver_late_launch):
+        p.error('--interactive requires --driver-runner --driver-mmio without --driver-late-launch')
+    deadlines = RunnerDeadlines(session_seconds=None if a.interactive else a.seconds)
     if a.driver_runner and (not a.driver_consumer or not a.driver_worker or (a.driver_worker.parent/'test-runner.txt').read_text().strip()!='1'):
         p.error('runner requires a matching opt-in consumer supervisor build')
     if a.driver_consumer and (not a.driver_present or not a.driver_worker or (a.driver_worker.parent/'consumer-probe.txt').read_text().strip()!='1'):
@@ -158,7 +164,7 @@ def main():
     out.mkdir(exist_ok=False)
     if a.mmio_echo:
         with (out/'shared-ram.bin').open('xb') as shared:shared.truncate(16*1024*1024)
-    for name in ('run_guest_load.py','aux_probe.py','aux_namespace_dt.py','aux_ready.py'):
+    for name in ('run_guest_load.py','runner_deadlines.py','aux_probe.py','aux_namespace_dt.py','aux_ready.py'):
         shutil.copyfile(Path(__file__).with_name(name),out/name)
     aux_peer = AuxProbe(out, latency=a.aux_latency,post_boot=a.aux_post_boot,readiness_seconds=a.aux_readiness_seconds) if (a.aux_probe or a.aux_header_only) else None
     if a.surface_worker:
@@ -267,8 +273,15 @@ def main():
         driver_boot=driver_boot, driver_mmio=a.driver_mmio, driver_present=a.driver_present, mmio_echo=a.mmio_echo,
         driver_late_launch=a.driver_late_launch,
         aux_post_boot=a.aux_post_boot,
-        global_deadline_seconds=a.seconds,
+        session_mode='interactive' if a.interactive else 'automated',
+        global_deadline_seconds=deadlines.session_seconds,
+        runner_readiness_deadline_seconds=deadlines.readiness_seconds if a.driver_runner else None,
+        runner_test_deadline_seconds=deadlines.job_seconds if a.driver_runner else None,
         aux_poll_ms=a.aux_poll_ms, aux_peer_monotonic_origin=aux_peer.started if aux_peer else None)
+    atomic_json(out/'session-policy.json', dict(mode=report['session_mode'],
+        global_deadline_seconds=deadlines.session_seconds,
+        runner_readiness_deadline_seconds=report['runner_readiness_deadline_seconds'],
+        runner_test_deadline_seconds=report['runner_test_deadline_seconds']))
     try:
         with (out/'stderr.log').open('wb') as log:
             proc = subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL,
@@ -296,7 +309,9 @@ def main():
         probe_ready_acks=0
         present_recovery_baseline=None
         with (out/'wire.log').open('wb') as log:
-            while time.monotonic()-started < a.seconds and proc.poll() is None:
+            while not deadlines.session_expired(time.monotonic()-started) and proc.poll() is None:
+                if a.driver_runner:
+                    deadlines.check_runner(time.monotonic(), started, driver_ready_seen, aux_peer.current)
                 if a.driver_mmio:
                     for line in aux_peer.audit():
                         event=dict(seconds=round(time.monotonic()-started,3),line=line,source='shared-ram-audit')
