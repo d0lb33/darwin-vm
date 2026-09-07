@@ -120,6 +120,8 @@ static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMMetalRPC rpc){
 @property(nonatomic) MTLPixelFormat pixelFormat;
 @property(nonatomic) MTLTextureUsage usage;
 @property(nonatomic,strong) DVMBuffer *backingBuffer;
+@property(nonatomic,strong) DVMTexture *viewParent;
+@property(nonatomic) NSUInteger viewLevel;
 @property(nonatomic) NSUInteger backingOffset,backingRow;
 @property(nonatomic,strong) id surfaceObject;
 @property(nonatomic,strong) id<DVMMetalOwnedMapping> surfaceMapping;
@@ -185,6 +187,7 @@ static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
 #include "consumer_blit_guest.inc"
 #include "consumer_function_guest.inc"
 #include "consumer_compute_guest.inc"
+#include "consumer_texture_view_guest.inc"
 #include "imported_surface_guest.inc"
 @implementation DVMDevice
 - (BOOL)submissionInFlight {@synchronized(self){return self.pendingSubmissions!=0;}}
@@ -531,7 +534,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @end
 
 @implementation DVMTexture
-- (DVMResource *)purgeabilityRoot {return self.backingBuffer?:self;}
+- (MTLPurgeableState)setPurgeableState:(MTLPurgeableState)state {return self.viewParent?DVMTextureViewPurgeable(self,state):[super setPurgeableState:state];}
+- (DVMResource *)purgeabilityRoot {return self.viewParent?self.viewParent.purgeabilityRoot:(self.backingBuffer?:self);}
 - (void)prepareForPurgeability:(MTLPurgeableState)state {
     if(self.surfaceMapping&&state>MTLPurgeableStateNonVolatile)
         reject(@"pinned IOSurface volatility requires native surface/pin retirement");
@@ -549,9 +553,15 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (BOOL)isFramebufferOnly {return NO;}
 - (BOOL)isShareable {return NO;}
 - (BOOL)isSparse {return NO;}
-- (id<MTLTexture>)parentTexture {return nil;}
-- (id<MTLResource>)rootResource {return self.backingBuffer?:self;}
-- (NSUInteger)parentRelativeLevel {return 0;}
+- (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format {
+    return DVMNewTextureView(self,format,self.textureType,NSMakeRange(0,self.mipmapLevelCount),NSMakeRange(0,1));
+}
+- (id<MTLTexture>)newTextureViewWithPixelFormat:(MTLPixelFormat)format textureType:(MTLTextureType)type levels:(NSRange)levels slices:(NSRange)slices {
+    return DVMNewTextureView(self,format,type,levels,slices);
+}
+- (id<MTLTexture>)parentTexture {return self.viewParent;}
+- (id<MTLResource>)rootResource {return self.viewParent?self.viewParent.rootResource:(self.backingBuffer?:self);}
+- (NSUInteger)parentRelativeLevel {return self.viewLevel;}
 - (NSUInteger)parentRelativeSlice {return 0;}
 - (id<MTLBuffer>)buffer {return self.backingBuffer;}
 - (NSUInteger)bufferOffset {return self.backingOffset;}
@@ -586,6 +596,9 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     [self replaceRegion:r mipmapLevel:level slice:0 withBytes:p bytesPerRow:row bytesPerImage:row*r.size.height];
 }
 - (void)replaceRegion:(MTLRegion)r mipmapLevel:(NSUInteger)level slice:(NSUInteger)slice withBytes:(const void *)p bytesPerRow:(NSUInteger)row bytesPerImage:(NSUInteger)image {
+    // Shared 2D parents in this profile have only level zero. Keep their CPU
+    // shadow and pending writes at the parent so aliases never diverge.
+    if(self.viewParent){[self.viewParent replaceRegion:r mipmapLevel:level+self.viewLevel slice:slice withBytes:p bytesPerRow:row bytesPerImage:image];return;}
     // Native 1D transfers have no row/image stride. Normalize only our CPU
     // shadow layout; the wire continues to carry the complete tight image.
     if(self.textureType==MTLTextureType1D){row=r.size.width*DVMFormatBytes(self.pixelFormat);image=row;}
@@ -612,6 +625,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     self.completedShadow=nil;
 }
 - (NSData *)read {
+    if(self.viewParent)return [self.viewParent read];
     [self requireResident];
     uint64_t generation=self.purgeabilityRoot.storageGeneration;
     if(self.shadowGeneration!=generation){self.completedShadow=nil;self.shadowGeneration=generation;}
@@ -797,8 +811,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     NSMutableArray *uploads = [NSMutableArray array], *buffers = [NSMutableArray array],
                    *textures = [NSMutableArray array], *readbacks = [NSMutableArray array];
     BOOL render=!_commands.count||_commands[0][@"kind"]!=nil;
-    for(id o in [_resources copy])if([o isKindOfClass:DVMTexture.class]&&[(DVMTexture *)o backingBuffer])
-        [_resources addObject:[(DVMTexture *)o backingBuffer]];
+    for(NSUInteger i=0;i<_resources.count;i++)if([_resources[i] isKindOfClass:DVMTexture.class]){
+        DVMTexture *texture=_resources[i];
+        if(texture.viewParent&&![_resources containsObject:texture.viewParent])[_resources addObject:texture.viewParent];
+        if(texture.backingBuffer&&![_resources containsObject:texture.backingBuffer])[_resources addObject:texture.backingBuffer];
+    }
     for (id o in _resources)
         if ([o isKindOfClass:DVMBuffer.class] && ![buffers containsObject:o]) {
             DVMBuffer *b = o;
@@ -934,6 +951,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 @end
 @implementation DVMEncoder
+- (MTLDispatchType)dispatchType {return MTLDispatchTypeSerial;}
 - (id<MTLDevice>)device {
     return _command.device;
 }

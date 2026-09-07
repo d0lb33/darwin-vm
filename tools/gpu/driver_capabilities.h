@@ -1,7 +1,7 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 25u
+#define DVM_CONTRACT_VERSION 26u
 #define DVM_COMPUTE_THREADS 1024u
 #define DVM_COMPUTE_MEMORY 32768u
 #define DVM_COMPUTE_INVOCATIONS (16u*1024u*1024u)
@@ -130,7 +130,7 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-ordered-64-screen-compute-v25",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-texture-view-aliases-v26",
         @"computeDescriptorVersion":@1,@"orderedComputeRenderBlit":@YES,@"orderedCommandLimit":@DVM_ORDERED_COMMANDS,@"computeReflectionArrays":@NO,
         @"computeThreadsPerGroup":@DVM_COMPUTE_THREADS,@"computeThreadgroupBytes":@DVM_COMPUTE_MEMORY,@"computeInvocationsPerDispatch":@DVM_COMPUTE_INVOCATIONS,
         @"resourcePurgeabilityVersion":@1,@"resourcePurgeabilityStates":@[@1,@2,@3,@4],
@@ -139,7 +139,7 @@ static inline NSDictionary *DVMContractProfile(void) {
         @"blitEncoders":@YES,@"blitBufferAlignment":@4,@"blitIOSurfaceImport":@NO,@"blitTextureTypes":@[@2],
         @"privateColorTextureAdditionalUsages":@[@(DVM_TEXTURE_BLOCK_WRITES_ONLY|5u)],
         @"privateColorTextureUsageFormats":@[@70,@80,@115],@"colorAttachmentFormats":@[@10,@30,@70,@80,@115,@554],
-        @"private2DMipFormats":@[@10,@30,@70,@80,@115,@554],@"maximumMipLevels":@13,@"mipRenderAttachments":@YES,@"privateMipReadWrite":@"application-guaranteed-disjoint-subresources-native-hazard-tracking",@"mipGeneration":@YES,@"mipGenerationFormats":@[@10,@30,@70,@80,@115,@554],@"textureViews":@NO,
+        @"private2DMipFormats":@[@10,@30,@70,@80,@115,@554],@"maximumMipLevels":@13,@"mipRenderAttachments":@YES,@"privateMipReadWrite":@"application-guaranteed-disjoint-subresources-native-hazard-tracking",@"mipGeneration":@YES,@"mipGenerationFormats":@[@10,@30,@70,@80,@115,@554],@"textureViews":@NO,@"textureViewVersion":@1,@"textureViewTypes":@[@2],@"textureViewFormats":@"same-format",@"textureViewSlices":@[@0,@1],@"textureViewMipRanges":@YES,
         @"renderRequestBytes":@DVM_RENDER_REQUEST_BYTES,@"renderRequestChunkBytes":@DVM_RENDER_REQUEST_CHUNK,@"renderRequestTransactions":@1,
         @"framebufferRead":@"current-fragment-single-color-attachment-ordered-programmable-blending",
         @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureDirectReadBytes":@DVM_TEXTURE_DIRECT_READ_BYTES,@"textureUploadTransactions":@1,

@@ -48,6 +48,7 @@ static NSString *EncodeCompute(DVMHost *host,id<MTLCommandBuffer> cb,NSDictionar
     NSArray *required=pipeline.object[@"required"];
     if(![required[0] isEqual:@0]&&![required isEqual:threads])return @"compute required threadgroup shape";
     for(id array in @[tex?:NSNull.null,buf?:NSNull.null,bytes?:NSNull.null,samplers?:NSNull.null,scratch?:NSNull.null])if(![array isKindOfClass:NSArray.class]||[array count]>DVM_COMPUTE_BINDINGS)return @"compute binding array extent";
+    NSMutableSet *writableTextures=[NSMutableSet set];
     NSMutableDictionary *textures=[NSMutableDictionary dictionary],*buffers=[NSMutableDictionary dictionary],*inlineBytes=[NSMutableDictionary dictionary],*sampling=[NSMutableDictionary dictionary],*memory=[NSMutableDictionary dictionary];
     for(NSArray *binding in tex){
         if(!RenderNumbers(binding,2)||!RenderUInt(binding[0],DVM_COMPUTE_BINDINGS-1)||textures[binding[0]])return @"compute texture index";
@@ -83,12 +84,14 @@ static NSString *EncodeCompute(DVMHost *host,id<MTLCommandBuffer> cb,NSDictionar
         }else if(type==MTLArgumentTypeTexture){
             DVMEntry *e=textures[index];NSUInteger needed=access==MTLArgumentAccessReadOnly?1:access==MTLArgumentAccessWriteOnly?2:3;
             if(!e||[(id<MTLTexture>)e.object textureType]!=[need[5] unsignedIntegerValue]||([(id<MTLTexture>)e.object usage]&needed)!=needed)return @"compute reflected texture type/usage";
+            if(needed&2)[writableTextures addObject:index];
             if(e.sharedRender&&needed&2)[sharedTargets addObject:e.sharedRender];
         }else if(type==MTLArgumentTypeSampler){if(!sampling[index])return @"compute missing sampler";}
         else if(!memory[index]||[memory[index] unsignedIntegerValue]<size||[memory[index] unsignedIntegerValue]%alignment)return @"compute reflected threadgroup memory";
     }
     // Writable buffers aliased as linear textures require a tested cache barrier.
-    for(DVMEntry *e in textures.allValues)if(e.parent&&[written containsObject:@(e.parent.handle)])return @"compute writable buffer/texture alias";
+    for(DVMEntry *e in textures.allValues)if([ResourceRoot(e).kind isEqual:@"buffer"]&&[written containsObject:@(ResourceRoot(e).handle)])return @"compute writable buffer/texture alias";
+    for(NSNumber *a in writableTextures)for(NSNumber *b in textures)if(![a isEqual:b]&&TextureLevelsOverlap(textures[a],textures[b]))return @"compute overlapping read/write texture aliases";
     id<MTLComputeCommandEncoder> encoder=[cb computeCommandEncoder];[encoder setComputePipelineState:state];
     for(NSNumber *i in buffers){NSArray *b=buffers[i];[encoder setBuffer:((DVMEntry *)b[0]).object offset:[b[1] unsignedIntegerValue] atIndex:i.unsignedIntegerValue];}
     for(NSNumber *i in inlineBytes){NSData *d=inlineBytes[i];[encoder setBytes:d.bytes length:d.length atIndex:i.unsignedIntegerValue];}

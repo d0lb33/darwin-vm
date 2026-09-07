@@ -33,6 +33,8 @@ enum {
 @property(nonatomic) NSUInteger width, height, row;
 @property(nonatomic) MTLPixelFormat format;
 @property(nonatomic,strong) DVMEntry *parent;
+@property(nonatomic) BOOL textureView;
+@property(nonatomic) NSUInteger viewBaseLevel;
 @property(nonatomic,strong) DVMSharedRender *sharedRender;
 @property(nonatomic,strong) DVMImportedPages *importedPages;
 @property(nonatomic) uint32_t guestProcessBits;
@@ -44,6 +46,15 @@ enum {
 - (void)dealloc {_object=nil;_sharedRender=nil;}
 @end
 
+// View parents form a tree of owned handles; no guest pointer is followed.
+static DVMEntry *ResourceRoot(DVMEntry *entry){while(entry.parent)entry=entry.parent;return entry;}
+static DVMEntry *TextureRoot(DVMEntry *entry){while(entry.textureView)entry=entry.parent;return entry;}
+static NSUInteger TextureBaseLevel(DVMEntry *entry){NSUInteger level=0;while(entry.textureView){level+=entry.viewBaseLevel;entry=entry.parent;}return level;}
+static BOOL TextureLevelsOverlap(DVMEntry *a,DVMEntry *b){
+    if(TextureRoot(a)!=TextureRoot(b))return NO;
+    NSUInteger al=TextureBaseLevel(a),bl=TextureBaseLevel(b);
+    return al<bl+[(id<MTLTexture>)b.object mipmapLevelCount]&&bl<al+[(id<MTLTexture>)a.object mipmapLevelCount];
+}
 @interface DVMHost : NSObject
 @property(nonatomic, strong) id<MTLDevice> device;
 @property(nonatomic, strong) id<MTLCommandQueue> queue;
@@ -137,7 +148,7 @@ static DVMEntry *Entry(DVMHost *host, id raw, NSString *kind) {
     if (!Number(raw, &handle) || handle == 0)
         return nil;
     DVMEntry *entry = host.entries[@(handle)];
-    if(entry.purgeableState>MTLPurgeableStateNonVolatile||entry.parent.purgeableState>MTLPurgeableStateNonVolatile)return nil;
+    if(entry.purgeableState>MTLPurgeableStateNonVolatile||ResourceRoot(entry).purgeableState>MTLPurgeableStateNonVolatile)return nil;
     return entry && [entry.kind isEqualToString:kind] ? entry : nil;
 }
 static BOOL Add(DVMHost *host, NSString *kind, id object, DVMEntry **out) {
@@ -398,7 +409,7 @@ static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request)
     if(entry.sharedRender&&entry.sharedRender.state!=DVMSharedIdle)
         return HostError(seq,EBUSY,@"shared render release before retirement");
     for(DVMEntry *other in host.entries.allValues)if(other.parent==entry)
-        return HostError(seq,EBUSY,@"buffer retained by texture view");
+        return HostError(seq,EBUSY,@"parent retained by texture view");
     if([entry.kind isEqual:@"resident"]&&[(DVMResidentBlur *)entry.object displayPending])
         return HostError(seq,EBUSY,@"managed release before display retirement");
     if(entry.importedPages){
@@ -412,7 +423,7 @@ static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request)
             retiredID=mapping.resourceID;
         }
     }
-    host.textureBytes -= entry.textureBytes;
+    if(!entry.textureView)host.textureBytes -= entry.textureBytes;
     if([entry.kind isEqual:@"resident"])host.residentBytes=0;
     [host.entries removeObjectForKey:@(handle)];
     return @{@"seq" : @(seq), @"ok" : @YES,@"retiredSurface":@(retiredID)};
@@ -625,6 +636,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
         return HostError(seq, EINVAL, @"request lacks op");
     if([op hasPrefix:@"renderStage"])return RenderStage(host,seq,request);
     if(host.renderStage&&![op isEqual:@"stats"])return HostError(seq,EBUSY,@"incomplete render request transaction");
+    if([op isEqual:@"textureView"])return TextureView(host,seq,request);
     if([op isEqual:@"computePipeline"])return ComputePipeline(host,seq,request);
     if([op isEqual:@"writeTextureChunk"]||[op isEqual:@"abortTextureUpload"])return TextureChunk(host,seq,request);
     if([op isEqual:@"renderSubmit"]||[op isEqual:@"submit"]||[op isEqual:@"blurSubmit"])

@@ -19,7 +19,7 @@ static NSString *EncodeBlit(DVMHost *host,id<MTLCommandBuffer> cb,NSDictionary *
             NSUInteger sx=[op[3][0] unsignedIntegerValue],sy=[op[3][1] unsignedIntegerValue],w=[op[4][0] unsignedIntegerValue],h=[op[4][1] unsignedIntegerValue],dx=[op[7][0] unsignedIntegerValue],dy=[op[7][1] unsignedIntegerValue];
             NSUInteger sw=MAX((NSUInteger)1,src.width>>sl),sh=MAX((NSUInteger)1,src.height>>sl),dw=MAX((NSUInteger)1,dst.width>>dl),dh=MAX((NSUInteger)1,dst.height>>dl);
             if(!w||!h||sx>sw||w>sw-sx||sy>sh||h>sh-sy||dx>dw||w>dw-dx||dy>dh||h>dh-dy||
-               (s==d&&sl==dl&&sx<dx+w&&dx<sx+w&&sy<dy+h&&dy<sy+h)){failure=@"blit texture region bounds/overlap";break;}
+               (TextureRoot(s)==TextureRoot(d)&&TextureBaseLevel(s)+sl==TextureBaseLevel(d)+dl&&sx<dx+w&&dx<sx+w&&sy<dy+h&&dy<sy+h)){failure=@"blit texture region bounds/overlap";break;}
             [encoder copyFromTexture:src sourceSlice:0 sourceLevel:sl sourceOrigin:MTLOriginMake(sx,sy,0) sourceSize:MTLSizeMake(w,h,1)
                           toTexture:dst destinationSlice:0 destinationLevel:dl destinationOrigin:MTLOriginMake(dx,dy,0)];
         }else if([op[0] isEqual:@"mips"]&&op.count==2){
