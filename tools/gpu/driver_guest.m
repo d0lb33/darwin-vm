@@ -46,14 +46,19 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @property(nonatomic,strong) NSError *lastSubmissionError;
 @property(nonatomic,copy) DVMMetalMappingProvider mappingProvider;
 @property(nonatomic,strong) id<DVMMetalOwnedMapping> ownedMapping;
+@property(nonatomic,copy) DVMMetalSurfaceProvider surfaceProvider;
+@property(nonatomic,strong) NSDictionary *importContract;
+@property(nonatomic,strong) NSMutableArray *quarantinedImports;
+@property(nonatomic,strong) NSError *importFailure;
 - (NSDictionary *)contractCapabilities;
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err;
-- (void)retire:(NSNumber *)handle;
+- (void)retire:(NSNumber *)handle mapping:(id<DVMMetalImportedMapping>)mapping;
 @end
 @interface DVMObject : NSObject
 @property(nonatomic, strong) DVMDevice *owner;
 @property(nonatomic, strong) NSNumber *handle;
 @property(atomic, copy) NSString *label;
+@property(nonatomic,strong) id<DVMMetalImportedMapping> retirementMapping;
 @end
 @implementation DVMObject
 - (id<MTLDevice>)device {
@@ -61,7 +66,7 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 }
 - (void)dealloc {
     if (_handle)
-        [_owner retire:_handle];
+        [_owner retire:_handle mapping:_retirementMapping];
 }
 @end
 @interface DVMLibrary : DVMObject <MTLLibrary>
@@ -157,6 +162,7 @@ static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
 #include "consumer_render_guest.inc"
 #include "consumer_blit_guest.inc"
 #include "consumer_function_guest.inc"
+#include "imported_surface_guest.inc"
 @implementation DVMDevice
 - (BOOL)submissionInFlight {@synchronized(self){return self.pendingSubmissions!=0;}}
 - (NSDictionary *)consumerCompletion {
@@ -209,16 +215,15 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return (d.width*DVMFormatBytes(d.pixelFormat)+a-1)&~(a-1);
 }
 - (NSUInteger)minimumLinearTextureAlignmentForPixelFormat:(MTLPixelFormat)format {
-    @synchronized(self) {
-        if(!_linearAlignments)_linearAlignments=[NSMutableDictionary dictionary];
-        if(!_linearAlignments[@(format)]) {
-            NSError *e=nil;NSDictionary *r=[self call:@{@"op":@"linearLayout",@"format":@(format)} error:&e];
-            NSUInteger a=[r[@"alignment"] unsignedIntegerValue];
-            if(!r||!DVMFormatBytes(format)||[r[@"format"] unsignedIntegerValue]!=format||a<16||a>4096||(a&(a-1)))reject(e.description?:@"invalid linear layout contract");
-            _linearAlignments[@(format)]=@(a);
-        }
-        return [_linearAlignments[@(format)] unsignedIntegerValue];
-    }
+    NSNumber *cached=nil;@synchronized(self){cached=_linearAlignments[@(format)];}
+    if(cached)return cached.unsignedIntegerValue;
+    // A prior completion needs the owner monitor to retire its queue slot.
+    // Never hold that monitor while waiting for the serial transport.
+    NSError *e=nil;NSDictionary *r=[self call:@{@"op":@"linearLayout",@"format":@(format)} error:&e];
+    NSUInteger a=[r[@"alignment"] unsignedIntegerValue];
+    if(!r||!DVMFormatBytes(format)||DVM1DFormat(format)||[r[@"format"] unsignedIntegerValue]!=format||a<16||a>4096||(a&(a-1)))reject(e.description?:@"invalid linear layout contract");
+    @synchronized(self){if(!_linearAlignments)_linearAlignments=[NSMutableDictionary dictionary];_linearAlignments[@(format)]=@(a);}
+    return a;
 }
 - (NSUInteger)minimumTextureBufferAlignmentForPixelFormat:(MTLPixelFormat)format {
     (void)format;reject(@"texture-buffer views unsupported by forwarding profile");return 0;
@@ -229,7 +234,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     // sufficient for our existing linear-texture allocation contract.
     NSUInteger alignment=16;
     for(NSNumber *format in DVMContractProfile()[@"textureFormats"])
-        alignment=MAX(alignment,[self minimumLinearTextureAlignmentForPixelFormat:format.unsignedIntegerValue]);
+        if(!DVM1DFormat(format.unsignedIntegerValue))
+            alignment=MAX(alignment,[self minimumLinearTextureAlignmentForPixelFormat:format.unsignedIntegerValue]);
     return alignment;
 }
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err {
@@ -242,13 +248,21 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
         *err = failure ?: error(@"transport failed");
     return reply;
 }
-- (void)retire:(NSNumber *)handle {
+- (void)retire:(NSNumber *)handle mapping:(id<DVMMetalImportedMapping>)mapping {
     // Queued retirement follows earlier submissions. Pending command buffers
     // retain their resources, so deallocation cannot overtake encoded use.
     dispatch_async(_serial, ^{
         NSError *e = nil;
-        self.transport(@{@"op" : @"release", @"handle" : handle}, &e);
-        if (e)
+        NSDictionary *reply=self.transport(@{@"op" : @"release", @"handle" : handle}, &e);
+        if(mapping&&(!reply||!reply[@"retiredSurface"]||
+            ([reply[@"retiredSurface"] unsignedLongLongValue]&&
+             ([reply[@"retiredSurface"] unsignedLongLongValue]!=mapping.resourceID||![mapping retire])))){
+            if(!self.quarantinedImports)self.quarantinedImports=[NSMutableArray array];
+            [self.quarantinedImports addObject:mapping];
+            self.lastSubmissionError=e?:error(@"import retirement acknowledgement failed; pages quarantined");
+            self.importFailure=self.lastSubmissionError;
+        }
+        if (!reply||e)
             fprintf(stderr, "GPU_LOAD_DRIVER_RETIRE_ERROR %s\n", e.description.UTF8String);
     });
 }
@@ -363,6 +377,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 #ifdef DVM_SURFACE_PIN_PROBE
     DVMProbeSurfacePin(s);
 #endif
+    if(self.surfaceProvider)return DVMImportSurface(self,d,s,plane);
     if(!s||!d||plane||!self.mappingProvider||d.textureType!=MTLTextureType2D||d.width!=DVM_PRESENT_WIDTH||
        d.height!=DVM_PRESENT_HEIGHT||d.depth!=1||d.arrayLength!=1||d.mipmapLevelCount!=1||d.sampleCount!=1||
        d.pixelFormat!=MTLPixelFormatBGRA8Unorm||d.usage!=(MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead)||
@@ -666,6 +681,13 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     [self encoding];if(!handler)reject(@"nil scheduled handler");[_scheduledHandlers addObject:[handler copy]];
 }
 - (void)waitUntilScheduled {[self waitUntilCompleted];}
+- (BOOL)commitAndWaitUntilSubmitted {
+    // Exact Metal 0x1a54fcb64 commits, then synchronously drains the queue's
+    // submission executor. Our wire reply currently includes GPU completion,
+    // so this conservative boundary waits longer, never acknowledges early.
+    [self commit];[self waitUntilCompleted];
+    return self.status==MTLCommandBufferStatusCompleted&&!self.error;
+}
 - (id<MTLComputeCommandEncoder>)computeCommandEncoder {
     [self encoding];
     if (_openEncoders)
@@ -690,6 +712,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     // Commit order and dispatch order must agree, including concurrent callers.
     @synchronized(_commandQueue.owner) {
     @synchronized(self) {
+        if(_commandQueue.owner.importFailure)reject(@"import ownership failed; device reuse quarantined");
         [self encoding];
         if (_openEncoders)
             reject(@"unclosed command buffer");
@@ -970,6 +993,10 @@ id<MTLDevice> DVMCreateBinaryMetalDevice(DVMMetalRPC rpc) {
 id<MTLDevice> DVMCreateSharedMetalDevice(DVMMetalRPC rpc,DVMMetalMappingProvider provider) {
     if(!provider)return nil;
     DVMDevice *d=(id)DVMCreateBinaryMetalDevice(rpc);d.mappingProvider=provider;return d;
+}
+void DVMEnableSurfaceImports(id<MTLDevice> device,DVMMetalSurfaceProvider provider){
+    if(![(id)device isKindOfClass:DVMDevice.class]||!provider)reject(@"import provider/device");
+    DVMDevice *d=(id)device;d.surfaceProvider=provider;
 }
 id<DVMMetalOwnedMapping> DVMGetOwnedMetalMapping(id<MTLDevice> device,NSError **outError) {
     if(outError)*outError=nil;

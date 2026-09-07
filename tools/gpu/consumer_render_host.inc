@@ -92,7 +92,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     for(NSDictionary *u in uploads){
         if(![u isKindOfClass:NSDictionary.class])return HostError(seq,EINVAL,@"render upload shape");
         BOOL buffer=u[@"buffer"]!=nil;DVMEntry *e=Entry(host,u[buffer?@"buffer":@"texture"],buffer?@"buffer":@"texture");NSData *data=DVMBPayload(u[@"data"]);
-        if(!e||e.sharedRender||(!buffer&&[(id<MTLTexture>)e.object storageMode]==MTLStorageModePrivate)||!data||data.length!=e.textureBytes||(buffer&&u[@"texture"])||(!buffer&&![u[@"row"] isEqual:@(e.row)])||[seen containsObject:@(e.handle)])return HostError(seq,EINVAL,@"render upload extent/ownership");
+        if(!e||e.sharedRender||e.importedPages||(!buffer&&[(id<MTLTexture>)e.object storageMode]==MTLStorageModePrivate)||!data||data.length!=e.textureBytes||(buffer&&u[@"texture"])||(!buffer&&![u[@"row"] isEqual:@(e.row)])||[seen containsObject:@(e.handle)])return HostError(seq,EINVAL,@"render upload extent/ownership");
         [seen addObject:@(e.handle)];[transfers addObject:@[e,data]];
     }
     [seen removeAllObjects];
@@ -121,6 +121,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
         if(![pass isKindOfClass:NSDictionary.class]||![pass[@"kind"] isEqual:@"render"])return HostError(seq,EINVAL,@"mixed render batch");
         renderPasses++;
         DVMEntry *target=Entry(host,pass[@"target"],@"texture");NSArray *clear=pass[@"clear"],*ops=pass[@"operations"];
+        if(target.importedPages.failed)return HostError(seq,EBUSY,@"imported target quarantined");
         if(target.sharedRender){if(target.sharedRender.state!=DVMSharedAcquired)return HostError(seq,EBUSY,@"shared render target is not acquired");[sharedTargets addObject:target.sharedRender];}
         if(!target||[(id<MTLTexture>)target.object textureType]!=MTLTextureType2D||!([(id<MTLTexture>)target.object usage]&MTLTextureUsageRenderTarget)||!RenderUInt(pass[@"load"],2)||!RenderUInt(pass[@"store"],1)||!RenderNumbers(clear,4)||![ops isKindOfClass:NSArray.class]||ops.count>256)return HostError(seq,EINVAL,@"render pass descriptor");
         uint64_t level;
@@ -169,7 +170,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
             } else if(([name isEqual:@"vertexBytes"]||[name isEqual:@"fragmentBytes"])&&op.count==3&&RenderUInt(op[2],DVM_RENDER_BUFFERS-1)){
                 NSData *data=DVMBPayload(op[1]);if(!data.length||data.length>DVM_INLINE_BYTES){failure=@"render inline bounds";break;}if([name isEqual:@"vertexBytes"]){[encoder setVertexBytes:data.bytes length:data.length atIndex:[op[2] unsignedIntegerValue]];vertexBuffers[op[2]]=@[@(data.length)];}else {[encoder setFragmentBytes:data.bytes length:data.length atIndex:[op[2] unsignedIntegerValue]];fragmentBuffers[op[2]]=@[@(data.length)];}
             } else if(([name isEqual:@"fragmentTexture"]||[name isEqual:@"fragmentSampler"])&&op.count==3&&RenderUInt(op[2],[name isEqual:@"fragmentTexture"]?DVM_FRAGMENT_TEXTURES-1:DVM_FRAGMENT_SAMPLERS-1)){
-                BOOL texture=[name isEqual:@"fragmentTexture"];DVMEntry *e=Entry(host,op[1],texture?@"texture":@"sampler");if((!e&&![op[1] isEqual:@0])||(texture&&e&&(!([(id<MTLTexture>)e.object usage]&MTLTextureUsageShaderRead)||(e==target&&!disjointMipCandidate)||(e.sharedRender&&e.sharedRender.state!=DVMSharedAcquired)))){failure=@"fragment resource ownership/usage";break;}if(texture){[encoder setFragmentTexture:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentTextures[op[2]]=e;}else {[encoder setFragmentSamplerState:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentSamplers[op[2]]=e;}
+                BOOL texture=[name isEqual:@"fragmentTexture"];DVMEntry *e=Entry(host,op[1],texture?@"texture":@"sampler");if((!e&&![op[1] isEqual:@0])||(texture&&e&&(!([(id<MTLTexture>)e.object usage]&MTLTextureUsageShaderRead)||(e==target&&!disjointMipCandidate)||(e.importedPages&&(e.importedPages.failed||(e!=target&&e.importedPages==target.importedPages)))||(e.sharedRender&&e.sharedRender.state!=DVMSharedAcquired)))){failure=@"fragment resource ownership/usage";break;}if(texture){[encoder setFragmentTexture:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentTextures[op[2]]=e;}else {[encoder setFragmentSamplerState:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentSamplers[op[2]]=e;}
             } else if([name isEqual:@"draw"]&&op.count==5&&RenderUInt(op[1],4)&&RenderUInt(op[2],4096)&&RenderUInt(op[3],4096)&&RenderUInt(op[4],64)&&pipeline){
                 NSUInteger start=[op[2] unsignedIntegerValue],count=[op[3] unsignedIntegerValue],instances=[op[4] unsignedIntegerValue];if(!count||!instances||start+count>4096){failure=@"draw extent";break;}
                 for(NSArray *layout in pipeline.object[@"layouts"]){NSUInteger elements=[layout[2] unsignedIntegerValue]==2?instances:[layout[2] unsignedIntegerValue]==0?1:start+count;NSArray *bound=vertexBuffers[layout[0]];if(!bound||elements*[layout[1] unsignedIntegerValue]>[bound[0] unsignedIntegerValue]){failure=@"vertex footprint exceeds binding";break;}}
@@ -218,7 +219,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     if(preflight)return @{@"ok":@YES,@"serialIndices":@(serialIndices),@"writtenBuffers":[[written allObjects] sortedArrayUsingSelector:@selector(compare:)]};
     for(NSArray *transfer in transfers){DVMEntry *e=transfer[0];NSData *data=transfer[1];if([e.kind isEqual:@"buffer"])memcpy([(id<MTLBuffer>)e.object contents],data.bytes,data.length);else ReplaceTextureBytes(e.object,data.bytes,e.row);}
     [cb commit];[cb waitUntilCompleted];host.submissions++;
-    if(cb.status!=MTLCommandBufferStatusCompleted){for(DVMSharedRender *shared in sharedTargets)shared.state=DVMSharedFailed;return NSErrorReply(seq,cb.error,@"render GPU completion");}
+    if(cb.status!=MTLCommandBufferStatusCompleted){for(DVMSharedRender *shared in sharedTargets)shared.state=DVMSharedFailed;for(DVMImportedPages *m in host.imports.allValues)m.failed=YES;return NSErrorReply(seq,cb.error,@"render GPU completion");}
 #ifdef DVM_RENDER_DIAGNOSTIC
     DVMDebugSave(debugCaptures);
 #endif

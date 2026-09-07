@@ -8,6 +8,7 @@
 #include "blur_wire.h"
 #include "present_host.h"
 #include "shared_render_host.h"
+#include "imported_pages_host.h"
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -33,6 +34,7 @@ enum {
 @property(nonatomic) MTLPixelFormat format;
 @property(nonatomic,strong) DVMEntry *parent;
 @property(nonatomic,strong) DVMSharedRender *sharedRender;
+@property(nonatomic,strong) DVMImportedPages *importedPages;
 @property(nonatomic) uint32_t guestProcessBits;
 @property(nonatomic,strong) NSMutableData *textureUpload;
 @property(nonatomic) uint64_t textureUploadToken;
@@ -48,6 +50,8 @@ enum {
 @property(nonatomic) uint64_t nextHandle, lastSeq, creations, submissions;
 @property(nonatomic) NSUInteger renderPasses,renderDraws,blitPasses;
 @property(nonatomic) NSUInteger textureBytes,residentBytes;
+@property(nonatomic,strong) NSMutableDictionary<NSNumber *,DVMImportedPages *> *imports;
+@property(nonatomic) NSUInteger importedBytes;
 @property(nonatomic,strong) NSMutableData *renderStage;
 @property(nonatomic,copy) NSString *renderStageSHA;
 @property(nonatomic) uint64_t renderStageToken,renderStageLength;
@@ -316,7 +320,7 @@ static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) 
         memcpy([(id<MTLBuffer>)b.object contents], data.bytes, data.length);
         return @{@"seq" : @(seq), @"ok" : @YES};
     }
-    if (!entry || entry.sharedRender || entry.textureUpload || [(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
+    if (!entry || entry.sharedRender || entry.importedPages || entry.textureUpload || [(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
         data.length != row * entry.height * [(id<MTLTexture>)entry.object depth])
         return HostError(seq, EINVAL, @"upload must contain one complete texture");
     ReplaceTextureBytes(entry.object,data.bytes,row);
@@ -333,7 +337,7 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
     DVMEntry *entry = Entry(host, request[@"texture"], @"texture");
     if (!entry)
         return HostError(seq, ENOENT, @"unknown texture handle");
-    if(entry.sharedRender)return HostError(seq,ENOTSUP,@"shared render pixels use owned mapping, not readback RPC");
+    if(entry.sharedRender||entry.importedPages)return HostError(seq,ENOTSUP,@"shared render pixels use owned mapping, not readback RPC");
     if(entry.textureUpload)return HostError(seq,EBUSY,@"texture upload not committed");
     if([(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate)return HostError(seq,ENOTSUP,@"private texture has no CPU read access");
     uint64_t offset=0,length=entry.textureBytes;
@@ -356,7 +360,7 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
 }
 static NSDictionary *TextureChunk(DVMHost *host,uint64_t seq,NSDictionary *r){
     DVMEntry *e=Entry(host,r[@"texture"],@"texture");uint64_t token,offset;
-    if(!e||e.sharedRender||e.parent||[(id<MTLTexture>)e.object storageMode]==MTLStorageModePrivate||!Number(r[@"token"],&token))
+    if(!e||e.sharedRender||e.importedPages||e.parent||[(id<MTLTexture>)e.object storageMode]==MTLStorageModePrivate||!Number(r[@"token"],&token))
         return HostError(seq,EINVAL,@"texture upload ownership/storage/token");
     if([r[@"op"] isEqual:@"abortTextureUpload"]){
         if(!e.textureUpload||token!=e.textureUploadToken)return HostError(seq,EINVAL,@"texture upload abort token");
@@ -382,7 +386,7 @@ static NSDictionary *TextureChunk(DVMHost *host,uint64_t seq,NSDictionary *r){
     return @{@"seq":@(seq),@"ok":@YES,@"token":@(e.textureUploadToken),@"accepted":@(offset+data.length),@"complete":@(complete)};
 }
 static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request) {
-    uint64_t handle;
+    uint64_t handle,retiredID=0;
     if (!Number(request[@"handle"], &handle) || !host.entries[@(handle)])
         return HostError(seq, ENOENT, @"unknown handle");
     DVMEntry *entry = host.entries[@(handle)];
@@ -392,10 +396,21 @@ static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request)
         return HostError(seq,EBUSY,@"buffer retained by texture view");
     if([entry.kind isEqual:@"resident"]&&[(DVMResidentBlur *)entry.object displayPending])
         return HostError(seq,EBUSY,@"managed release before display retirement");
+    if(entry.importedPages){
+        DVMImportedPages *mapping=entry.importedPages;
+        if(mapping.failed)return HostError(seq,EBUSY,@"failed imported allocation is quarantined");
+        entry.object=nil;entry.importedPages=nil;
+        BOOL last=YES;for(DVMEntry *other in host.entries.allValues)if(other.importedPages==mapping){last=NO;break;}
+        if(last){
+            if(![mapping retire]){mapping.failed=YES;entry.importedPages=mapping;return HostError(seq,EIO,@"import aliases/retirement acknowledgment failed; quarantine");}
+            host.importedBytes-=mapping.span;[host.imports removeObjectForKey:@(mapping.resourceID)];
+            retiredID=mapping.resourceID;
+        }
+    }
     host.textureBytes -= entry.textureBytes;
     if([entry.kind isEqual:@"resident"])host.residentBytes=0;
     [host.entries removeObjectForKey:@(handle)];
-    return @{@"seq" : @(seq), @"ok" : @YES};
+    return @{@"seq" : @(seq), @"ok" : @YES,@"retiredSurface":@(retiredID)};
 }
 static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
     NSUInteger libraries = 0, pipelines = 0, textures = 0, buffers = 0;
@@ -418,9 +433,10 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
             @"textures" : @(textures),
             @"buffers" : @(buffers),
             @"objects" : @(host.entries.count),
-            @"resourceBytes" : @(host.textureBytes+host.residentBytes),
+            @"resourceBytes" : @(host.textureBytes+host.residentBytes+host.importedBytes),
             @"residentWorkloads":@(host.residentBytes?1:0),
-            @"stagedRenderBytes":@(host.renderStage.length),@"stagedRenderTransactions":@(host.renderStage?1:0)
+            @"stagedRenderBytes":@(host.renderStage.length),@"stagedRenderTransactions":@(host.renderStage?1:0),
+            @"importedBytes":@(host.importedBytes),@"importedAllocations":@(host.imports.count)
         },
         @"creations" : @(host.creations),
         @"submissions" : @(host.submissions),@"renderPasses":@(host.renderPasses),@"renderDraws":@(host.renderDraws),@"blitPasses":@(host.blitPasses)
@@ -496,7 +512,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         if (!buffers[@2] || (!average && (!buffers[@1] || buffers[@1] == buffers[@2])))
             return HostError(seq, EINVAL, @"missing or aliased buffer");
         DVMEntry *texture = average ? Entry(host, ts[0], @"texture") : nil;
-        if (average && (!texture || texture.width != 64 || texture.height != 48 || [(id<MTLTexture>)texture.object textureType]!=MTLTextureType2D ||
+        if (average && (!texture || texture.importedPages || texture.width != 64 || texture.height != 48 || [(id<MTLTexture>)texture.object textureType]!=MTLTextureType2D ||
                         texture.format != MTLPixelFormatRGBA16Float ||
                         !([(id<MTLTexture>)texture.object usage] & MTLTextureUsageShaderRead)))
             return HostError(seq, EINVAL, @"luma requires 64x48 RGBA16Float input");
@@ -525,7 +541,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         id encoded = u[@"data"];
         NSData *data = DVMBPayload(encoded);
         uint64_t row = 0;
-        if (!entry || entry.sharedRender || (!buffer&&[(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate) || (buffer && u[@"texture"]) || !data || data.length != entry.textureBytes ||
+        if (!entry || entry.sharedRender || entry.importedPages || (!buffer&&[(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate) || (buffer && u[@"texture"]) || !data || data.length != entry.textureBytes ||
             [written containsObject:@(entry.handle)] ||
             (!buffer && (!Number(u[@"row"], &row) || row != entry.row)))
             return HostError(seq, EINVAL, @"invalid or duplicate batch upload");
@@ -594,6 +610,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
 #include "consumer_render_host.inc"
 #include "consumer_function_host.inc"
 #include "shared_render_host.inc"
+#include "imported_surface_host.inc"
 
 static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *request);
 #include "render_staging_host.inc"
@@ -646,6 +663,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     }
     if([op hasPrefix:@"resident"])return ResidentRequest(host,seq,request);
     if([op hasPrefix:@"sharedRender"])return SharedRenderRequest(host,seq,request);
+    if([op isEqual:@"surfaceImport"]||[op isEqual:@"surfaceImportCaps"])return ImportedSurfaceRequest(host,seq,request);
     if([op isEqual:@"depthState"])return DepthState(host,seq,request);
     if([op isEqual:@"linearLayout"])return LinearLayout(host,seq,request);
     if([op isEqual:@"linearTexture"])return LinearTexture(host,seq,request);

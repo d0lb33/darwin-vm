@@ -29,3 +29,13 @@ id<DVMMetalOwnedMapping> DVMGetOwnedMetalMapping(id<MTLDevice> device,NSError **
 NSDictionary *DVMSharedTextureAcquire(id<MTLTexture> texture,uint64_t epoch);
 NSDictionary *DVMSharedTextureSeal(id<MTLTexture> texture,uint64_t epoch);
 NSDictionary *DVMSharedTextureRetire(id<MTLTexture> texture,uint64_t epoch,uint32_t swap,int waitResult);
+
+// Separate opt-in contract for caller-owned IOSurfaces. Retire is called only
+// after the host has destroyed its final native alias and acknowledged it.
+@protocol DVMMetalImportedMapping <DVMMetalOwnedMapping>
+- (uint64_t)resourceID;
+- (BOOL)retired;
+- (BOOL)retire;
+@end
+typedef id<DVMMetalImportedMapping> (^DVMMetalSurfaceProvider)(IOSurfaceRef,NSError **);
+void DVMEnableSurfaceImports(id<MTLDevice> device,DVMMetalSurfaceProvider provider);

@@ -21,6 +21,7 @@ def main():
     p.add_argument('base',type=Path);p.add_argument('backboardd',type=Path);p.add_argument('out',type=Path)
     p.add_argument('--runtime-probe',action='store_true',help='bounded arm64e runtime loading probe inside backboardd; does not replace/unload the boot driver')
     p.add_argument('--surface-pin-probe',action='store_true',help='audit the first actual compositor IOSurface and exercise the opt-in kernel pin/complete probe')
+    p.add_argument('--surface-import',action='store_true',help='opt-in retained compositor page imports; requires matching registry kernel and QEMU')
     a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
     source=Path(__file__).resolve().parent;repo=source.parents[1];start=time.monotonic()
     shutil.copytree(a.base/'stubs',a.out/'stubs')
@@ -33,6 +34,7 @@ def main():
            '-O1','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-Wno-protocol','-Wno-objc-protocol-property-synthesis','-fno-objc-msgsend-selector-stubs']
     if a.runtime_probe:flags.append('-DDVM_BOOT_RUNTIME_PROBE')
     if a.surface_pin_probe:flags.append('-DDVM_SURFACE_PIN_PROBE')
+    if a.surface_import:flags.append('-DDVM_SURFACE_IMPORT')
     commands=[]
     def run(cmd,**kw):commands.append(cmd);return subprocess.run(cmd,check=True,**kw)
     obj=a.out/'system_bootstrap.o'
@@ -41,7 +43,8 @@ def main():
     additions={
       'usr/lib/libobjc.tbd':[s for s in symbols if s.startswith('_objc_') or s.startswith('_class_') or s.startswith('_sel_')],
       'usr/lib/libSystem.tbd':['_getprogname'],
-      'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL'],
+      'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL','_OBJC_CLASS_$_NSMapTable'],
+      'System/Library/Frameworks/IOSurface.framework/IOSurface.tbd':[s for s in symbols if s.startswith('_IOSurface')],
     }
     for rel,names in additions.items():
         f=a.out/'stubs'/rel;t=f.read_text();names=[s for s in names if '"'+s+'"' not in t]
@@ -101,7 +104,7 @@ def main():
     for f in source.iterdir():
         if f.suffix in ('.m','.h','.inc','.py'):shutil.copyfile(f,a.out/f.name)
     (a.out/'build.json').write_text(json.dumps(dict(commands=commands,seconds=time.monotonic()-start,
-        runtime_probe=a.runtime_probe,surface_pin_probe=a.surface_pin_probe,
+        runtime_probe=a.runtime_probe,surface_pin_probe=a.surface_pin_probe,surface_import=a.surface_import,
         before_sha256=sha(before),after_sha256=sha(target),plugin_sha256=sha(binary),
         dependency=install,header_edit=dict(offset=off,bytes=length),
         scope='backboardd boot dependency and dedicated transport entitlement; no kernel, guest cache, SPTM or TXM edits'),indent=2)+'\n')

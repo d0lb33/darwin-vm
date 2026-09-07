@@ -1,5 +1,8 @@
 #import "driver_api.h"
 #include "driver_capabilities.h"
+@protocol DVMLinearAggregate
+- (NSUInteger)deviceLinearReadOnlyTextureAlignmentBytes;
+@end
 static void check(BOOL value,const char *what){if(!value){fprintf(stderr,"FAIL %s\n",what);exit(1);}}
 int main(void){@autoreleasepool{
     __block unsigned requests=0;
@@ -41,5 +44,13 @@ int main(void){@autoreleasepool{
         BOOL refused=NO;@try{[(id<DVMCapabilityQueries>)bad maxFragmentTextures];}@catch(NSException *e){refused=[e.reason containsString:@"capability contract mismatch"];}
         check(refused,"mismatched host contract must fail closed");
     }
-    fprintf(stderr,"DVM_CAPABILITIES_PASS batch=1 cached=1 bounds=1 mismatch_rejected=1 bounded_render_stages=1\n");
+    NSMutableSet *formats=[NSMutableSet set];
+    id<MTLDevice> linear=DVMCreateMetalDevice(^NSDictionary *(NSDictionary *r,NSError **e){
+        (void)e;check([r[@"op"] isEqual:@"linearLayout"]&&!DVM1DFormat([r[@"format"] unsignedIntegerValue]),"aggregate must exclude sampled-only 1D LUTs");
+        check(![formats containsObject:r[@"format"]],"linear alignment cached");[formats addObject:r[@"format"]];
+        return @{@"format":r[@"format"],@"alignment":[r[@"format"] isEqual:@115]?@128:@16};
+    });
+    check([(id<DVMLinearAggregate>)linear deviceLinearReadOnlyTextureAlignmentBytes]==128&&
+          [(id<DVMLinearAggregate>)linear deviceLinearReadOnlyTextureAlignmentBytes]==128&&formats.count==7,"aggregate derives maximum of supported linear layouts");
+    fprintf(stderr,"DVM_CAPABILITIES_PASS batch=1 cached=1 bounds=1 mismatch_rejected=1 bounded_render_stages=1 linear_aggregate=1\n");
 }}

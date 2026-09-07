@@ -27,7 +27,7 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Command encoding | Direct indexed/nonindexed draws, 31 buffer slots, 16 fragment textures/samplers; bounded FIFO of 32 command buffers on one execution queue; atomic staging of render requests up to 2 MiB over 64 KiB MMIO | Exact changing scenes and 64×64 group opacity with private intermediate targets; host queued GPU dependency and cancellation tests | Multiple execution queues, indirect commands, fragment buffer writes and general barriers remain unsupported |
 | Compute | Existing luma/blur and bounded compute submission | Exact compute/copy controls and managed blur | Pipeline allowlist remains a development restriction; replace with general validated reflection before claiming broad compute |
 | Resources | Dirty buffer spans, partial 2D/3D transfers, bounded color formats and sampled 1D R16Uint/R16Float/R32Float/RG32Float LUTs; private color mip targets; ordered 2D texture copies/mips and buffer fill/copy/writeback | Exact HDR LUT allocations and earlier glass mip allocations; 40 native-equal host LUT frames, 48 blit frames/96 outputs; private CPU-access rejection | General IOSurface import/planes, heaps, memoryless and texture views; imported/buffer-backed texture blits; axes 4096, private images 16 MiB counting mips, copied images 1 MiB |
-| Presentation | Owned shared-page IOSurface render target with native retirement and fresh-process handoff | Actual UIKit at 1179×2556: first DCP byte comparison and 1,024 changing frames with final pixels, per-frame native completion, retirement and software lock-screen recovery | General surface registration, UIKit window interaction and system-compositor adoption unknown |
+| Presentation | Owned shared-page IOSurface render target with native retirement and fresh-process handoff | Actual UIKit at 1179×2556: first DCP byte comparison and 1,024 changing frames with final pixels, per-frame native completion, retirement and software lock-screen recovery | General registry now imports actual compositor pages; system DCP presentation, correct HDR/color output and UIKit window interaction remain unverified |
 | UIKit effects | Actual UIVisualEffectView material/glass probes; window attachment respecting UIKit invalidation; original guest QuartzCore shaders | Exact guest translucent glass 10 passes/21 draws; removed harness-created black covering draws; paired prepared native/forwarded host scene comparison added in 10ed430 | Independent exact-guest effect oracle and displayed/system-wide glass remain unproven. Historical natural-event-loop comparison failed; host input matching is separate from guest evidence. See [invalidation evidence](gpu-uikit-invalidation-ios27.md) |
 | Synchronization | Serial RPC, bounded FIFO, completion callbacks, strong resource retention; failed shared jobs prohibit reuse | Exact consumer completion and native retirement; host predecessor GPU-write visibility, disjoint mip read/write and dependent failure cancellation | Same-allocation mip sampling requires application-guaranteed disjoint subresources; dynamic source LOD is not validated. Multiple execution queues, events/fences, reset and timestamp clock translation remain unsupported |
 | Checkpoint | Active GPU migration blocked | Copied-pixel historical checkpoints only | Live host resources and executing commands cannot be checkpointed |
@@ -50,7 +50,13 @@ measured a 9,472-byte row and 24,211,456-byte allocation, exposing the probe's
 incorrect whole-page size requirement. The corrected PIN_GUEST2 pins/validates/
 completes its 1,478 backing pages three times. A separate native host test
 renders the measured layout through scattered file aliases and verifies all
-final half-float pixels. Neither connects guest pages to the host GPU yet.
+final half-float pixels. The subsequent GUEST21 retained registry connects those actual pages to a host
+Metal texture, with no copy. After the alignment and synchronous-submission
+fixes, GUEST23 executes 21 actual compositor passes and 58 draws, including its
+fullscreen IOSurface. It then raises on purgeable allocation policy. Final raw
+pixels are captured but color/brightness correctness, DCP presentation and
+sustained system pacing remain unverified. See the separate
+[retained-import contract and evidence](gpu-compositor-import-ios27.md).
 See [system boot evidence](gpu-system-boot-ios27.md).
 
 Backboardd dynamic staging/restart is deferred after its single staging-path

@@ -1,5 +1,6 @@
 // Exact-24A5430a, opt-in probe of caller-owned IOSurface backing. No page is
-// exported to the host: prepare/physical validation/complete is one call.
+// exported by the original probe: prepare/validation/complete is one call.
+// DVM_SURFACE_REGISTRY separately enables retained registration and retirement.
 // The builder guards the modern IOUserClient2022 dispatcher and every ABI.
 #include <IOKit/IOUserClient.h>
 #include <IOKit/IOMemoryDescriptor.h>
@@ -14,6 +15,9 @@ static_assert(offsetof(IOExternalMethodArguments,scalarInputCount)==0x28);
 static_assert(offsetof(IOExternalMethodArguments,scalarOutput)==0x48);
 static_assert(offsetof(IOExternalMethodArguments,scalarOutputCount)==0x50);
 static_assert(sizeof(IOAddressRange)==16);
+#ifdef DVM_SURFACE_REGISTRY
+#include "surface_registry_kernel.inc"
+#endif
 
 extern "C" IOReturn dvm_surface_pin(IOUserClient *client,uint32_t selector,IOExternalMethodArguments *a) {
     auto *provider=client->getProvider();
@@ -23,7 +27,11 @@ extern "C" IOReturn dvm_surface_pin(IOUserClient *client,uint32_t selector,IOExt
     if(name)for(unsigned i=0;i<sizeof(expected);i++)if(name[i]!=expected[i]){ours=false;break;}
     if(!ours)return dvm_original_dispatch(client,selector,a);
     // Never expose the stock diagnostic methods through our transport nub.
-    if(selector!=0x44565300)return kIOReturnUnsupported;
+    if(selector!=0x44565300
+#ifdef DVM_SURFACE_REGISTRY
+       &&selector!=0x44565301&&selector!=0x44565302
+#endif
+       )return kIOReturnUnsupported;
     bool entitlement=false;
     void *proc=dvm_current_proc();
     if(!proc||dvm_entitled(proc,"org.darwin-vm.transport",&entitlement)||!entitlement)return kIOReturnNotPrivileged;
@@ -31,6 +39,9 @@ extern "C" IOReturn dvm_surface_pin(IOUserClient *client,uint32_t selector,IOExt
        !a->scalarInput||!a->scalarOutput||a->structureInputSize||a->structureOutputSize||
        a->structureInputDescriptor||a->structureOutputDescriptor)return kIOReturnBadArgument;
     for(unsigned i=0;i<4;i++)a->scalarOutput[i]=0;
+#ifdef DVM_SURFACE_REGISTRY
+    if(selector!=0x44565300)return dvm_surface_registry(client,provider,selector,a);
+#endif
     uint64_t address=a->scalarInput[1],length=a->scalarInput[2];
     if(a->scalarInput[0]!=1||!address||!length||length>64*1024*1024||
        address>=(1ull<<47)||length>(1ull<<47)-address)

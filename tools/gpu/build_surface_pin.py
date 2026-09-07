@@ -24,13 +24,30 @@ CHECKS=[(0x7e27b08,0x5d0,0x5d9d,ENTRY),
         (0x7e1f870,0x98,0x649a,0xfffffff00b256e60),
         (0x7e1f870,0xd8,0xf5b3,0xfffffff00b255f8c),
         (0x7e1f870,0xe0,0x9285,0xfffffff00b25563c)]
+REGISTRY_CHECKS=[
+    (0x7e58dd0,0x300,0xc6b2,0xfffffff00b1faef8),
+    (0x7e58dd0,0x308,0x8a43,0xfffffff00b1facbc),
+    (0x7e58dd0,0x118,0x37a5,0xfffffff00b1ed38c),
+    (0x7e58dd0,0xc8,0xff53,0xfffffff00b1edb34),
+    (0x7e58dd0,0x100,0x1262,0xfffffff00b1ed58c),
+    (0x7e58dd0,0x2c0,0x4529,0xfffffff00b1fcd04),
+    (0x7e58dd0,0x3b8,0xabe0,0xfffffff00b1f3be4),
+    (0x7e58dd0,0x3c8,0x6c99,0xfffffff00b1f3a48),
+    (0x7e27b08,0x118,0x37a5,0xfffffff00b1ed38c),
+    (0x7e27b08,0xc8,0xff53,0xfffffff00b1edb34),
+    (0x7e27b08,0x100,0x1262,0xfffffff00b1ed58c),
+    (0x7e1f870,0xe8,0x3ed6,0xfffffff00b251dfc),
+    (0x7e1ed48,0x78,0x34f6,0xfffffff00b251a50)]
 def main():
-    p=argparse.ArgumentParser(description=__doc__);p.add_argument('bootkc',type=Path);p.add_argument('out',type=Path);a=p.parse_args()
+    p=argparse.ArgumentParser(description=__doc__);p.add_argument('bootkc',type=Path);p.add_argument('out',type=Path)
+    p.add_argument('--registry',action='store_true',help='retain/register descriptor pages; matching QEMU registry required')
+    a=p.parse_args()
     b=a.bootkc.read_bytes()
     if hashlib.sha256(b).hexdigest()!=SHA:raise ValueError('requires pinned exact guest runtime-loader BootKC')
     for va,h in GUARDS.items():
         if b[va-BASE:va-BASE+len(bytes.fromhex(h))]!=bytes.fromhex(h):raise ValueError(f'entry guard {va:x}')
-    for table,slot,div,target in CHECKS:
+    checks=CHECKS+(REGISTRY_CHECKS if a.registry else [])
+    for table,slot,div,target in checks:
         v,=struct.unpack_from('<Q',b,(0xfffffff000000000|table)+slot-BASE)
         if not v>>63 or ((v>>32)&65535)!=div or BASE+(v&0xffffffff)!=target:raise ValueError('virtual ABI')
     if any(b[CAVE-BASE:END-BASE]):raise ValueError('padding not empty')
@@ -51,9 +68,11 @@ def main():
     if not outer or preceding is None:raise ValueError('unowned RX padding')
     a.out.mkdir(exist_ok=False);src=Path(__file__).with_name('surface_pin_shim.cpp')
     shutil.copyfile(src,a.out/src.name);shutil.copyfile(__file__,a.out/Path(__file__).name)
+    if a.registry:shutil.copyfile(src.with_name('surface_registry_kernel.inc'),a.out/'surface_registry_kernel.inc')
     sdk=subprocess.check_output(['xcrun','--show-sdk-path'],text=True).strip()
     cmd=['xcrun','clang++','-target','arm64e-apple-ios27.0','-isysroot',sdk,'-I',sdk+'/System/Library/Frameworks/Kernel.framework/Headers',
          '-DKERNEL','-mkernel','-fno-exceptions','-fno-rtti','-fno-stack-protector','-fno-builtin','-std=c++17','-Os','-S',str(src),'-o',str(a.out/'shim.s')]
+    if a.registry:cmd.insert(2,'-DDVM_SURFACE_REGISTRY')
     subprocess.run(cmd,check=True);asm=(a.out/'shim.s').read_text()
     if '.ptrauth_kernel_abi_version 0' not in asm:raise ValueError('kernel PAC ABI')
     lines=[]
@@ -85,9 +104,9 @@ def main():
     put(BASE+so+32,struct.pack('<Q',size));put(BASE+so+48,struct.pack('<Q',size))
     patched[CAVE-BASE:CAVE-BASE+len(payload)]=payload
     (a.out/'bootkc').write_bytes(patched)
-    report=dict(scope='temporary caller-memory pin/complete probe; no host page export or GPU import',source_sha256=SHA,
+    report=dict(scope='retained caller-memory registration; no compositor acceptance claim' if a.registry else 'temporary caller-memory pin/complete probe; no host page export or GPU import',registry=a.registry,source_sha256=SHA,
         output_sha256=hashlib.sha256(patched).hexdigest(),payload_address=hex(CAVE),payload_bytes=len(payload),
         payload_sha256=hashlib.sha256(payload).hexdigest(),patches=patches,guards={hex(k):v for k,v in GUARDS.items()},
-        abi_checks=CHECKS,links={k:hex(v) for k,v in LINKS.items()},compile_command=cmd,sptm_modified=False,txm_modified=False)
+        abi_checks=checks,links={k:hex(v) for k,v in LINKS.items()},compile_command=cmd,sptm_modified=False,txm_modified=False)
     (a.out/'ledger.json').write_text(json.dumps(report,indent=2)+'\n');print(a.out)
 if __name__=='__main__':main()

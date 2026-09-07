@@ -8,6 +8,9 @@
 - (void)setSubmissionQueue:(dispatch_queue_t)queue;
 - (void)setCompletionQueue:(dispatch_queue_t)queue;
 @end
+@protocol DVMSubmitBoundary
+- (BOOL)commitAndWaitUntilSubmitted;
+@end
 static void check(BOOL value,const char *message){if(!value){fprintf(stderr,"FAIL %s\n",message);exit(1);}}
 int main(void){@autoreleasepool{
     static int submissionKey,completionKey;
@@ -48,6 +51,13 @@ int main(void){@autoreleasepool{
     [(id<MTLCommandBuffer>)commands[2] commit];
     check(dispatch_group_wait(done,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC))==0,"callback deadline");
     check(submissions==3&&callbacks==3,"all queued work completed");
-    puts("DVM_QUEUE_SCHEDULING_PASS submissions=3 callbacks=3 FIFO=1 targets=verified bound=2");
+    id<MTLCommandBuffer> boundary=[queue commandBuffer];
+    check([(id<DVMSubmitBoundary>)boundary commitAndWaitUntilSubmitted]&&boundary.status==MTLCommandBufferStatusCompleted&&submissions==4,"submission boundary waits for acknowledged work");
+    rejected=NO;@try{[(id<DVMSubmitBoundary>)boundary commitAndWaitUntilSubmitted];}@catch(NSException *e){(void)e;rejected=YES;}
+    check(rejected&&submissions==4,"no duplicate submission");
+    id<MTLDevice> bad=DVMCreateMetalDevice(^NSDictionary *(NSDictionary *r,NSError **e){(void)r;if(e)*e=[NSError errorWithDomain:@"injected" code:1 userInfo:nil];return nil;});
+    id<MTLCommandBuffer> failed=[[bad newCommandQueue] commandBuffer];
+    check(![(id<DVMSubmitBoundary>)failed commitAndWaitUntilSubmitted]&&failed.status==MTLCommandBufferStatusError&&failed.error,"submission failure is not success");
+    puts("DVM_QUEUE_SCHEDULING_PASS submissions=4 callbacks=3 FIFO=1 targets=verified bound=2 submitted_boundary=1 failure=1 duplicate_rejected=1");
     return 0;
 }}

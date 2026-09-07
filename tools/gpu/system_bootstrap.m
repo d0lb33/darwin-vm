@@ -17,6 +17,9 @@ static void fail(const char *s) {[NSException raise:NSInternalInconsistencyExcep
 #define DVM_TEST_RUNNER 1
 #include "driver_mmio_transport.inc"
 #include "driver_owned_mapping.inc"
+#ifdef DVM_SURFACE_IMPORT
+#include "driver_imported_mapping.inc"
+#endif
 #ifdef DVM_SURFACE_PIN_PROBE
 static io_connect_t surfacePinClient;
 static void DVMProbeSurfacePin(IOSurfaceRef surface) {
@@ -103,6 +106,9 @@ __attribute__((constructor)) static void DVMSystemBoot(void) {
             if(kr||!systemRegistryID)fail("registry-identity");
             DVMMetalRPC rpc=^NSDictionary *(NSDictionary *r,NSError **e){return [ns call:r error:e];};
             systemDevice=DVMCreateSharedMetalDevice(rpc,^id<DVMMetalOwnedMapping>(NSError **e){return DVMMapDriverPool(ns,e);});
+#ifdef DVM_SURFACE_IMPORT
+            DVMEnableSurfaceImports(systemDevice,DVMImportedSurfaceProvider(ns));
+#endif
             (void)[(DVMDevice *)systemDevice contractCapabilities];
             // Registration asserts protocol identity, not complete selector
             // coverage. Unsupported selectors remain explicit failures.
