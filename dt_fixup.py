@@ -139,6 +139,14 @@ EMULATED_FEATURES = {
   # queue registers and the 32,768 Hz upcounter; see
   # docs/re/native-rtc-spmi.md. fixup_spmi() trims the other SPMI children.
   'spmi': ['arm-io/nub-spmi0'],
+  # PMGR, the power manager. IOMobileFramebuffer's DCPPowerManager prints
+  # "use_psd_dcp_power2: 0" without it and power-cycles the DCP through the
+  # RTKit sleep path every few seconds (docs/re/tcg-idle-profile.md); with
+  # ApplePMGRv2 present it manages DCP power through PMGR's Power State Domain
+  # functions (ApplePMGRFunctionEnablePSDService/ResetPSDService). The PS
+  # registers are modelled after Linux drivers/pmdomain/apple/pmgr-pwrstate.c
+  # and m1n1 src/pmgr.c; fixup_pmgr() below trims what the driver needs.
+  'pmgr': ['arm-io/pmgr'],
 }
 KEEP_COMPAT_PATHS = set()
 EPHEMERAL_DATA_BLOCKS = None
@@ -401,6 +409,61 @@ def fixup_iops(d):
       nub.props['region-size'] = f"u64:{IOP_REGION_SIZE:#x}"
       nub.props['no-firmware-service'] = "<NULL>"
       slot += 1
+
+def fixup_pmgr(d):
+  if 'arm-io/pmgr' not in KEEP_COMPAT_PATHS or 'pmgr' not in d['arm-io']:
+    return
+  pm = d['arm-io']['pmgr']
+  # AppleT8140PMGR::start waits for the provider of function-mcc_ctrl (unslid
+  # 0xfffffff009228310, docs/re/multicpu.md "SMP_TRACE5"); the memory cache
+  # controller is not in the tree, so the wait never ends. Drop the property.
+  pm.props.pop('function-mcc_ctrl', None)
+  # ApplePMGR::initDriver panics "voltage-states1 not found" (SMP_PMGR4). The
+  # IPSW tree ships voltage-states0/2/9 as u64 placeholders that iBoot fills
+  # on hardware; give states1 the same placeholder shape as states0 so the
+  # driver parses it. This is a stand-in, not a measured table.
+  # initDriver asks for one table per perf domain: the perf-domains property
+  # is 28-byte entries whose first byte is the domain id (SOC 0, ECPU 1,
+  # DCS 2, PCPU 5, ANE 8, AVE 10, DISP 11 on t8140; PMGR1 probe asked for 1
+  # then 5). Add every missing one in the states0 shape.
+  # The states0 placeholder ({0,1,2} as u64) parses as zero usable states and
+  # initDriver:2002 then asserts "ECPU_0 1 request ECPU.0 > 0" (PMGR3). The
+  # tables are {u32 frequency Hz, u32 millivolts} pairs (Asahi DT notes for
+  # voltage-states1/5); four ascending stand-in states satisfy the count
+  # check. No frequency here is a measured value.
+  # ApplePMGR::initDriver parses the tables at unslid 0xfffffff009231d2c..
+  # 0xfffffff0092324e4: the property index is the perf-domains entry's byte
+  # 0 (the domain id) and byte 2 == 1 marks a CPU cluster. For CPU clusters
+  # the entry's first word is a divider, MHz = 65,536,000 / word (mov w21,
+  # #0x3e80000; udiv); for every other domain it is Hz (umull by
+  # 0x431bde83 = 2^50/1e6). Hz in a CPU table gave 0 MHz and the
+  # getThermalUPOPerfLimiting REQUIRE (PMGR11SMP, PMGR14SMP).
+  import struct as _struct
+  mhz = (600, 1000, 1500, 2000)
+  hz_table = b''.join(_struct.pack('<II', f * 1000000, 700 + 100 * n) for n, f in enumerate(mhz))
+  cpu_table = b''.join(_struct.pack('<II', 65536000 // f, 700 + 100 * n) for n, f in enumerate(mhz))
+  # AppleT8140CLPC builds per-state 'fANE0' frequency entries and indexes an
+  # empty table at -1 when none exist (PMGR9SMP data abort). The kext reads
+  # an "ane-disabled" u32 property through getBytesNoCopy (AppleT8140CLPC
+  # +0x3020c dereferences it, so it must carry 4 bytes; a NULL property
+  # itself faulted in PMGR10SMP) or the boot-arg of the same name; the
+  # neural engine node is stripped from this tree, so say so.
+  pm.props['ane-disabled'] = 'u32:0x1'
+  for c in pm.children:
+    if c.props.get('name') == 'clpc':
+      c.props['ane-disabled'] = 'u32:0x1'
+  domains = pm.props.get('perf-domains', b'')
+  entries = [domains[i:i + 28] for i in range(0, len(domains) - 27, 28)] if isinstance(domains, bytes) else []
+  ids = {e[0] for e in entries}
+  cpu_ids = {e[0] for e in entries if e[2] == 1}
+  # The IPSW placeholders (states0/2 as {0,1,2}, states9 as a single 0)
+  # give AppleT8140CLPC a zero-length table and it indexes it at -1
+  # (PMGR8SMP: kernel data abort at AppleT8140CLPC+0x32e70). Replace every
+  # placeholder as well as the missing tables.
+  for i in sorted(ids | {k for k in range(16) if 'voltage-states%d' % k in pm.props}):
+    key = 'voltage-states%d' % i
+    if key not in pm.props or len(pm.props[key]) < 16 or key in ('voltage-states0', 'voltage-states2', 'voltage-states9'):
+      pm.props[key] = cpu_table if i in cpu_ids else hz_table
 
 def fixup_sep(d):
   # AppleSEPBooter::initForSEP asserts on a property iBoot normally adds and
@@ -739,6 +802,7 @@ def fixup(d, nvram_file):
   if SKIP_KEYBAG:
     fixup_skip_keybag(d)
   fixup_sep(d)
+  fixup_pmgr(d)
   fixup_fstab_drop_unavailable(d)
   fixup_aic(d['arm-io']['aic'])
   fixup_sptm(d)
