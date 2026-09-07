@@ -15,10 +15,15 @@ does not install runtime accommodations.
 | Clock | Native SPMI/PMU RTC | Native SPMI/PMU RTC |
 | Apple-userspace edits | None added | Display allocation, Settings scale, software clock rendering |
 | Runtime helpers | None added | Current input helper |
-| CPUs / kernel adapter | 1 / none | 6 / SMP adapter |
+| CPUs / kernel adapter | 6 / native PMGR, stock kernel | 6 / native PMGR, stock kernel (SMP adapter until 2026-09-06) |
 | Setup completion / saved RAM | Unchanged / none | Unchanged / none |
 
-All profiles enable SMC and SPMI and force `DARWIN_RTC_PV=0`. They retain the
+All profiles enable SMC, SPMI and PMGR and force `DARWIN_RTC_PV=0`. The
+installed package (`~/dvm-artifacts/native-smc/default.json`) pins the stock
+`firmware/bootkc`, a tree built with `-enable ans smc sep dcp spmi pmgr
+-development-activation -dram 12G`, and no `DARWIN_SMP_PV`; re-pin it with
+`tools/rootfs/repin_native_smc.py` when the build or tree recipe changes, and
+`--restore-backup pmgr` returns the previous inputs. They retain the
 project firmware adaptations, SEP/SKS storage models, and Data seeder. The
 compatibility profile's software clock rendering is separate from RTC time.
 

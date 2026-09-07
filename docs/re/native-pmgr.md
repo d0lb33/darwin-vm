@@ -73,17 +73,23 @@ touches `pmgr[43]+0x8ac000..` and `pmgr[5]/[6]/[14]/[15]` (seen with
   ADRP+ADD (the inverse of `kaddr.py`); finds the property names a kext reads.
 - `tools/re/pmgr_devices.py`: decode the PMGR device table.
 
-## Status and what is not done
+## Status
 
-- The restore boot with `-enable pmgr` needs `-smp 6 -accel tcg,thread=multi`;
-  with one vCPU the kernel waits for CPU 1 (`PMGR5`). `run.sh --restore`
-  does not pass `-enable pmgr` yet.
-- The system-disk boot with the stock kernel and no `DARWIN_SMP_PV`
-  (`SYS_PMGR1`, manifest variant) reaches frames with zero panics; it has
-  not replaced the package's pinned kernel/manifest, and its first frame
-  came later (≤210 s) in that single run than the package's typical
-  100–160 s; repeat before drawing conclusions.
-- Guest perf-state control now runs against stand-in tables; CLPC/thermal
+PMGR is the default since 2026-09-06 (see the validation section below):
+
+- `~/dvm-artifacts/native-smc/default.json` pins the stock `firmware/bootkc`,
+  a tree from `-enable ans smc sep dcp spmi pmgr -development-activation
+  -dram 12G`, six vCPUs, and no `DARWIN_SMP_PV`. `-development-activation`
+  is required: without it the stock kernel boots to the Setup "Hello"
+  screen instead of the lock screen. `tools/rootfs/repin_native_smc.py`
+  re-pins the package and keeps the old inputs as `*.pre-pmgr-*`.
+- `run.sh --restore` passes `-enable pmgr -smp 6 -accel tcg,thread=multi`;
+  with one vCPU the kernel waits for CPU 1 (`PMGR5`), so `DVM_PMGR=0`
+  drops both for the single-CPU shell.
+- The DCP sleep loop that made PMGR boots look slow is fixed in the IOMFB
+  model (`iomfb-power-path.md`), not here.
+
+Not done:
+
+- Guest perf-state control runs against stand-in tables; CLPC/thermal
   telemetry values are fiction. Nothing reads them back into the model.
-- The DCP sleep loop is unchanged; see the lead in `tcg-idle-profile.md`
-  on the IOMFB idle detectors' runtime properties.
