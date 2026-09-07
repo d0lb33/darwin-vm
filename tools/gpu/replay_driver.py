@@ -26,8 +26,13 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('trial',type=Path);p.add_argument('--worker',type=Path,required=True)
     p.add_argument('--library',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
+    p.add_argument('--host-rehearsal',action='store_true',help='replay a run_uikit_host.py capture; never label it as guest evidence')
     a=p.parse_args();a.out.mkdir(exist_ok=False)
-    rows=[json.loads(x) for x in (a.trial/'driver-host.jsonl').read_text().splitlines()]
+    if a.host_rehearsal:
+        manifest=json.loads((a.trial/'manifest.json').read_text())
+        if manifest.get('scope')!='host-catalyst-rehearsal-not-exact-guest' or not manifest.get('forwarded'):
+            raise ValueError('requires an explicitly attributed forwarded host capture')
+    rows=[json.loads(x) for x in (a.trial/('requests.jsonl' if a.host_rehearsal else 'driver-host.jsonl')).read_text().splitlines()]
     env={k:v for k,v in os.environ.items() if not k.startswith('DVM_DRIVER_')}
     env['DVM_DRIVER_LIBRARY']=str(a.library.resolve())
     started=time.monotonic();passed=False;count=0
@@ -65,7 +70,8 @@ def main():
             except subprocess.TimeoutExpired:worker.kill();worker.wait()
             worker.stdout.close()
             passed=passed and worker.returncode==0
-            result=dict(scope='captured-guest-submission-host-replay-not-new-guest-execution',passed=passed,
+            result=dict(scope='captured-host-rehearsal-backend-replay-not-guest-evidence' if a.host_rehearsal else 'captured-guest-submission-host-replay-not-new-guest-execution',passed=passed,
+                        validation_environment={k:env[k] for k in ('MTL_DEBUG_LAYER','MTL_SHADER_VALIDATION') if k in env},
                         requests=count,worker_exit=worker.returncode,seconds=time.monotonic()-started)
             (a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
             if worker.returncode:raise RuntimeError('replay worker did not exit cleanly')

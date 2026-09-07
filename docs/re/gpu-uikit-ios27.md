@@ -207,7 +207,7 @@ faithful reproduction of the failure, not pixel correctness.
 The UIKit option experiment (`CA_UIKIT_GUEST3/1788772031565602`, bundle SHA256
 `303568471e9ed91c46057b35b504930d8ccfef53674f4fe82045c18a1ab766c3`)
 corrects image/text orientation. The untouched GPU output is preserved as
-`gpu-uikit-20260907-capture3/uikit-gpu.png`, SHA256 of raw BGRA
+`gpu-uikit-20260907-capture3/uikit-gpu.png/uikit-gpu.png`, SHA256 of raw BGRA
 `394fc03ad61980e02e3aed45e13e86c9a640f386fea88ee4321f5c5dd244b385`.
 Three passes/ten draws still differ from the CPU reference by 43567 channels
 (maximum error 67, mean 1.164743). Background pixels match; differences cluster
@@ -263,3 +263,103 @@ The forwarded host variant additionally compiles `driver_guest.m` with
 `DVM_ORIENTATION_FORWARDED` and `DVM_CA_REHEARSAL`, links IOSurface, and requires
 both `DVM_DRIVER_LIBRARY` and `DVM_REHEARSAL_AIR` to identify the exact guest AIR.
 It remains a host rehearsal even though it uses the guest's shader library.
+
+## Native Catalyst controls and general URL slice selection (2026-09-07)
+
+Question: distinguish a forwarding defect from the different CPU/GPU
+rasterizers and capability-selected QuartzCore paths. Stop condition: preserve
+each failing frame and compare a native control before changing rendering
+semantics or accepting a relaxed pixel threshold. No new VM boot was needed.
+
+`consumer_uikit_scene.inc` now supplies the unchanged view tree to both the
+guest test and a native Mac Catalyst control. `run_uikit_host.py` records
+compiler arguments, timings, shader identity, per-frame BGRA and (when
+forwarded) complete JSON requests/replies. Recent manifests also record source
+hashes and explicit diagnostic settings. Native host fonts differ from the
+guest: these images are **not guest golden images**. Exit zero means the
+harness executed; `analyze_uikit_host.py` reports pixel agreement separately.
+Its three-frame control requests root opacity 1/.99/1 with explicit 1/60-second
+renderer-time increments; this is not a sustained pacing test.
+
+Observed host results (M5 Max, macOS 27 build 26A5421a):
+
+| Experiment | Observation / scope |
+| --- | --- |
+| `CA_UIKIT_HOST_NATIVE2` | Default native UIKit GPU vs CPU differs in 34,543 channels above 2; max error 43. CPU rendering is not a byte-exact native GPU oracle. |
+| `CA_UIKIT_HOST_NATIVE_AIR1` | Native loader requests `/System/Library/Frameworks/QuartzCore.framework/Resources/default.metallib`. Explicitly substituting its unique AIR slice yields byte-identical pixels to the default native loader for all three recorded frames. |
+| `CA_UIKIT_HOST_FORWARDED2` / `CA_UIKIT_HOST_UNSPLIT1` | The same host AIR still produces wrong forwarded pixels. A harness-only unsplit submission gives identical errors, so splitting alone does not explain this captured failure. |
+| `CA_UIKIT_HOST_NATIVE_NOFB1/2` | Native Metal with only `isFramebufferReadSupported=NO` reproduces black/straight corner regions. The final frame differs from ordinary native rendering in 4,608 channels, bounded by the card `[20,88,300,288)`. No forwarding is involved in this control. |
+| `CA_UIKIT_HOST_NATIVE_CONTRACT2` vs `CA_UIKIT_HOST_FORWARDED4` | With profile capability predicates matched, frames 1 and 2 are byte-identical. Frame 0 differs in 51,520 channels confined to title bounds `[20,22,300,68)`; both have other early-frame corruption. A native-versus-forwarded match alone does not make those images correct. |
+| `CA_UIKIT_HOST_VALIDATION1` | Frontend validation aborts at `setTexture:`: `texture is not a MTLTextureImplementation`. This is a proxy/Apple validation-wrapper contract, not a GPU execution result. |
+| `CA_UIKIT_HOST_VALIDATION_REPLAY1` | All 198 captured host requests replay against the real backend with Metal API and GPU validation enabled; replies and pixels reproduce the failure. No validation error appears. This proves reproducibility, not image correctness. |
+
+The host FAT library is 169,762,816 bytes, SHA256
+`1bccc6c830a2bdc8d21ee05e9b1d1a5f4df4c65136175c9adf07c1f30dfce027`.
+Its selected MTLB slice is 2,776,572 bytes, SHA256
+`1b0a59db2cd000227edb5ebe5976d15572722c32f5da0dafac33620f9c4e4c1b`.
+Early captures used immediate wall-clock frame timestamps; the later explicit
+time-step controls expose opacity changes that those very fast native runs did
+not show. Do not use the earlier middle frame as a changing-scene acceptance
+result. Native pipeline creation logs distinguish main-thread specialized
+creation from background generic/specialized creation; they are not a draw
+trace. The association between early corruption and generic fallback remains
+an inference requiring an encoding/parameter comparison.
+
+Production `newLibraryWithURL:error:` no longer selects a FAT slice by the
+known guest byte count 2,705,796. `metal_library_slice.h` checks the FAT table,
+slice extents/alignment/overlap, a unique MTLB magic, declared library length
+and the existing 12 MiB forwarding bound. Ambiguous MTLB slices fail explicitly.
+Native Metal still decides shader/version compatibility; a matching host cache
+is still required. No shader bytes are rewritten. The explicit substitution
+macro remains compile-time forbidden for the iOS target; Catalyst rehearsal is
+allowed and labelled.
+
+Exact-guest validation: `CA_UIKIT_GUEST3`, fresh process **1343**, job
+**1788773639965179**, linked bundle SHA256
+`98544b8e45c40fa44004910e32bf0a8e26f1dc2d289a956a8efd7b6ccc6241f9`.
+Incremental driver build took 4.329 s; the backend/helper were reused. The
+runner's child elapsed time was 1.480 s (host observed 1.549 s). Library request
+17649 carries the unchanged exact-guest AIR length/hash. Three GPU passes and
+ten draws complete; final GPU and CPU hashes match the preceding guest test
+exactly. Strict comparison remains **failed**, 43,567 channels, max 67, mean
+1.16474284. There is no resource-retirement pass for this failed child. Input
+status later records 1,065 sent/acked, zero failures/timeouts and 2,577 native
+presents; this does not imply UIKit display presentation.
+
+Validation: the sanitized MTLB container tests, frontend contract, capability
+and render-writeback executables pass. Forty-four Python cases pass initially;
+two MMIO cases were pointed at the host-only build, which lacks
+`transport-mode.txt`, and fail as fixture errors. Both pass when rerun against
+the actual incremental MMIO build. The negative iOS rehearsal compile guard
+rejects the macro as required. No capability or rendering behavior was changed
+to hide the failed images.
+
+Reproduction (fresh output directories; host controls do not access a VM):
+
+```sh
+export DEVELOPER_DIR=/Applications/Xcode-beta.app/Contents/Developer
+python3 tools/gpu/run_uikit_host.py NATIVE --frames 3 --native-contract --native-library /System/Library/Frameworks/QuartzCore.framework/Versions/A/Resources/default.metallib
+python3 tools/gpu/run_uikit_host.py FORWARDED --frames 3 --forwarded-library /System/Library/Frameworks/QuartzCore.framework/Versions/A/Resources/default.metallib
+python3 tools/gpu/analyze_uikit_host.py NATIVE FORWARDED --output COMPARISON.json
+MTL_DEBUG_LAYER=1 MTL_SHADER_VALIDATION=1 python3 tools/gpu/replay_driver.py FORWARDED --host-rehearsal --worker WORKER --library FORWARDED/library.metallib --out REPLAY
+python3 tools/gpu/build_consumer_package.py BASE BUILD --frames 1 --uikit --renderer-flags 2
+python3 tools/gpu/sign_linked_revision.py BUILD/DVMProxy.bundle LINKED --parent PINNED_HELPER
+python3 tools/gpu/runner_control.py /tmp/dvm/CA_UIKIT_GUEST3 --bundle LINKED/DVMProxy.bundle --mode data --development --test package --frames 1 --expected observe --worker BUILD/driver_host
+python3 tools/gpu/analyze_uikit_capture.py /tmp/dvm/CA_UIKIT_GUEST3/runner-jobs/JOB
+```
+
+Next bounded dependency: establish framebuffer-read/feedback semantics and the
+generic shader parameter/encoding contract with native controls. Test actual
+attachment read/modify/write and ordering before advertising support; merely
+changing the capability to true would be unjustified. The native host fallback
+failure is not proof that the exact guest has the same defect: its current
+rounded corners render correctly. Preserve guest CPU/GPU comparison, completion,
+ownership, displayed output and pacing as separate acceptance checks.
+
+Small records, complete replay requests, the guest job and source/build
+metadata are preserved in `~/dvm-artifacts/research/gpu-uikit-20260907-part6`
+(369 records, 70,978,829 bytes). The selected host AIR is separately preserved
+in `~/dvm-artifacts/research/gpu-uikit-host-air-20260907/QuartzCore-host-air.metallib`
+so a host OS update or `/tmp` cleanup does not invalidate backend reproduction.
+The guest image shown in chat is the untouched offscreen capture, also at
+`gpu-uikit-20260907-part6/1788773639965179/uikit-gpu.png`; it is not a DCP dump.

@@ -83,7 +83,7 @@ record=dict(frames=a.frames,hz=a.hz,scene=a.scene,shared_surface=a.shared_surfac
             scope='test export compiled; guest execution untested')
 if record['helper_sha256']!=hashlib.sha256((a.base/'dvm-gpu-load').read_bytes()).hexdigest():
     raise ValueError('package unexpectedly changed the pinned helper')
-for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc','test_layer_orientation.m'):
+for name in ('consumer_package.m','consumer_probe.inc','consumer_sequence_probe.inc','consumer_shared_probe.inc','consumer_shared_scene.inc','consumer_region_probe.inc','consumer_uikit_probe.inc','consumer_uikit_scene.inc','test_layer_orientation.m'):
     (a.out/name).write_bytes((src/name).read_bytes())
 (a.out/'consumer-package.json').write_text(json.dumps(record,indent=2)+'\n')
 print(json.dumps(record))

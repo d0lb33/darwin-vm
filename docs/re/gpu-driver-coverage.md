@@ -22,7 +22,7 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | --- | --- | --- | --- |
 | Discovery | Explicit process-local device factory | Exact guest signed bundle load and CARenderer use | Normal plugin discovery, service-global context, system compositor adoption |
 | Capabilities | Versioned forwarding profile; original 20 queries plus compression/format batch | Exact guest original 20 and observed lossless-format path; host profile mismatch rejection | Full GPU-family predicates remain false; static query coverage is not a runtime trace |
-| Libraries | Requested guest URL/data identity, exact AIR forwarded to configured host library | Exact unmodified AIR, real function specialization and render execution | Host currently needs matching local AIR cache; general multi-library delivery pending |
+| Libraries | Requested guest URL/data identity; select a unique bounded MTLB slice by container contents, not a known shader size | Exact unmodified AIR, real function specialization/render execution; different-sized host AIR and malformed-container controls | Host currently needs matching local AIR cache; ambiguous multiple AIR slices and general multi-library delivery pending |
 | Functions/render pipelines | Named/indexed constants; general vertex/fragment pipeline descriptors within documented bounds | Exact QuartzCore specialized vertex/fragment pair; 65 constants | Linked functions, archives, writable fragment bindings, tile/MSAA/depth targets |
 | Command encoding | Direct indexed/nonindexed draws, 31 buffer slots, 16 fragment textures/samplers; bounded FIFO of 32 command buffers on one execution queue | Exact changing scenes and 64×64 group opacity with private intermediate targets; host queued GPU dependency and cancellation tests | Multiple execution queues, indirect commands, fragment buffer writes and general barriers remain unsupported |
 | Compute | Existing luma/blur and bounded compute submission | Exact compute/copy controls and managed blur | Pipeline allowlist remains a development restriction; replace with general validated reflection before claiming broad compute |
@@ -64,8 +64,14 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
    target. V10 fixes row alignment and adds A8 sampling, so all labels draw. Pixel
    orientation is corrected with an explicit CARenderer coordinate option. The
    asymmetric nearest-image control passes all pixels and retirement. Full
-   UIKit comparison still fails at image/text edges; native-versus-forwarded
-   UIKit rendering is the next control. This is an offscreen diagnostic, not a displayed
+   UIKit comparison still fails at image/text edges. Catalyst controls now
+   separate CPU/GPU rasterization differences from host fallback failures:
+   native Metal with framebuffer-read capability disabled reproduces the
+   rounded-corner artifact, and native/forwarded later frames match exactly
+   under matched capability answers. First-use generic-shader behavior still
+   fails; native controls also reproduce early corruption, so forwarding is
+   not established as its sole cause. Captured backend replay reproduces the
+   failure with Metal API/GPU validation enabled. This is an offscreen diagnostic, not a displayed
    UIKit or Liquid Glass pass. See [UIKit evidence](gpu-uikit-ios27.md).
 
 The displayed scenes, partial transfers and interactive session evidence are in

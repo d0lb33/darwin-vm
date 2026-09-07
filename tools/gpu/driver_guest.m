@@ -7,6 +7,7 @@
 #include "present_layout.h"
 #include "driver_capabilities.h"
 #include "dirty_buffer_range.h"
+#include "metal_library_slice.h"
 
 static NSError *error(NSString *s) {
     return [NSError errorWithDomain:@"DVMMetalDriver"
@@ -267,7 +268,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)err {
 #ifdef DVM_CA_REHEARSAL
-#if TARGET_OS_IPHONE
+#if TARGET_OS_IPHONE && !TARGET_OS_MACCATALYST
 #error Host rehearsal substitution must never be in an iOS driver
 #endif
     const char *rehearsal=getenv("DVM_REHEARSAL_AIR");
@@ -277,19 +278,10 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 #endif
     NSData *bytes=[NSData dataWithContentsOfURL:url options:NSDataReadingMappedIfSafe error:err];
     if(!bytes)return nil;
-    // This driver accepts the independently verified exact-guest AIR slice.
-    // Preserve the requested file's bytes; never substitute a host library.
-    const uint8_t *p=bytes.bytes;NSUInteger offset=0,length=bytes.length;
-    if(length>=8&&p[0]==0xca&&p[1]==0xfe&&p[2]==0xba&&p[3]==0xbe){
-        uint32_t count=OSSwapBigToHostInt32(*(const uint32_t *)(p+4));
-        if(count>128||length<8+count*20){if(err)*err=error(@"fat library table");return nil;}
-        BOOL found=NO;
-        for(uint32_t i=0;i<count;i++){
-            uint32_t off=OSSwapBigToHostInt32(*(const uint32_t *)(p+8+i*20+8)),n=OSSwapBigToHostInt32(*(const uint32_t *)(p+8+i*20+12));
-            if(n==2705796&&(uint64_t)off+n<=length){offset=off;length=n;found=YES;break;}
-        }
-        if(!found){if(err)*err=error(@"requested file lacks the verified AIR slice");return nil;}
-    }
+    // Preserve the requested file's unique MTLB slice without rewriting it.
+    const uint8_t *p=bytes.bytes;size_t offset=0,length=0;
+    const char *failure=DVMSelectLibrarySlice(p,bytes.length,&offset,&length);
+    if(failure){if(err)*err=error(@(failure));return nil;}
     dispatch_data_t data=dispatch_data_create(p+offset,length,dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),DISPATCH_DATA_DESTRUCTOR_DEFAULT);
     return [self newLibraryWithData:data error:err];
 }
