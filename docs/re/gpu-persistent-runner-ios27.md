@@ -134,7 +134,12 @@ execution and verified pixels from an already boot-trusted bundle staged on
 Data, using a scoped RX mapping exception. Newly signed revisions still fail
 signature validation after the scoped ad-hoc CT gate. Five additional positive
 jobs passed independent verification; normal controls pass before and after.
-**Work stopped at the two-fix limit.** Runtime loading of a new revision remains
+That two-fix stop was honored. The user then authorized three more fixes:
+scoped AMFI completion, stock TXM compilation-hash authorization, and retaining
+the kernel compilation capability. AMFI now returns success and TXM matches the
+real candidate hash, but selector 24 still rejects its signature. All three
+failed revised-driver acceptance; six further installed controls verified pixels.
+**Work stopped after the three additional fixes.** Runtime loading remains
 unresolved; GPU development can still use isolated installation/reboot.
 
 The user authorized an opt-in kernel addition for testing on isolated boot

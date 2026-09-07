@@ -5,6 +5,12 @@ experiment, not a production signing policy or system Metal registration.
 Only disposable disk children and separately generated BootKCs are used.
 SPTM, TXM, the device tree and the existing managed MMIO service are unchanged.
 
+The two-fix stop was followed by three additional user-authorized fixes. All
+three failed new-revision loading at TXM signature validation; all six ordinary
+GPU controls passed. Implementation stopped at that limit. The user subsequently
+lifted the fix limit and requested continued dynamic-driver work. The bounded
+batch below remains a record of completed experiments, not the current stop rule.
+
 ## Contract and bounds
 
 Question: can a fresh, explicitly authorized test process map a newly staged
@@ -307,6 +313,188 @@ exact QuartzCore library. Queue the four recorded jobs with `runner_control.py`
 for staged candidates), then `--stop`. Preserved ledgers, source snapshots,
 manifests, launch commands and per-job packages supply exact inputs; input disk
 overlays themselves are disposable and are not promoted as a new baseline.
+
+## Three additional fixes authorized after the two-fix stop
+
+The earlier stop was observed and committed as `bfe1b61`. The user subsequently
+authorized three more fixes, numbered 3–5 here. These remain optional experiments
+on the exact 24A5430a guest, with disposable disk children. They are not enabled
+by the default builder. SPTM/TXM and the ordinary installed GPU driver are unchanged.
+
+### Fix 3: complete the scoped AMFI signature callback
+
+Question: does reaching AMFI's existing completion path suffice for the parsed
+ad-hoc bundle, after the previously proven process-debug and RX mapping steps?
+`--file-policy 3` takes only the qualified staging-path branch to
+`0xfffffff0091aee08`, applying the same privilege-bit mask (`0xf3ffbfff`) as the
+original non-platform path at `0xfffffff0091ae768`. The callback entry at
+`0xfffffff0091ad774` is wrapped to observe its original result and outputs;
+neither that result nor a TXM return is overwritten.
+
+**Observed:** in `CA_LOAD_FIX3_GUEST`, job `1788745417556366`, PID 324, the
+original callback returned zero twice, with flags `3 -> 20000003`, signer zero
+and fatal length zero. The next layer rejected the signature:
+
+```text
+DVM_DEV_LOADER signature pid=324 result=0 flags_before=3 flags_after=20000003 signer=0 fatal_length=0
+TXM [Error]: CodeSignature: selector: 24 | 0x02 | 0x22 | 3
+```
+
+Revised-driver acceptance **failed**, 1.710 s child execution, dyld error 3588 /
+errno 1, before GPU submission. Installed controls `1788745417496967` and
+`1788745617151305` passed in 19.433 / 13.412 s, with verified real CARenderer
+pixels. These are whole-process times including first use, not GPU frame latency.
+Readiness took 120.083 s; native presentations advanced from 74 to 1,018, with
+the same ready input PID 209, zero timeouts/rejections, and one earlier restart.
+
+BootKC SHA-256 `934efdcc2c084515d952fd07c3ff4cba463990da9f54d4be25878b7f2c8d00c9`;
+payload 2,816 bytes. `CA_LOAD_FIX3_BOOT/ledger.json` records all patches/guards.
+
+### Fix 4: use the stock compilation-hash authorization API
+
+Question: will TXM accept the signature after its real parsed CodeDirectory hash
+is authorized through the stock compilation-service API? The bootstrap helper
+receives `com.apple.private.amfi.can-load-cdhash`; it alone is reinstalled and
+added to the boot trust cache. The candidate revision is absent from that cache.
+
+Exact guest wrappers `0xfffffff00b044f3c` / `0xfffffff00b04501c` call TXM selectors
+29 / 30 with **hash pointer and length**. These exact two-argument interfaces,
+not the older local XNU source prototypes, determine the shim ABI. Getter
+`0xfffffff00afc9af4` supplies the parsed blob hash. The existing dedicated
+entitlement, debug-state, Developer Mode, ad-hoc and staging-path gates remain.
+
+**Observed:** `CA_LOAD_FIX4_GUEST`, job `1788746160289063`, PID 284:
+
+```text
+DVM_DEV_LOADER compilation_hash pid=284 length=32 matched=1 hash=6d3b6862e75abdeb3f247f76ccfa5ab1e1a7b07aedc43e724c96d0eda4a7c5ef
+DVM_DEV_LOADER signature pid=284 result=0 flags_before=3 flags_after=20000003 signer=0 fatal_length=0
+TXM [Error]: CodeSignature: selector: 24 | 0x02 | 0x22 | 3
+```
+
+The same sequence occurred twice. Independently hashing the signed candidate's
+691-byte CodeDirectory yields that full SHA-256; its hashSize is 32 and hashType
+is 2. **Hash authorization/matching passed; revised execution failed**, 3.560 s,
+before GPU submission. Controls `1788746160233020` / `1788746342381257` passed
+in 26.653 / 14.470 s. Native presentation continued from 41 to 773 after readiness
+at 135.249 s; ready input PID 213 remained, with zero timeouts. The one rejection
+and one restart occurred before readiness.
+
+BootKC SHA-256 `83889199672d0b0f6e2169ecedc3debbfc91be7b9182542f450d976953ab835a`;
+payload 3,193 bytes. The helper rebuild took 4.238 s overall, including 3.886 s
+for helper link/sign; driver objects and host backend were reused. This required
+one isolated install boot because the helper entitlement/trust hash changed.
+
+**Scope caveat:** this stock API replaces one global TXM hash slot, not a
+per-process slot or trust cache. The wrappers take their stock locks, but the
+authorization and subsequent file verification are not one atomic transaction.
+Other compilation work could overwrite the slot. This is not production loading,
+concurrent-worker support, resource-lifetime proof or checkpoint support.
+
+### Exact static evidence behind the remaining contract
+
+These are static observations, not a trace of the failing TXM sub-branch:
+
+- Selector 24 reaches `0xfffffff01703489c`, then trust classification
+  `0xfffffff017047cb8`. Its final ad-hoc rejection at `0xfffffff017047dc0`
+  constructs `0x32202`, matching the runtime error fields.
+- Compilation validation at `0xfffffff017046860` checks environment configuration
+  byte `+0x4b`, a predicate at environment `+0xa8`, then the hash callback at
+  `+0x80`. Environment construction at `0xfffffff017034350` installs matcher
+  `0xfffffff017035874` at that offset: it is the same slot used by selectors
+  29/30. The hypothesis that we selected the Swift Playgrounds slot is rejected.
+- The full candidate hash is correct. Matching it alone does not distinguish
+  a configuration/predicate rejection from a later overwrite or a different
+  signature object. No runtime sub-branch trace has established which applies.
+- AMFI prints the exact iPhone model and "disabling Swift Playgrounds JIT
+  services on iPhone devices" at startup. At `0xfffffff0091ac980..98c`, it calls
+  the feature-disable import twice, with `0x10000000` (compilation service) and
+  `0x20000000` (local signing). The import resolves to kernel
+  `0xfffffff00b04284c`, which clears the requested bit in kernel configuration.
+  This is **not itself a TXM policy write**; its relevance to the failed TXM
+  validation remains a hypothesis requiring an experiment.
+
+### Fix 5: preserve the kernel compilation capability
+
+The last authorized fix replaces only the call at `0xfffffff0091ac984` with
+NOP in the isolated image, retaining the adjacent local-signing disable.
+The shim payload is byte-identical to Fix 4. The intent is to test whether that
+kernel capability is a missing prerequisite; this does not establish that TXM
+enables the corresponding signature class. It is an image-wide capability
+change, while actual candidate authorization still uses the scoped loader.
+
+BootKC SHA-256 `15ac0d02daf475a376a6fdd5e255b8736ddeb42bf554601a91fb58716531a1ac`.
+The guarded patch/payload reconstruction matches the output exactly.
+
+**Observed:** `CA_LOAD_FIX5_GUEST`, job `1788747071883978`, PID 290, again
+authorized/matched the same 32-byte hash and received AMFI callback success,
+then failed twice with the identical TXM selector-24 `0x02 | 0x22 | 3` error.
+The child exited 1 after 2.771 s without GPU submission. Retaining that kernel
+capability is **disproven as a sufficient fix in this configuration**. We did
+not trace a particular TXM policy sub-branch or infer global impossibility.
+
+Controls `1788747071754621` / `1788747072009793`, PIDs 280 / 296, passed in
+11.790 / 2.044 s. Readiness took 128.538 s; native presentations increased from
+95 to 288, with input PID 206 still ready, zero timeouts, and the existing one
+rejection/restart unchanged from readiness. This is display/input readiness
+preservation, not a gesture or performance test. The owned VM stopped and was
+reaped after the final control. No sixth fix was attempted.
+
+### Final acceptance and handoff
+
+**All three additional revisions failed runtime loading. Implementation stopped
+at the authorized limit.** The runner's aggregate `passed` result allows an
+`expected: observe` job; it must not be read as revised-driver acceptance.
+Each failing candidate's own `verified` is false. All six installed GPU controls
+passed independent package/submission/upload/pixel/resource verification. Their
+16,384 output bytes have SHA-256
+`c34fb4331b2d031d7c644860b54a678424c66ef12352fc165a91dc09840d98fd`.
+
+The remaining observed failed contract is **TXM acceptance of the newly signed
+file's signature**, after process-debug approval, scoped AMFI completion and
+stock compilation-hash matching. A further investigation would need to observe
+the exact validation predicate/configuration and signature hash at selector 24,
+or establish a supported runtime trust-insertion contract. Repeating the same
+hash authorization or adding another guessed entitlement would not answer it.
+No such further experiment is authorized in this batch.
+
+Recommended next development step: leave these loader variants optional and
+resume GPU interface/resource-coherence work through the proven isolated
+installation/reboot route. New-code runtime loading is an iteration improvement;
+its failure does not invalidate the already verified installed CARenderer path.
+System-wide QuartzCore, Liquid Glass, live checkpointing and sustained pacing
+remain separate unproven milestones.
+
+Evidence package:
+`~/dvm-artifacts/research/gpu-development-loader-three-more-fixes-ios27/`.
+It includes per-job signed bundles, full signing failure logs, replayable
+submissions, patch ledgers/payloads, source snapshots and input identities.
+All pinned boot inputs and the complete disk ancestry matched their manifests
+after the trials (17 unique inputs); the default builder still reproduces
+BOOT4 SHA-256 `2845d7d0147448ca8f2bcfacd5d36c5507340ebcb00042418042e7b00034392d`.
+All 79 project tests passed during this batch, and every experimental image
+passed guarded patch/payload reconstruction. These checks do not substitute
+for the failed revised-driver acceptance.
+The candidate REVISION3 CDHash `6d3b6862e75abdeb3f247f76ccfa5ab1e1a7b07a`
+is absent from both boot trust caches. No failed image was promoted to baseline.
+
+Reproduce modes 3–5 using the commands above, changing `--file-policy` and
+assigning fresh `CA_LOAD_FIXN_BOOT`, state and guest directories. Modes 4/5 use
+the incrementally built helper:
+
+```sh
+python3 tools/gpu/build_driver_revision.py /tmp/dvm/CA_DEV_LOADER_BUILD2 \
+  /tmp/dvm/CA_LOAD_COMPILER_BUILD1 --bootstrap --development-loader --compilation-loader
+```
+
+Stage it with `prepare_driver_update.py` and `run_guest_install.py` against the
+pinned managed-pool restore manifest, then freeze from that owned installation
+with `prepare_display_state_trial.py`. Pass the worktree's actual QEMU build
+path to the freeze tool: it records Git source provenance and therefore cannot
+use an already frozen binary outside a repository. Exact manifests and launch
+arguments are preserved per trial. Queue installed control, Data candidate
+(`--development --expected observe`), installed control, then `--stop`.
+The second candidate prepared during Fix 4's boot was never exercised because
+the first candidate did not load; its existence is not update acceptance.
 
 ## Reproduction
 

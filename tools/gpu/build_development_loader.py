@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Opt-in exact-24A5430a process-scoped development loader; no SPTM/TXM edits."""
+"""Opt-in exact-24A5430a development-loader experiments; no SPTM/TXM edits."""
 import argparse,hashlib,json,re,shutil,struct,subprocess
 from pathlib import Path
 from build_boot_transport import branch
@@ -47,6 +47,22 @@ def build(a):
         links['_dvm_ct_accept']=0xfffffff0091ae5f0
         links['_dvm_ct_reject']=0xfffffff0091ae5cc
         hooks.append(('mmap',0xfffffff00b31e2dc))
+    if a.file_policy>=3:
+        guards.update({0xfffffff0091ad774:'7f2303d5fc6fbaa9fa6701a9f85f02a9',
+                       0xfffffff0091aee08:'e06f40f9800000b4e4160094f60300aa',
+                       0xfffffff0091ae768:'480340b9e9ff9752e97fbe720801090a'})
+        hooks.append(('signature',0xfffffff0091ad774))
+        links['_dvm_ct_complete']=0xfffffff0091aee08
+    if a.file_policy>=4:
+        guards.update({0xfffffff00afc9af4:'5f2403d5610000b4084c40f928000039',
+                       0xfffffff00b044f3c:'7f2303d5ff8302d1f65707a9f44f08a9',
+                       0xfffffff00b04501c:'7f2303d5ff8302d1f65707a9f44f08a9',
+                       0xfffffff00b044f6c:'a90380524a008052e91300b9ea1f00b9',
+                       0xfffffff00b04504c:'c9038052e91300b929008052e95f0039'})
+        links.update(_dvm_blob_hash=0xfffffff00afc9af4,
+                     _dvm_authorize_hash=0xfffffff00b044f3c,_dvm_match_hash=0xfffffff00b04501c)
+    if a.file_policy>=5:
+        guards[0xfffffff0091ac980]='0000a252b97100940000a452b7710094'
     b=a.bootkc.read_bytes()
     if hashlib.sha256(b).hexdigest()!=SHA:raise ValueError('requires pinned managed-export BootKC')
     for va,value in guards.items():
@@ -97,9 +113,9 @@ def build(a):
         lines += [f'stp x{i}, x{i+1}, [sp, #{i*8}]' for i in range(0,18,2)]
         lines += ['stp x18, x30, [sp, #144]','mrs x16, nzcv','str x16, [sp, #160]']
         lines += [f'stp q{i}, q{i+1}, [sp, #{176+i*16}]' for i in range(0,32,2)]
-        lines += ['mov x0, x19','mov x1, x21','ldr x2, [sp, #848]',
+        lines += ['mov x0, x19','mov x1, x21','ldr x2, [sp, #848]','mov x3, x26',
                   'bl _dvm_development_ct','cbz w0, .Lct_deny']
-        for label,target in (('.Lct_allow','_dvm_ct_accept'),('.Lct_deny','_dvm_ct_reject')):
+        for label,target in (('.Lct_allow','_dvm_ct_complete' if a.file_policy>=3 else '_dvm_ct_accept'),('.Lct_deny','_dvm_ct_reject')):
             lines += [label+':']
             lines += [f'ldp q{i}, q{i+1}, [sp, #{176+i*16}]' for i in range(0,32,2)]
             lines += ['ldr x16, [sp, #160]','msr nzcv, x16']
@@ -124,6 +140,10 @@ def build(a):
     for name,address in [('uc',0xfffffff00b1f1a10)]+hooks:
         put(address,struct.pack('<I',0xd503245f)+branch(address+4,table['_dvm_development_'+name]),name)
     if a.file_policy:put(0xfffffff0091ae5c8,branch(0xfffffff0091ae5c8,table['_dvm_ct_branch']),'scoped ad-hoc CT decision')
+    if a.file_policy>=5:
+        # Keep only the compilation-service capability in this isolated test
+        # image. The adjacent local-signing disable and TXM remain unchanged.
+        put(0xfffffff0091ac984,struct.pack('<I',0xd503201f),'retain kernel compilation-service capability on iPhone')
     so,va,old=preceding;size=CAVE+len(payload)-va
     put(BASE+so+32,struct.pack('<Q',size),'preceding RX VM extent')
     put(BASE+so+48,struct.pack('<Q',size),'preceding RX file extent')
@@ -139,5 +159,5 @@ def build(a):
     (a.out/'ledger.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps(report))
 if __name__=='__main__':
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--bootkc',type=Path,required=True);p.add_argument('--out',type=Path,required=True);p.add_argument('--dtree',type=Path,required=True)
-    p.add_argument('--file-policy',type=int,choices=(0,1,2),default=0,help='0: prior probe; 1: staged ad-hoc CT gate and mmap observation; 2: also scoped observed RX mmap exception')
+    p.add_argument('--file-policy',type=int,choices=(0,1,2,3,4,5),default=0,help='0: prior probe; 1: CT gate; 2: also RX mmap; 3: AMFI completion; 4: stock TXM compilation-hash authorization; 5: retain kernel compilation capability')
     build(p.parse_args())

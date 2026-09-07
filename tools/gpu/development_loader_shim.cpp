@@ -23,6 +23,11 @@ static bool entitled(void *proc) {
 #if DVM_LOADER_FIX >= 1
 extern "C" unsigned dvm_blob_flags(void *);
 extern "C" int dvm_original_mmap(void *,void *,int,int,unsigned long long,int *);
+#if DVM_LOADER_FIX >= 4
+extern "C" const unsigned char *dvm_blob_hash(void *,unsigned char *);
+extern "C" void dvm_authorize_hash(const unsigned char *,unsigned long);
+extern "C" bool dvm_match_hash(const unsigned char *,unsigned long);
+#endif
 static bool stagedPath(const char *path) {
     const char *prefix="/private/var/tmp/dvm-gpu-runner/";
     if(!path)return false;
@@ -34,15 +39,41 @@ static bool stagedPath(const char *path) {
     do {if(*path++!=*suffix)return false;}while(*suffix++);
     return true;
 }
-// The ad-hoc signature has already been parsed. Grant only this test-file
-// policy exception; retain its real CT bits and the remaining AMFI checks.
-extern "C" bool dvm_development_ct(const char *path,void *blob,unsigned long long policy) {
+// The ad-hoc signature has already been parsed. Modes 1/2 retain subsequent
+// AMFI policy checks; mode 3 selects the existing completion path for this
+// scoped test bundle. Real CT bits and the callback's return remain intact.
+extern "C" bool dvm_development_ct(const char *path,void *blob,unsigned long long policy,unsigned *outputFlags) {
     void *proc=dvm_current_proc();
     if(policy||!stagedPath(path)||!entitled(proc)||
        !(dvm_csflags(proc)&0x10000000)||!dvm_developer_mode())return false;
     unsigned flags=dvm_blob_flags(blob);
     bool allow=(flags&2)!=0;
     dvm_printf("DVM_DEV_LOADER ct pid=%d flags=0x%x policy=0x%llx allow=%d path=%s\n",dvm_pid(),flags,policy,allow,path);
+#if DVM_LOADER_FIX >= 4
+    if(allow){
+        unsigned char length=0;
+        const unsigned char *hash=dvm_blob_hash(blob,&length);
+        if(!hash||length<20||length>64)return false;
+        bool hasEntitlement=false;
+        if(dvm_entitled(proc,"com.apple.private.amfi.can-load-cdhash",&hasEntitlement)||!hasEntitlement)return false;
+        // Stock wrappers own the compilation-service lock and TXM calls.
+        // This replaces the monitor's single authorized hash slot, not a TC.
+        dvm_authorize_hash(hash,length);
+        bool matched=dvm_match_hash(hash,length);
+        char hex[129];const char *digits="0123456789abcdef";
+        for(unsigned i=0;i<length;i++){hex[2*i]=digits[hash[i]>>4];hex[2*i+1]=digits[hash[i]&15];}
+        hex[2*length]=0;
+        dvm_printf("DVM_DEV_LOADER compilation_hash pid=%d length=%u matched=%d hash=%s\n",dvm_pid(),length,matched,hex);
+        if(!matched)return false;
+    }
+#endif
+#if DVM_LOADER_FIX >= 3
+    if(allow){
+        // Same privilege-bit removal as AMFI's non-platform continuation.
+        unsigned before=*outputFlags;*outputFlags&=0xf3ffbfff;
+        dvm_printf("DVM_DEV_LOADER completion_policy pid=%d flags_before=%x flags_after=%x\n",dvm_pid(),before,*outputFlags);
+    }
+#endif
     return allow;
 }
 extern "C" int dvm_development_mmap(void *cred,void *fg,int prot,int flags,
@@ -64,6 +95,20 @@ extern "C" int dvm_development_mmap(void *cred,void *fg,int prot,int flags,
     }
     return result;
 }
+#if DVM_LOADER_FIX >= 3
+// Exact callback prologue and its two stack arguments match the public MAC
+// signature-check ABI. Observe the original return/output, never replace it.
+extern "C" int dvm_original_signature(void *,void *,int,void *,unsigned *,unsigned *,int,unsigned,char **,unsigned long *);
+extern "C" int dvm_development_signature(void *vp,void *label,int cpu,void *blob,
+        unsigned *flags,unsigned *signer,int options,unsigned platform,char **fatal,unsigned long *fatalLength) {
+    unsigned before=*flags;
+    int result=dvm_original_signature(vp,label,cpu,blob,flags,signer,options,platform,fatal,fatalLength);
+    void *proc=dvm_current_proc();
+    if(entitled(proc)&&(dvm_csflags(proc)&0x10000000))
+        dvm_printf("DVM_DEV_LOADER signature pid=%d result=%d flags_before=%x flags_after=%x signer=%x fatal_length=%lu\n",dvm_pid(),result,before,*flags,signer?*signer:0,fatalLength?*fatalLength:0);
+    return result;
+}
+#endif
 #endif
 extern "C" int dvm_development_policy(void *proc) {
     return entitled(proc)?0:dvm_original_policy(proc);
