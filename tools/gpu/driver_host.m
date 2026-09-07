@@ -7,6 +7,7 @@
 #include "driver_capabilities.h"
 #include "blur_wire.h"
 #include "present_host.h"
+#include "shared_render_host.h"
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <errno.h>
@@ -31,8 +32,10 @@ enum {
 @property(nonatomic) NSUInteger width, height, row;
 @property(nonatomic) MTLPixelFormat format;
 @property(nonatomic,strong) DVMEntry *parent;
+@property(nonatomic,strong) DVMSharedRender *sharedRender;
 @end
 @implementation DVMEntry
+- (void)dealloc {_object=nil;_sharedRender=nil;}
 @end
 
 @interface DVMHost : NSObject
@@ -287,7 +290,7 @@ static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) 
         memcpy([(id<MTLBuffer>)b.object contents], data.bytes, data.length);
         return @{@"seq" : @(seq), @"ok" : @YES};
     }
-    if (!entry || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
+    if (!entry || entry.sharedRender || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
         data.length != row * entry.height * [(id<MTLTexture>)entry.object depth])
         return HostError(seq, EINVAL, @"upload must contain one complete texture");
     MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
@@ -308,6 +311,7 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
     DVMEntry *entry = Entry(host, request[@"texture"], @"texture");
     if (!entry)
         return HostError(seq, ENOENT, @"unknown texture handle");
+    if(entry.sharedRender)return HostError(seq,ENOTSUP,@"shared render pixels use owned mapping, not readback RPC");
     NSMutableData *data = [NSMutableData dataWithLength:entry.textureBytes];
     MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
     [(id<MTLTexture>)entry.object getBytes:data.mutableBytes
@@ -326,6 +330,8 @@ static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request)
     if (!Number(request[@"handle"], &handle) || !host.entries[@(handle)])
         return HostError(seq, ENOENT, @"unknown handle");
     DVMEntry *entry = host.entries[@(handle)];
+    if(entry.sharedRender&&entry.sharedRender.state!=DVMSharedIdle)
+        return HostError(seq,EBUSY,@"shared render release before retirement");
     for(DVMEntry *other in host.entries.allValues)if(other.parent==entry)
         return HostError(seq,EBUSY,@"buffer retained by texture view");
     if([entry.kind isEqual:@"resident"]&&[(DVMResidentBlur *)entry.object displayPending])
@@ -462,7 +468,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         id encoded = u[@"data"];
         NSData *data = DVMBPayload(encoded);
         uint64_t row = 0;
-        if (!entry || (buffer && u[@"texture"]) || !data || data.length != entry.textureBytes ||
+        if (!entry || entry.sharedRender || (buffer && u[@"texture"]) || !data || data.length != entry.textureBytes ||
             [written containsObject:@(entry.handle)] ||
             (!buffer && (!Number(u[@"row"], &row) || row != entry.row)))
             return HostError(seq, EINVAL, @"invalid or duplicate batch upload");
@@ -531,6 +537,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
 #include "consumer_resource_host.inc"
 #include "consumer_render_host.inc"
 #include "consumer_function_host.inc"
+#include "shared_render_host.inc"
 
 static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *request) {
     NSString *op = request[@"op"];
@@ -538,6 +545,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
         return HostError(seq, EINVAL, @"request lacks op");
     if([op isEqual:@"capabilities"])return @{@"seq":@(seq),@"ok":@YES,@"contract":DVMContractProfile()};
     if([op hasPrefix:@"resident"])return ResidentRequest(host,seq,request);
+    if([op hasPrefix:@"sharedRender"])return SharedRenderRequest(host,seq,request);
     if([op isEqual:@"depthState"])return DepthState(host,seq,request);
     if([op isEqual:@"linearLayout"])return LinearLayout(host,seq,request);
     if([op isEqual:@"linearTexture"])return LinearTexture(host,seq,request);

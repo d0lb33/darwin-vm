@@ -88,7 +88,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     for(NSDictionary *u in uploads){
         if(![u isKindOfClass:NSDictionary.class])return HostError(seq,EINVAL,@"render upload shape");
         BOOL buffer=u[@"buffer"]!=nil;DVMEntry *e=Entry(host,u[buffer?@"buffer":@"texture"],buffer?@"buffer":@"texture");NSData *data=DVMBPayload(u[@"data"]);
-        if(!e||!data||data.length!=e.textureBytes||(buffer&&u[@"texture"])||(!buffer&&![u[@"row"] isEqual:@(e.row)])||[seen containsObject:@(e.handle)])return HostError(seq,EINVAL,@"render upload extent/ownership");
+        if(!e||e.sharedRender||!data||data.length!=e.textureBytes||(buffer&&u[@"texture"])||(!buffer&&![u[@"row"] isEqual:@(e.row)])||[seen containsObject:@(e.handle)])return HostError(seq,EINVAL,@"render upload extent/ownership");
         [seen addObject:@(e.handle)];[transfers addObject:@[e,data]];
     }
     [seen removeAllObjects];
@@ -96,10 +96,20 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     // Encode into an uncommitted command buffer. Validate every pass before any
     // upload or commit, so a bad later operation cannot execute an earlier pass.
     id<MTLCommandBuffer> cb=[host.queue commandBuffer];NSUInteger draws=0;
-    NSMutableSet *written=[NSMutableSet set];BOOL serialIndices=NO;
+    NSMutableSet *written=[NSMutableSet set],*sharedTargets=[NSMutableSet set];BOOL serialIndices=NO;
+    if(!preflight){
+        // Host-only completion fault injection; the normal reply must wait for
+        // the GPU, not merely for command encoding or shared-memory mapping.
+        for(NSDictionary *pass in passes){DVMSharedRender *shared=Entry(host,pass[@"target"],@"texture").sharedRender;
+            if(shared.completionDelayUS){id<MTLSharedEvent> event=[host.device newSharedEvent];if(!event)return HostError(seq,ENOMEM,@"shared render delay event");
+                [cb encodeWaitForEvent:event value:1];unsigned delay=shared.completionDelayUS;
+                dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)delay*1000),dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0),^{event.signaledValue=1;});break;}
+        }
+    }
     for(NSDictionary *pass in passes){
         if(![pass isKindOfClass:NSDictionary.class]||![pass[@"kind"] isEqual:@"render"])return HostError(seq,EINVAL,@"mixed render batch");
         DVMEntry *target=Entry(host,pass[@"target"],@"texture");NSArray *clear=pass[@"clear"],*ops=pass[@"operations"];
+        if(target.sharedRender){if(target.sharedRender.state!=DVMSharedAcquired)return HostError(seq,EBUSY,@"shared render target is not acquired");[sharedTargets addObject:target.sharedRender];}
         if(!target||[(id<MTLTexture>)target.object textureType]!=MTLTextureType2D||!([(id<MTLTexture>)target.object usage]&MTLTextureUsageRenderTarget)||!RenderUInt(pass[@"load"],2)||!RenderUInt(pass[@"store"],1)||!RenderNumbers(clear,4)||![ops isKindOfClass:NSArray.class]||ops.count>256)return HostError(seq,EINVAL,@"render pass descriptor");
         MTLRenderPassDescriptor *d=[MTLRenderPassDescriptor renderPassDescriptor];d.colorAttachments[0].texture=target.object;d.colorAttachments[0].loadAction=[pass[@"load"] unsignedIntegerValue];d.colorAttachments[0].storeAction=[pass[@"store"] unsignedIntegerValue];d.colorAttachments[0].clearColor=MTLClearColorMake([clear[0] doubleValue],[clear[1] doubleValue],[clear[2] doubleValue],[clear[3] doubleValue]);
         id<MTLRenderCommandEncoder> encoder=[cb renderCommandEncoderWithDescriptor:d];
@@ -127,7 +137,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
             } else if(([name isEqual:@"vertexBytes"]||[name isEqual:@"fragmentBytes"])&&op.count==3&&RenderUInt(op[2],DVM_RENDER_BUFFERS-1)){
                 NSData *data=DVMBPayload(op[1]);if(!data.length||data.length>DVM_INLINE_BYTES){failure=@"render inline bounds";break;}if([name isEqual:@"vertexBytes"]){[encoder setVertexBytes:data.bytes length:data.length atIndex:[op[2] unsignedIntegerValue]];vertexBuffers[op[2]]=@[@(data.length)];}else {[encoder setFragmentBytes:data.bytes length:data.length atIndex:[op[2] unsignedIntegerValue]];fragmentBuffers[op[2]]=@[@(data.length)];}
             } else if(([name isEqual:@"fragmentTexture"]||[name isEqual:@"fragmentSampler"])&&op.count==3&&RenderUInt(op[2],[name isEqual:@"fragmentTexture"]?DVM_FRAGMENT_TEXTURES-1:DVM_FRAGMENT_SAMPLERS-1)){
-                BOOL texture=[name isEqual:@"fragmentTexture"];DVMEntry *e=Entry(host,op[1],texture?@"texture":@"sampler");if((!e&&![op[1] isEqual:@0])||(texture&&e&&(!([(id<MTLTexture>)e.object usage]&MTLTextureUsageShaderRead)||e==target))){failure=@"fragment resource ownership/usage";break;}if(texture){[encoder setFragmentTexture:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentTextures[op[2]]=e;}else {[encoder setFragmentSamplerState:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentSamplers[op[2]]=e;}
+                BOOL texture=[name isEqual:@"fragmentTexture"];DVMEntry *e=Entry(host,op[1],texture?@"texture":@"sampler");if((!e&&![op[1] isEqual:@0])||(texture&&e&&(!([(id<MTLTexture>)e.object usage]&MTLTextureUsageShaderRead)||e==target||(e.sharedRender&&e.sharedRender.state!=DVMSharedAcquired)))){failure=@"fragment resource ownership/usage";break;}if(texture){[encoder setFragmentTexture:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentTextures[op[2]]=e;}else {[encoder setFragmentSamplerState:e.object atIndex:[op[2] unsignedIntegerValue]];fragmentSamplers[op[2]]=e;}
             } else if([name isEqual:@"draw"]&&op.count==5&&RenderUInt(op[1],4)&&RenderUInt(op[2],4096)&&RenderUInt(op[3],4096)&&RenderUInt(op[4],64)&&pipeline){
                 NSUInteger start=[op[2] unsignedIntegerValue],count=[op[3] unsignedIntegerValue],instances=[op[4] unsignedIntegerValue];if(!count||!instances||start+count>4096){failure=@"draw extent";break;}
                 for(NSArray *layout in pipeline.object[@"layouts"]){NSUInteger elements=[layout[2] unsignedIntegerValue]==2?instances:[layout[2] unsignedIntegerValue]==0?1:start+count;NSArray *bound=vertexBuffers[layout[0]];if(!bound||elements*[layout[1] unsignedIntegerValue]>[bound[0] unsignedIntegerValue]){failure=@"vertex footprint exceeds binding";break;}}
@@ -171,7 +181,8 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     if(preflight)return @{@"ok":@YES,@"serialIndices":@(serialIndices),@"writtenBuffers":[[written allObjects] sortedArrayUsingSelector:@selector(compare:)]};
     for(NSArray *transfer in transfers){DVMEntry *e=transfer[0];NSData *data=transfer[1];if([e.kind isEqual:@"buffer"])memcpy([(id<MTLBuffer>)e.object contents],data.bytes,data.length);else [(id<MTLTexture>)e.object replaceRegion:MTLRegionMake3D(0,0,0,e.width,e.height,[(id<MTLTexture>)e.object depth]) mipmapLevel:0 slice:0 withBytes:data.bytes bytesPerRow:e.row bytesPerImage:e.row*e.height];}
     [cb commit];[cb waitUntilCompleted];host.submissions++;
-    if(cb.status!=MTLCommandBufferStatusCompleted)return NSErrorReply(seq,cb.error,@"render GPU completion");
+    if(cb.status!=MTLCommandBufferStatusCompleted){for(DVMSharedRender *shared in sharedTargets)shared.state=DVMSharedFailed;return NSErrorReply(seq,cb.error,@"render GPU completion");}
+    for(DVMSharedRender *shared in sharedTargets)shared.completedWrites++;
     host.renderPasses+=passes.count;host.renderDraws+=draws;
     NSMutableDictionary *result=[NSMutableDictionary dictionary];for(DVMEntry *e in reads)result[@(e.handle).stringValue]=[[NSData dataWithBytes:[(id<MTLBuffer>)e.object contents] length:e.textureBytes] base64EncodedStringWithOptions:0];
     fprintf(stderr,"DVM_DRIVER_RENDER seq=%llu passes=%lu draws=%lu status=%lu gpu_us=%.3f\n",(unsigned long long)seq,(unsigned long)passes.count,(unsigned long)draws,(unsigned long)cb.status,(cb.GPUEndTime-cb.GPUStartTime)*1e6);
@@ -201,12 +212,17 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
         [parts addObjectsFromArray:passParts];
     }
     NSDictionary *last=nil;double gpuUs=0;id gpuStart=nil,kernelStart=nil;
-    uint64_t initialPasses=host.renderPasses,initialDraws=host.renderDraws;
+    uint64_t initialPasses=host.renderPasses,initialDraws=host.renderDraws,initialSubmissions=host.submissions;
     for(NSUInteger i=0;i<parts.count;i++){
         NSMutableDictionary *part=[r mutableCopy];part[@"commands"]=@[parts[i]];
         part[@"uploads"]=i?@[]:r[@"uploads"];part[@"readbacks"]=i+1==parts.count?r[@"readbacks"]:@[];
         last=RenderSubmitPart(host,seq,part,NO);
-        if(![last[@"ok"] boolValue])return last;
+        if(![last[@"ok"] boolValue]){
+            // A GPU-generated invalid index can fail only after earlier draws
+            // executed. Such a partially rendered frame must not be sealed.
+            if(host.submissions!=initialSubmissions)for(NSDictionary *p in parts){DVMSharedRender *shared=Entry(host,p[@"target"],@"texture").sharedRender;if(shared)shared.state=DVMSharedFailed;}
+            return last;
+        }
         if(!i){gpuStart=last[@"gpu_start"];kernelStart=last[@"kernel_start"];}
         gpuUs+=[last[@"gpu_us"] doubleValue];
     }

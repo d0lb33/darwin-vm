@@ -25,6 +25,7 @@ int main(void){@autoreleasepool {
     id<MTLLibrary> native=[host.device newLibraryWithSource:source options:nil error:&error];
     require(native!=nil,error.description.UTF8String);
     __block uint64_t seq=0;__block BOOL corrupt=NO;__block unsigned chunks=0;__block unsigned uploads=0;
+    __block DVMSharedRender *partialLease=nil;
     DVMMetalRPC rpc=^NSDictionary *(NSDictionary *request,NSError **outError){
         @synchronized(host) {
         // Round-trip every request/reply through JSON, including writeback IDs.
@@ -32,7 +33,21 @@ int main(void){@autoreleasepool {
         if([r[@"op"] isEqual:@"writeRenderBuffer"])uploads++;
         NSDictionary *reply;
         if([r[@"op"] isEqual:@"library"]){DVMEntry *e=nil;require(Add(host,@"library",native,&e),"test library allocation");reply=@{@"ok":@YES,@"handle":@(e.handle),@"functionNames":native.functionNames};}
-        else reply=ProcessRequest(host,++seq,r);
+        else {
+            DVMEntry *sharedTarget=nil;
+            if(partialLease&&[r[@"op"] isEqual:@"renderSubmit"]){
+                // State-only fixture over this test's real GPU render target.
+                // Separate scattered-page tests validate the physical mapping.
+                sharedTarget=Entry(host,r[@"commands"][0][@"target"],@"texture");
+                require(sharedTarget!=nil,"partial frame target");sharedTarget.sharedRender=partialLease;
+            }
+            reply=ProcessRequest(host,++seq,r);
+            if(sharedTarget){
+                require(partialLease.state==DVMSharedFailed,"partial GPU frame poisons shared lease");
+                require(![SharedRenderRequest(host,++seq,@{@"op":@"sharedRenderSeal",@"handle":@(sharedTarget.handle),@"epoch":@1})[@"ok"] boolValue],"partial frame cannot be presented");
+                sharedTarget.sharedRender=nil;
+            }
+        }
         if([r[@"op"] isEqual:@"readRenderBuffer"]){chunks++;if(corrupt&&[r[@"offset"] unsignedIntegerValue]>=32768){NSMutableDictionary *bad=[reply mutableCopy];bad[@"offset"]=@0;reply=bad;}}
         reply=[NSJSONSerialization JSONObjectWithData:[NSJSONSerialization dataWithJSONObject:reply options:0 error:nil] options:0 error:nil];
         if(![reply[@"ok"] boolValue]){if(outError)*outError=[NSError errorWithDomain:@"HostTest" code:[reply[@"code"] integerValue] userInfo:@{NSLocalizedDescriptionKey:reply[@"description"]?:@"failure"}];return nil;}
@@ -138,6 +153,7 @@ int main(void){@autoreleasepool {
                 require(cb.status==MTLCommandBufferStatusError&&host.submissions==before,"bad later alias binding rejected before any GPU draw");
             }
             for(unsigned invalid=0;invalid<2;invalid++)@autoreleasepool {
+                if(invalid){partialLease=[DVMSharedRender new];partialLease.state=DVMSharedAcquired;partialLease.epoch=1;}
                 memset(client,0,16384);uint32_t next=invalid?5000:2;
                 id<MTLCommandBuffer> cb=[q commandBuffer];id<MTLRenderCommandEncoder> re=[cb renderCommandEncoderWithDescriptor:pass];
                 [re setRenderPipelineState:generated];[re setVertexBuffer:clientBuffer offset:0 atIndex:30];[re setVertexBytes:&next length:4 atIndex:8];[re setFragmentBytes:red length:16 atIndex:30];
@@ -145,7 +161,7 @@ int main(void){@autoreleasepool {
                 [re drawIndexedPrimitives:MTLPrimitiveTypeTriangle indexCount:3 indexType:MTLIndexTypeUInt32 indexBuffer:clientBuffer indexBufferOffset:16];[re endEncoding];
                 uint64_t before=host.submissions;[cb commit];[cb waitUntilCompleted];
                 require(freed==0,"in-flight and retained client lifetime");
-                if(invalid)require(cb.status==MTLCommandBufferStatusError&&host.submissions==before+1,"GPU-generated invalid indices rejected before dependent draw");
+                if(invalid){require(cb.status==MTLCommandBufferStatusError&&host.submissions==before+1,"GPU-generated invalid indices rejected before dependent draw");require(partialLease.state==DVMSharedFailed,"failed shared frame retained as failed");partialLease=nil;}
                 else {
                     require(cb.status==MTLCommandBufferStatusCompleted&&host.submissions==before+2,"dependent indexed draws split at completed GPU boundary");
                     require(((uint32_t *)client)[0]==2&&((uint32_t *)client)[4]==2,"GPU writes published directly to client storage");
