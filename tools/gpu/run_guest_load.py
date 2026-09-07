@@ -41,6 +41,7 @@ def main():
         help='after a standalone probe completes, require native presentation and stable input with a fresh ACK')
     p.add_argument('--driver-present',action='store_true',help='mode-3 resident blur acceptance with normal DCP frame witness')
     p.add_argument('--driver-consumer',action='store_true',help='exact CARenderer offscreen acceptance using the mode-3 transport; separate from display acceptance')
+    p.add_argument('--driver-runner',action='store_true',help='persistent supervisor; queued jobs use fresh guest processes until an explicit stop file')
     p.add_argument('--present-frames',type=int,default=33,help='bounded batch size, including first-use frame (2..8192)')
     p.add_argument('--present-hz',type=int,choices=(0,30,60),default=0,help='absolute guest pacing; zero is unpaced')
     p.add_argument('--driver-mmio',action='store_true',help='use shared RAM and MMIO notifications with --driver-worker')
@@ -71,6 +72,8 @@ def main():
     p.add_argument('--driver-late-launch',action='store_true',help='diagnostic: allow 240 seconds for the staged 180-second launchd activation')
     p.add_argument('--surface-observe-display',action='store_true',help='after GPU completion require a native presentation and fresh native HID ping ACK')
     a = p.parse_args()
+    if a.driver_runner and (not a.driver_consumer or not a.driver_worker or (a.driver_worker.parent/'test-runner.txt').read_text().strip()!='1'):
+        p.error('runner requires a matching opt-in consumer supervisor build')
     if a.driver_consumer and (not a.driver_present or not a.driver_worker or (a.driver_worker.parent/'consumer-probe.txt').read_text().strip()!='1'):
         p.error('consumer acceptance requires matching opt-in mode-3 build')
     if not 2<=a.present_frames<=8192 or ((a.present_frames!=33 or a.present_hz) and not a.driver_present):
@@ -164,6 +167,9 @@ def main():
             shutil.copyfile(Path(__file__).with_name(name),out/name)
     if a.driver_worker:
         peer_class=MMIOPeer if a.driver_mmio else DriverPeer
+        if a.driver_runner:
+            from driver_runner_peer import RunnerPeer
+            peer_class=RunnerPeer
         aux_peer=peer_class(out,a.driver_worker,a.library_cache,boot=driver_boot)
         aux_peer.consumer=a.driver_consumer
         if a.driver_present and (a.present_frames!=33 or a.present_hz):
@@ -171,6 +177,9 @@ def main():
             atomic_json(out/'present-config.json',dict(frames=a.present_frames,hz=a.present_hz))
         if a.driver_mmio:
             shutil.copyfile(Path(__file__).with_name("driver_mmio_peer.py"),out/"driver_mmio_peer.py")
+            if a.driver_runner:
+                for name in ('driver_runner_peer.py','runner_control.py','verify_runner_job.py','replay_driver.py','consumer_verify.py'):
+                    shutil.copyfile(Path(__file__).with_name(name),out/name)
             shutil.copyfile(Path(__file__).with_name("driver_binary.py"),out/"driver_binary.py")
             shutil.copyfile(Path(__file__).with_name("blur_peer.py"),out/"blur_peer.py")
             shutil.copyfile(Path(__file__).with_name("present_peer.py"),out/"present_peer.py")
@@ -293,15 +302,17 @@ def main():
                         event=dict(seconds=round(time.monotonic()-started,3),line=line,source='shared-ram-audit')
                         report['events'].append(event);print(json.dumps(event),flush=True)
                         driver_last_progress=time.monotonic()
-                        if 'GPU_LOAD_DRIVER_READY' in line:driver_ready_seen=True
-                        if 'GPU_LOAD_ERROR' in line:raise RuntimeError('shared-RAM guest failure: '+line)
-                        if a.driver_consumer and line=='GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0':
+                        if 'GPU_LOAD_DRIVER_READY' in line or (a.driver_runner and 'GPU_LOAD_RUNNER_READY' in line):driver_ready_seen=True
+                        if 'GPU_LOAD_RUNNER_FATAL ' in line or ('GPU_LOAD_ERROR' in line and not a.driver_runner):raise RuntimeError('shared-RAM guest failure: '+line)
+                        if a.driver_runner and line=='GPU_LOAD_RUNNER_COMPLETE':
+                            audit_complete=True;aux_complete=True;reason='guest load probe completed'
+                        if a.driver_consumer and not a.driver_runner and line=='GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0':
                             audit_complete=True;aux_complete=True;reason='guest load probe completed'
                         if line in ('GPU_LOAD_COMPLETE result=pass scope=metal-driver-luma submissions=8 resources=0','GPU_LOAD_COMPLETE result=pass scope=metal-driver-blur submissions=952 resources=0',f'GPU_LOAD_COMPLETE result=pass scope=metal-driver-present submissions={a.present_frames} resources=0'):
                             audit_complete=True;aux_complete=True
                             report['driver_complete_seconds']=time.monotonic()-started
                             report['completion_source']='shared-ram-audit'
-                    if audit_complete and a.driver_consumer:break
+                    if audit_complete and a.driver_consumer and not a.driver_runner:break
                     if audit_complete and a.driver_present:
                         if present_recovery_baseline is None:
                             present_recovery_baseline=json.loads((out/'input-status.json').read_text())

@@ -1,4 +1,4 @@
-// Experimental process-local Metal compute driver. Public selector/structure ABI;
+// Experimental process-local Metal forwarding driver. Public selector/structure ABI;
 // only the documented subset is implemented. Never publish this device globally.
 #import "driver_api.h"
 #import <CommonCrypto/CommonDigest.h>
@@ -121,7 +121,7 @@ static void reject(NSString *s) {
 - (id<MTLSamplerState>)newSamplerStateWithDescriptor:(MTLSamplerDescriptor *)d {return DVMNewSampler(self,d);}
 - (id<MTLDepthStencilState>)newDepthStencilStateWithDescriptor:(MTLDepthStencilDescriptor *)d {return DVMNewDepth(self,d);}
 - (NSString *)name {
-    return @"DVM host Metal (experimental compute subset)";
+    return @"DVM host Metal (experimental render/compute subset)";
 }
 - (NSString *)vendorName {return @"Darwin VM";}
 - (NSDictionary *)contractCapabilities {

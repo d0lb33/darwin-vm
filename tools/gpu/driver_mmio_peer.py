@@ -49,6 +49,7 @@ class MMIOPeer(DriverPeer):
             env['DVM_DRIVER_MANAGED_RAM']=str(self.out/'managed-ram.bin')
             env['DVM_DRIVER_MANAGED_PAGES']=str(self.out/'managed-pages.bin')
         env.update(DVM_DRIVER_LIBRARY=str(self.library),DVM_DRIVER_BOOTSTRAP='1')
+        self.worker_env=env.copy()
         self.proc=subprocess.Popen([str(self.worker)],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=self.log,env=env)
         (self.out/'driver-inputs.json').write_text(json.dumps(dict(worker=str(self.worker),worker_sha256=hashlib.sha256(self.worker.read_bytes()).hexdigest(),library=str(self.library),air_sha256=AIR_SHA,transport='shared-ram-mmio'),indent=2)+'\n')
         try:
@@ -94,10 +95,16 @@ class MMIOPeer(DriverPeer):
         binary=struct.unpack_from("<I",raw)[0]==REQUEST
         request=dict(seq=struct.unpack_from("<Q",raw,8)[0],op="blurSubmit" if blur else "submit") if binary or blur else json.loads(raw)
         if not isinstance(request,dict) or request.get('seq')!=seq:raise ValueError('MMIO request inner sequence')
-        started=time.monotonic_ns();self.proc.stdin.write(struct.pack('<I',n)+raw);self.proc.stdin.flush()
-        length,=struct.unpack('<I',self.read(4))
-        if not 0<length<=self.max_bytes:raise ValueError('host reply length')
-        output=self.read(length);reply=blur_peer.reply(output) if struct.unpack_from("<I",output)[0]==blur_peer.REPLY else decode_reply(output) if struct.unpack_from("<I",output)[0]==REPLY else json.loads(output)
+        started=time.monotonic_ns()
+        control=self.control_reply(request) if hasattr(self,'control_reply') else None
+        if control is None:
+            self.proc.stdin.write(struct.pack('<I',n)+raw);self.proc.stdin.flush()
+            length,=struct.unpack('<I',self.read(4))
+            if not 0<length<=self.max_bytes:raise ValueError('host reply length')
+            output=self.read(length);reply=blur_peer.reply(output) if struct.unpack_from("<I",output)[0]==blur_peer.REPLY else decode_reply(output) if struct.unpack_from("<I",output)[0]==REPLY else json.loads(output)
+        else:
+            reply=dict(control,seq=seq,ok=True);output=json.dumps(reply).encode();length=len(output)
+            if length>self.max_bytes:raise ValueError('runner reply extent')
         if not isinstance(reply,dict) or reply.get('seq')!=seq:raise ValueError('host reply sequence')
         self.ram[self.reply_offset:self.reply_offset+length]=output
         self.ram[0x80:0xa0]=self.header+struct.pack('<QII',seq,length,zlib.crc32(output))
@@ -112,6 +119,13 @@ class MMIOPeer(DriverPeer):
         record=dict(wire_encoding="blur-v1" if blur else "binary-v1" if binary else "json",seq=seq,op=request.get('op'),request_bytes=n,reply_bytes=length,
             host_service_us=service_us,host_received_ns=started,host_completed_ns=time.monotonic_ns(),
             request={k:v for k,v in request.items() if k!='data'},reply=reply)
+        if request.get('op') in ('writeRenderBuffer','upload') and 'data' in request:
+            # Generated resource contents are replayable; Apple libraries stay
+            # referenced by their verified hash and separate local AIR cache.
+            name=f'render-upload-{seq:06d}.json'
+            (self.out/name).write_text(json.dumps(request)+'\n')
+            record['upload_file']=name
+            record['upload_sha256']=hashlib.sha256((self.out/name).read_bytes()).hexdigest()
         if binary:
             (self.out/f"binary-request-{seq:04d}.bin").write_bytes(raw)
             (self.out/f"binary-reply-{seq:04d}.bin").write_bytes(output)
@@ -121,10 +135,11 @@ class MMIOPeer(DriverPeer):
         if self.sock is None:return []
         if self.ram[16:32]!=self.header:raise ValueError('audit session changed')
         head,=struct.unpack_from('<Q',self.ram,0x180)
-        if not self.audit_seen<=head<=getattr(self,'audit_limit',64):raise ValueError('audit head bounds')
+        limit=getattr(self,'audit_limit',64);ring=getattr(self,'runner',False)
+        if head<self.audit_seen or (head-self.audit_seen if ring else head)>limit:raise ValueError('audit head bounds')
         lines=[]
         while self.audit_seen<head:
-            expected=self.audit_seen+1;offset=0x1000+self.audit_seen*512
+            expected=self.audit_seen+1;offset=0x1000+(self.audit_seen%limit if ring else self.audit_seen)*512
             seq,n,c=struct.unpack_from('<QII',self.ram,offset)
             if seq!=expected or not 0<n<480:raise ValueError('audit slot framing')
             raw=self.ram[offset+16:offset+16+n]
@@ -133,6 +148,7 @@ class MMIOPeer(DriverPeer):
             if not line.startswith('GPU_LOAD_') or '\n' in line:raise ValueError('audit record format')
             self.audit_seen=seq;lines.append(line)
             with (self.out/'driver-audit.jsonl').open('a') as f:f.write(json.dumps(dict(seq=seq,line=line))+'\n')
+            if ring:struct.pack_into('<Q',self.ram,0x188,self.audit_seen)
         return lines
     def verify(self,events):
         if getattr(self,'consumer',False):

@@ -12,6 +12,10 @@ def verify(out,events,records):
         if seq!=i+1 or not 0<n<480 or zlib.crc32(data)!=crc:raise ValueError('consumer audit integrity')
         lines.append(data.decode().strip())
     if lines!=[x['line'] for x in events if x.get('source')=='shared-ram-audit'] or lines[-1]!='GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0':raise ValueError('consumer completion')
+    return verify_records(out,lines,records)
+
+def verify_records(out,lines,records):
+    out=Path(out)
     witnesses=[x for x in lines if x.startswith('GPU_LOAD_CA_VERIFIED ')]
     witness=re.fullmatch(r'GPU_LOAD_CA_VERIFIED width=64 height=64 passes=([1-9][0-9]*) draws=([1-9][0-9]*) bad_pixels=0',witnesses[0]) if len(witnesses)==1 else None
     if not witness:raise ValueError('missing guest pixel oracle')

@@ -6,6 +6,12 @@
 @protocol DVMConsumerCompletion
 - (NSDictionary *)consumerCompletion;
 @end
+#ifndef DVM_CA_FRAMES
+#define DVM_CA_FRAMES 1
+#endif
+#if DVM_CA_FRAMES > 1
+#include "consumer_sequence_probe.inc"
+#else
 static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {
     const char *stage="capability-batch";
     // Keep the renderer alive through the catch: its dealloc calls endFrame,
@@ -58,3 +64,4 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {
         exit(1);
     }
 }
+#endif

@@ -48,7 +48,7 @@ static NSDictionary *RenderPipeline(DVMHost *host,uint64_t seq,NSDictionary *r) 
         if(arg.index>=8||arg.arrayLength>1||arg.access!=MTLArgumentAccessReadOnly||
            (arg.type!=MTLArgumentTypeBuffer&&arg.type!=MTLArgumentTypeTexture&&arg.type!=MTLArgumentTypeSampler)||
            (!stage&&arg.type!=MTLArgumentTypeBuffer)||
-           (arg.type==MTLArgumentTypeTexture&&arg.textureType!=MTLTextureType2D))return HostError(seq,ENOTSUP,@"shader bindings exceed read-only render contract");
+           (arg.type==MTLArgumentTypeTexture&&arg.textureType!=MTLTextureType2D))return HostError(seq,ENOTSUP,[NSString stringWithFormat:@"shader binding outside render contract: stage=%u name=%@ index=%lu type=%lu access=%lu array=%lu textureType=%lu",stage,arg.name,(unsigned long)arg.index,(unsigned long)arg.type,(unsigned long)arg.access,(unsigned long)arg.arrayLength,(unsigned long)(arg.type==MTLArgumentTypeTexture?arg.textureType:0)]);
         [bindings addObject:@[@(stage),@(arg.type),@(arg.index),@(arg.type==MTLArgumentTypeBuffer?arg.bufferDataSize:0)]];
     }
     DVMEntry *entry;if(!Add(host,@"renderPipeline",@{@"state":p,@"layouts":layouts,@"format":c[0],@"bindings":bindings},&entry))return HostError(seq,ENOSPC,@"render state table");
@@ -100,6 +100,11 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
                 MTLScissorRect s={[op[1] unsignedIntegerValue],[op[2] unsignedIntegerValue],[op[3] unsignedIntegerValue],[op[4] unsignedIntegerValue]};if(!s.width||!s.height||s.width>target.width-s.x||s.height>target.height-s.y){failure=@"scissor bounds";break;}[encoder setScissorRect:s];
             } else if([name isEqual:@"blend"]&&op.count==5&&RenderNumbers([op subarrayWithRange:NSMakeRange(1,4)],4)) [encoder setBlendColorRed:[op[1] floatValue] green:[op[2] floatValue] blue:[op[3] floatValue] alpha:[op[4] floatValue]];
             else if(([name isEqual:@"vertexBuffer"]||[name isEqual:@"fragmentBuffer"])&&op.count==4&&RenderUInt(op[3],7)){
+                if([op[1] isEqual:@0]&&[op[2] isEqual:@0]){
+                    if([name isEqual:@"vertexBuffer"]){[encoder setVertexBuffer:nil offset:0 atIndex:[op[3] unsignedIntegerValue]];[vertexBuffers removeObjectForKey:op[3]];}
+                    else {[encoder setFragmentBuffer:nil offset:0 atIndex:[op[3] unsignedIntegerValue]];[fragmentBuffers removeObjectForKey:op[3]];}
+                    continue;
+                }
                 DVMEntry *b=Entry(host,op[1],@"buffer");uint64_t offset;if(!b||!Number(op[2],&offset)||offset>=b.textureBytes||offset%16){failure=@"render buffer bounds";break;}
                 if([name isEqual:@"vertexBuffer"]){[encoder setVertexBuffer:b.object offset:offset atIndex:[op[3] unsignedIntegerValue]];vertexBuffers[op[3]]=@[@(b.textureBytes-offset)];}else {[encoder setFragmentBuffer:b.object offset:offset atIndex:[op[3] unsignedIntegerValue]];fragmentBuffers[op[3]]=@[@(b.textureBytes-offset)];}
             } else if(([name isEqual:@"vertexBytes"]||[name isEqual:@"fragmentBytes"])&&op.count==3&&RenderUInt(op[2],7)){

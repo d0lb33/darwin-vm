@@ -255,6 +255,9 @@ static NSData *library(void) {
 #ifdef DVM_CA_PROBE
 #include "consumer_probe.inc"
 #endif
+#ifdef DVM_TEST_RUNNER
+#include "consumer_runner_guest.inc"
+#endif
 int main(int argc, char **argv) {
     @autoreleasepool {
         setvbuf(stderr, NULL, _IONBF, 0);
@@ -268,6 +271,9 @@ int main(int argc, char **argv) {
         memoryBudget();
         activityBegin();
         if (argc == 1) {
+#ifdef DVM_TEST_RUNNER
+            int result=DVMRunTestSupervisor(argv[0]);activityEnd();return result;
+#else
             // A launchd exit is otherwise silent on this guest. Keep an explicit
             // parent so SIGKILL and normal worker exit have observable evidence.
             int (*spawn)(pid_t *, const char *, const posix_spawn_file_actions_t *,
@@ -293,6 +299,7 @@ int main(int argc, char **argv) {
                 fail("worker-exit");
             activityEnd();
             return 0;
+#endif
         }
         if (argc != 2 || strcmp(argv[1], "--worker")) fail("arguments");
         fprintf(stderr, "GPU_LOAD_DRIVER_STAGE iokit\n");
@@ -403,12 +410,27 @@ int main(int argc, char **argv) {
         CC_SHA256(air.bytes, (CC_LONG)air.length, actual);
         if (memcmp(actual, digest, 32))
             fail("guest-air-identity");
-        NSBundle *bundle = [NSBundle bundleWithPath:@"/usr/local/libexec/DVMProxy.bundle"];
+        NSString *bundlePath=@"/usr/local/libexec/DVMProxy.bundle";
+#ifdef DVM_TEST_RUNNER
+        const char *staged=getenv("DVM_DRIVER_BUNDLE_PATH");
+        if(!staged||(strcmp(staged,"/usr/local/libexec/DVMProxy.bundle")&&
+            strncmp(staged,"/private/var/tmp/dvm-gpu-runner/",sizeof("/private/var/tmp/dvm-gpu-runner/")-1)&&
+            strncmp(staged,"/usr/local/libexec/dvm-gpu-runner/",sizeof("/usr/local/libexec/dvm-gpu-runner/")-1)))fail("runner-bundle-path");
+        bundlePath=@(staged);
+#endif
+        NSBundle *bundle = [NSBundle bundleWithPath:bundlePath];
         NSError *e = nil;
-        if (![bundle loadAndReturnError:&e])
+        if (![bundle loadAndReturnError:&e]) {
+            const char *message=e.description.UTF8String?:"no NSError";
+            for(unsigned part=0;*message&&part<32;part++) {
+                unsigned n=0;while(n<300&&message[n])n++;
+                fprintf(stderr,"GPU_LOAD_ERROR bundle_load_part=%u text=%.*s\n",part,n,message);message+=n;
+            }
+            if(*message)fprintf(stderr,"GPU_LOAD_ERROR bundle_load_truncated=1\n");
             fail("bundle-load");
+        }
         fprintf(stderr, "GPU_LOAD_DRIVER_STAGE bundle-loaded\n");
-        void *handle = dlopen("/usr/local/libexec/DVMProxy.bundle/DVMProxy", RTLD_NOW | RTLD_LOCAL);
+        void *handle = dlopen([bundlePath stringByAppendingPathComponent:@"DVMProxy"].UTF8String, RTLD_NOW | RTLD_LOCAL);
         DVMCreateMetalDeviceFn create = handle ? dlsym(handle,
 #ifdef DVM_DRIVER_BINARY
             "DVMCreateBinaryMetalDevice"
@@ -426,6 +448,13 @@ int main(int argc, char **argv) {
                 fail("device-protocol");
             fprintf(stderr, "GPU_LOAD_DRIVER_STAGE device-created\n");
 #ifdef DVM_CA_PROBE
+#ifdef DVM_TEST_RUNNER
+            const char *test=getenv("DVM_RUNNER_TEST");
+            if(test&&!strcmp(test,"package")){
+                void (*entry)(id<MTLDevice>)=dlsym(handle,"DVMRunGuestTest");
+                if(!entry)fail("runner-test-entry");entry(device);
+            } else
+#endif
             DVMRunQuartzCoreConsumer(device);
 #elif defined(DVM_DRIVER_PRESENT)
             DVMRunPresentedBlur(device,air,ns,handle,setupStart);

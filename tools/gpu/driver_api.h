@@ -1,7 +1,7 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 
-// Process-local, experimental compute subset. No global discovery or SPI claim.
+// Process-local, experimental render/compute subset. No global discovery claim.
 // The transport receives serialized calls on one device queue and must fail
 // closed after any framing/timeout error. It owns its session until block release.
 typedef NSDictionary * (^DVMMetalRPC)(NSDictionary *request, NSError **error);

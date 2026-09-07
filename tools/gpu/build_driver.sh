@@ -12,7 +12,14 @@ if [[ "$mode" == --mmio-present-shared-probe ]]; then mode=--mmio-present; share
 [[ "$mode" == nvme || "$mode" == --mmio || "$mode" == --mmio-binary || "$mode" == --mmio-blur || "$mode" == --mmio-present-contract || "$mode" == --mmio-present ]] || exit 2
 extra_flags=(-UDVM_DRIVER_MMIO)
 consumer_flags=(-UDVM_CA_PROBE)
-if [[ ${DVM_CA_PROBE:-0} == 1 ]]; then consumer_flags=(-DDVM_CA_PROBE); fi
+consumer_frames=${DVM_CA_FRAMES:-1}
+[[ "$consumer_frames" =~ ^[0-9]+$ ]] && (( (consumer_frames==1 || consumer_frames>=3) && consumer_frames<=4096 )) || exit 2
+consumer_flags+=(-DDVM_CA_FRAMES="$consumer_frames")
+if [[ ${DVM_CA_PROBE:-0} == 1 ]]; then consumer_flags+=(-DDVM_CA_PROBE); fi
+if [[ ${DVM_TEST_RUNNER:-0} == 1 ]]; then
+    [[ ${DVM_CA_PROBE:-0} == 1 && "$requested_mode" == --mmio-present-pool ]] || exit 2
+    consumer_flags+=(-DDVM_TEST_RUNNER)
+fi
 if [[ "$mode" == --mmio || "$mode" == --mmio-binary ]]; then extra_flags=(-DDVM_DRIVER_MMIO); fi
 if [[ "$mode" == --mmio-binary ]]; then extra_flags+=(-DDVM_DRIVER_BINARY); fi
 if [[ "$mode" == --mmio-blur ]]; then extra_flags=(-DDVM_DRIVER_MMIO -DDVM_DRIVER_BINARY -DDVM_DRIVER_BLUR); fi
@@ -59,6 +66,16 @@ if sys.argv[2]!='nvme':
  (p/'entitlements.plist').write_bytes(plistlib.dumps({'platform-application':True,'org.darwin-vm.transport':True,'com.apple.security.exception.iokit-user-client-class':['IOKitDiagnosticsClient','IOSurfaceRootUserClient']+(['IOMobileFramebufferUserClient'] if sys.argv[2] in ('--mmio-present-contract','--mmio-present') else [])}))
 (p/'DVMProxy.bundle/Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier='org.darwin-vm.metal-driver',CFBundleName='DVMProxy',CFBundleExecutable='DVMProxy',CFBundlePackageType='BNDL',CFBundleVersion='1')))
 PY
+if [[ ${DVM_RUNNER_NO_SANDBOX:-0} == 1 ]]; then
+    [[ ${DVM_TEST_RUNNER:-0} == 1 ]] || exit 2
+    python3 - "$out/entitlements.plist" <<'PY'
+from pathlib import Path
+import plistlib,sys
+p=Path(sys.argv[1]);data=plistlib.loads(p.read_bytes())
+data['com.apple.private.security.no-sandbox']=True
+p.write_bytes(plistlib.dumps(data))
+PY
+fi
 link=(-target arm64-apple-ios27.0 -isysroot "$sdk" -Wno-incompatible-sysroot -F "$out/stubs/System/Library/Frameworks" -L "$out/stubs/usr/lib")
 frameworks=(-framework Foundation -framework CoreFoundation -framework IOSurface -framework Metal -lobjc)
 if [[ ${DVM_CA_PROBE:-0} == 1 ]]; then frameworks+=(-framework QuartzCore -framework CoreGraphics); fi
@@ -86,4 +103,6 @@ cp "$repo/tools/gpu/managed_host.h" "$out/"
 cp "$repo/tools/gpu/managed_guest.h" "$out/"
 cp "$repo/tools/gpu/consumer_"* "$out/"
 printf "%s\n" "${DVM_CA_PROBE:-0}" > "$out/consumer-probe.txt"
+printf "%s\n" "$consumer_frames" > "$out/consumer-frames.txt"
+printf "%s\n" "${DVM_TEST_RUNNER:-0}" > "$out/test-runner.txt"
 printf "%s\n" "$requested_mode" > "$out/transport-mode.txt"

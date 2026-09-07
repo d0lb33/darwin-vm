@@ -60,7 +60,7 @@ objc = {
 system = {
  '___error','___memcpy_chk','___sprintf_chk','___snprintf_chk','___stack_chk_fail','___stack_chk_guard','___stderrp',
  '_CC_SHA256','_close','_dlerror','_dlopen','_dlsym','_dup2','_execl','_exit','__exit','_fork','_fprintf','_getenv',
- '_memcmp','_memcpy','_memset','_pipe','_read','_setenv','_strcmp','_snprintf','_waitpid','_write','__Unwind_Resume','_dispatch_data_create',
+ '_memcmp','_memcpy','_memset','_pipe','_read','_setenv','_strcmp','_strncmp','_snprintf','_waitpid','_write','__Unwind_Resume','_dispatch_data_create',
  '_dispatch_data_create_map',
 }
 tbd('System/Library/Frameworks/Foundation.framework/Foundation.tbd','/System/Library/Frameworks/Foundation.framework/Foundation',foundation)

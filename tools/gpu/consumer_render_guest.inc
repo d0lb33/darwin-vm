@@ -42,6 +42,7 @@ static id<MTLSamplerState> DVMNewSampler(DVMDevice *device,MTLSamplerDescriptor 
 @interface DVMRenderEncoder : NSObject <MTLRenderCommandEncoder>
 @property(nonatomic,strong) DVMCommand *command;
 @property(nonatomic,strong) NSMutableArray *operations;
+@property(nonatomic,strong) NSMutableDictionary *vertexBindings,*fragmentBindings;
 @property(nonatomic) BOOL ended;
 @property(atomic,copy) NSString *label;
 @end
@@ -65,14 +66,33 @@ static id<MTLSamplerState> DVMNewSampler(DVMDevice *device,MTLSamplerDescriptor 
 - (void)setScissorRect:(MTLScissorRect)s {[self record:@[@"scissor",@(s.x),@(s.y),@(s.width),@(s.height)]];}
 - (void)setBlendColorRed:(float)r green:(float)g blue:(float)b alpha:(float)a {[self record:@[@"blend",@(r),@(g),@(b),@(a)]];}
 - (void)buffer:(id<MTLBuffer>)b offset:(NSUInteger)o index:(NSUInteger)i stage:(NSString *)stage {
-    if(i>=8||o>=b.length||o%16)reject(@"render buffer bounds/alignment");
+    if(i>=8||(b?(o>=b.length||o%16):o!=0))reject(@"render buffer bounds/alignment");
     [self record:@[stage,b?[self own:b kind:DVMBuffer.class]:@0,@(o),@(i)]];
+    NSMutableDictionary *bindings=[stage isEqual:@"vertexBuffer"]?self.vertexBindings:self.fragmentBindings;
+    if(b)bindings[@(i)]=b;else [bindings removeObjectForKey:@(i)];
 }
 - (void)setVertexBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:@"vertexBuffer"];}
 - (void)setFragmentBuffer:(id<MTLBuffer>)b offset:(NSUInteger)o atIndex:(NSUInteger)i {[self buffer:b offset:o index:i stage:@"fragmentBuffer"];}
+- (void)setVertexBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i {
+    id<MTLBuffer> b=self.vertexBindings[@(i)];if(!b)reject(@"vertex offset requires a bound buffer");
+    [self buffer:b offset:o index:i stage:@"vertexBuffer"];
+}
+- (void)setFragmentBufferOffset:(NSUInteger)o atIndex:(NSUInteger)i {
+    id<MTLBuffer> b=self.fragmentBindings[@(i)];if(!b)reject(@"fragment offset requires a bound buffer");
+    [self buffer:b offset:o index:i stage:@"fragmentBuffer"];
+}
+- (void)setVertexBuffers:(id<MTLBuffer> const __unsafe_unretained *)buffers offsets:(const NSUInteger *)offsets withRange:(NSRange)range {
+    if(range.location>8||range.length>8-range.location||(!buffers&&range.length)||(!offsets&&range.length))reject(@"vertex buffer range");
+    for(NSUInteger j=0;j<range.length;j++)[self setVertexBuffer:buffers[j] offset:offsets[j] atIndex:range.location+j];
+}
+- (void)setFragmentBuffers:(id<MTLBuffer> const __unsafe_unretained *)buffers offsets:(const NSUInteger *)offsets withRange:(NSRange)range {
+    if(range.location>8||range.length>8-range.location||(!buffers&&range.length)||(!offsets&&range.length))reject(@"fragment buffer range");
+    for(NSUInteger j=0;j<range.length;j++)[self setFragmentBuffer:buffers[j] offset:offsets[j] atIndex:range.location+j];
+}
 - (void)bytes:(const void *)p length:(NSUInteger)n index:(NSUInteger)i stage:(NSString *)stage {
     if(!p||!n||n>DVM_INLINE_BYTES||i>=8)reject(@"render inline bounds");
     [self record:@[stage,[[NSData dataWithBytes:p length:n] base64EncodedStringWithOptions:0],@(i)]];
+    [([stage isEqual:@"vertexBytes"]?self.vertexBindings:self.fragmentBindings) removeObjectForKey:@(i)];
 }
 - (void)setVertexBytes:(const void *)p length:(NSUInteger)n atIndex:(NSUInteger)i {[self bytes:p length:n index:i stage:@"vertexBytes"];}
 - (void)setFragmentBytes:(const void *)p length:(NSUInteger)n atIndex:(NSUInteger)i {[self bytes:p length:n index:i stage:@"fragmentBytes"];}
@@ -99,5 +119,6 @@ static id<MTLRenderCommandEncoder> DVMNewRenderEncoder(DVMCommand *command,MTLRe
     [command.resources addObject:a.texture];
     NSMutableArray *ops=[NSMutableArray array];
     [command.commands addObject:@{@"kind":@"render",@"target":[(DVMTexture *)a.texture handle],@"load":@(a.loadAction),@"store":@(a.storeAction),@"clear":@[@(a.clearColor.red),@(a.clearColor.green),@(a.clearColor.blue),@(a.clearColor.alpha)],@"operations":ops}];
-    command.openEncoders++;DVMRenderEncoder *e=[DVMRenderEncoder new];e.command=command;e.operations=ops;return e;
+    command.openEncoders++;DVMRenderEncoder *e=[DVMRenderEncoder new];e.command=command;e.operations=ops;
+    e.vertexBindings=[NSMutableDictionary dictionary];e.fragmentBindings=[NSMutableDictionary dictionary];return e;
 }

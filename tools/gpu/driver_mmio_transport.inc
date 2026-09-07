@@ -48,8 +48,16 @@ int DVMReport(FILE *stream,const char *format,...) {
         if(n<=0||n>=(int)sizeof(text))_exit(121);
         @synchronized(mmioReportLock) {
             uint64_t seq=++mmioReportSequence;
+#ifdef DVM_TEST_RUNNER
+            double until=now()+10;
+            while(seq-*(volatile uint64_t *)(mmioReportRAM+0x188)>DVM_AUDIT_SLOTS){
+                if(now()>until)_exit(123);usleep(1000);
+            }
+            uint8_t *slot=mmioReportRAM+0x1000+((seq-1)%DVM_AUDIT_SLOTS)*512;
+#else
             if(seq>DVM_AUDIT_SLOTS)_exit(122);
             uint8_t *slot=mmioReportRAM+0x1000+(seq-1)*512;
+#endif
             memcpy(slot+16,text,(unsigned)n);
             uint32_t length=(uint32_t)n,c=crc(text,length);
             memcpy(slot,&seq,8);memcpy(slot+8,&length,4);memcpy(slot+12,&c,4);
@@ -144,7 +152,14 @@ static Namespace *openMMIO(void *lib) {
     kr=p_IOConnectMapMemory64(client,DVM_GPU_MEMORY_TYPE+1,mach_task_self(),&regs,&regsN,kIOMapAnywhere);
     if(kr||regsN!=DVM_GPU_REG_SIZE)fail("mmio-map-regs");ns.regs=(volatile uint8_t *)regs;
     mmioBarrier();uint32_t magic;memcpy(&magic,ns.shared,4);
-    if(magic!=DVM_GPU_MAGIC||*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_MODE)!=DVM_EXPECTED_MODE||*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_DONE))fail("mmio-identity");
+    if(magic!=DVM_GPU_MAGIC||*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_MODE)!=DVM_EXPECTED_MODE)fail("mmio-identity");
+#ifdef DVM_TEST_RUNNER
+    // Supervisor waits for each child before reacquiring the single producer.
+    ns.sequence=*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_DONE);
+    mmioReportSequence=*(volatile uint64_t *)(ns.shared+0x180);
+#else
+    if(*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_DONE))fail("mmio-used-session");
+#endif
     ns.identity=[NSData dataWithBytes:ns.shared+16 length:16];
     mmioReportLock=[NSObject new];mmioReportRAM=ns.shared;
     fprintf(stderr,"GPU_LOAD_DRIVER_MMIO_MAPPED ram=%llu registers=%llu ram_va=%p regs_va=%p\n",ramN,regsN,ns.shared,ns.regs);
