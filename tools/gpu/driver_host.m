@@ -586,6 +586,12 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     if([op isEqual:@"renderSubmit"]||[op isEqual:@"submit"]||[op isEqual:@"blurSubmit"])
         for(DVMEntry *e in host.entries.allValues)if(e.textureUpload)return HostError(seq,EBUSY,@"GPU submission during incomplete texture upload");
     if([op isEqual:@"capabilities"]){
+        // Apple feature tables list programmable blending from Apple2. This
+        // backend forwards current-fragment color reads to native Metal;
+        // test_framebuffer_read verifies ordered overlapping draws/reuse.
+        // Do not advertise this profile on an IMR/non-Apple backend.
+        if(![host.device supportsFamily:MTLGPUFamilyApple2])
+            return HostError(seq,ENOTSUP,@"host lacks programmable color-attachment blending");
         // Our only IOSurface texture import is owned BGRA storage. Verify the
         // native implementation accepts the advertised row/base granularity;
         // kernel registration still requires 16 KiB pages independently.

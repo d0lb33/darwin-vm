@@ -5,6 +5,7 @@
 #import <QuartzCore/CALayer.h>
 #import <QuartzCore/CATransaction.h>
 #include "consumer_uikit_scene.inc"
+#include "consumer_uikit_raster_scene.inc"
 #include <stdio.h>
 #include <unistd.h>
 #import <objc/runtime.h>
@@ -112,6 +113,10 @@ int main(int argc,const char **argv){@autoreleasepool{
 #endif
     [CATransaction begin];[CATransaction setDisableActions:YES];
     UIView *view=DVMUIKitScene(space,320,480);[view layoutIfNeeded];display(view.layer);
+    if(getenv("DVM_UIKIT_GUEST_RASTERS")){
+        DVMUIKitReplaceGlyphs(view,space,@(getenv("DVM_UIKIT_GUEST_RASTERS")));
+        [view layoutIfNeeded];display(view.layer);
+    }
     [CATransaction commit];[CATransaction flush];
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:320 height:480 mipmapped:NO];
     d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead;
@@ -128,6 +133,10 @@ int main(int argc,const char **argv){@autoreleasepool{
     CFTimeInterval frameTime=CACurrentMediaTime();
     for(unsigned frame=0;frame<frames;frame++){
     [CATransaction begin];[CATransaction setDisableActions:YES];view.layer.opacity=frame%2?.99:1;
+    if(getenv("DVM_UIKIT_HOST_ANIMATE")){
+        UIView *card=view.subviews[1];card.frame=CGRectMake(frame%2?28:20,88,280,200);
+        card.alpha=frame%2?.7:1;
+    }
     [CATransaction commit];[CATransaction flush];
     [renderer beginFrameAtTime:frameTime+frame/60.0 timeStamp:NULL];[renderer addUpdateRect:view.bounds];[renderer render];[renderer endFrame];
     id<MTLCommandBuffer> fence=[queue commandBuffer];[fence commit];[fence waitUntilCompleted];

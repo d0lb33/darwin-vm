@@ -18,6 +18,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('out',type=Path)
     p.add_argument('--frames',type=int,choices=(1,3),default=1)
+    p.add_argument('--animate',action='store_true',help='move the card and change its opacity on the middle frame')
+    p.add_argument('--guest-rasters',type=Path,help='native composition using captured guest A8 glyph inputs; still host evidence')
     p.add_argument('--diagnostic-unsplit',action='store_true')
     p.add_argument('--native-contract',action='store_true',help='test-only native device capability predicates matched to the forwarding profile')
     p.add_argument('--native-query',action='append',default=[],help='restrict native contract overrides to named queries; repeat for a group')
@@ -30,6 +32,7 @@ def main():
     if a.native_contract and a.forwarded_library:p.error('native contract requires a native control')
     if a.native_query and not a.native_contract:p.error('native query requires native contract')
     if a.native_pipeline_delay_us and a.forwarded_library:p.error('native pipeline delay requires native control')
+    if a.animate and a.frames!=3:p.error('animated control requires three frames')
     a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
     src=Path(__file__).resolve().parent
     sdk=Path(subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip())
@@ -40,6 +43,9 @@ def main():
     sources=[src/'test_uikit_host.m'];env=os.environ.copy()
     for k in ('DVM_DRIVER_LIBRARY','DVM_REHEARSAL_AIR','DVM_UIKIT_DIAGNOSTIC_UNSPLIT','DVM_UIKIT_NATIVE_AIR','DVM_UIKIT_NATIVE_CONTRACT','DVM_UIKIT_NATIVE_QUERIES','DVM_UIKIT_NATIVE_PIPELINE_DELAY_US'):env.pop(k,None)
     env['DVM_UIKIT_HOST_FRAMES']=str(a.frames)
+    env.pop('DVM_UIKIT_HOST_ANIMATE',None)
+    env.pop('DVM_UIKIT_GUEST_RASTERS',None)
+    if a.animate:env['DVM_UIKIT_HOST_ANIMATE']='1'
     if a.diagnostic_unsplit:env['DVM_UIKIT_DIAGNOSTIC_UNSPLIT']='1'
     if a.native_contract:env['DVM_UIKIT_NATIVE_CONTRACT']='1'
     if a.native_pipeline_delay_us:env['DVM_UIKIT_NATIVE_PIPELINE_DELAY_US']=str(a.native_pipeline_delay_us)
@@ -49,6 +55,15 @@ def main():
         env['DVM_UIKIT_NATIVE_QUERIES']=','.join(a.native_query)
     metadata=dict(frames=a.frames,diagnostic_unsplit=a.diagnostic_unsplit,scope='host-catalyst-rehearsal-not-exact-guest',forwarded=bool(a.forwarded_library))
     metadata['frame_time_step_seconds']=1/60
+    metadata['animate']=a.animate
+    if a.guest_rasters:
+        folder=a.guest_rasters.resolve();inputs=json.loads((folder/'inputs.json').read_text())
+        if inputs.get('scope')!='exact-guest-generated-glyph-inputs-not-rendered-output' or len(inputs.get('labels',[]))!=3:raise ValueError('guest raster provenance')
+        for label in inputs['labels']:
+            if label['name'] not in ('title','caption','button'):raise ValueError('glyph fixture name')
+            raw=(folder/(label['name']+'.a8')).read_bytes()
+            if hashlib.sha256(raw).hexdigest()!=label['source_sha256'] or len(raw)!=label['width']*label['height']:raise ValueError('glyph input integrity')
+        env['DVM_UIKIT_GUEST_RASTERS']=str(folder);metadata['guest_rasters']=inputs
     if a.forwarded_library or a.native_library:
         library=(a.forwarded_library or a.native_library).resolve();raw=library.read_bytes()
         candidates=[]

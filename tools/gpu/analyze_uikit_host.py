@@ -19,6 +19,7 @@ def main():
         raise ValueError('requires native then forwarded captures')
     count=manifests[0]['frames']
     if count not in (1,3) or manifests[1]['frames']!=count:raise ValueError('frame count differs')
+    if manifests[0].get('animate',False)!=manifests[1].get('animate',False):raise ValueError('scene sequence differs')
     frames=[]
     for index in range(count):
         data=[(p/f'gpu-frame-{index}.bgra').read_bytes() for p in (args.native,args.forwarded)]
@@ -34,6 +35,9 @@ def main():
         native=str(args.native.resolve()),forwarded=str(args.forwarded.resolve()),
         native_control={k:manifests[0].get(k) for k in ('native_air_override','native_contract_override','native_query_overrides','native_pipeline_delay_us')},
         all_frames_exact=all(f['exact_match'] for f in frames),frames=frames)
+    if manifests[0].get('animate'):
+        result['native_middle_frame_changes']=frames[0]['native_sha256']!=frames[1]['native_sha256']
+        result['forwarded_middle_frame_changes']=frames[0]['forwarded_sha256']!=frames[1]['forwarded_sha256']
     args.output.write_text(json.dumps(result,indent=2)+'\n')
     print(json.dumps(result))
 

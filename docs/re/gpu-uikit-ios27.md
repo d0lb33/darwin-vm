@@ -348,7 +348,7 @@ python3 tools/gpu/runner_control.py /tmp/dvm/CA_UIKIT_GUEST3 --bundle LINKED/DVM
 python3 tools/gpu/analyze_uikit_capture.py /tmp/dvm/CA_UIKIT_GUEST3/runner-jobs/JOB
 ```
 
-Next bounded dependency: establish framebuffer-read/feedback semantics and the
+At this historical checkpoint, the next bounded dependency was to establish framebuffer-read/feedback semantics and the
 generic shader parameter/encoding contract with native controls. Test actual
 attachment read/modify/write and ordering before advertising support; merely
 changing the capability to true would be unjustified. The native host fallback
@@ -363,3 +363,15 @@ in `~/dvm-artifacts/research/gpu-uikit-host-air-20260907/QuartzCore-host-air.met
 so a host OS update or `/tmp` cleanup does not invalidate backend reproduction.
 The guest image shown in chat is the untouched offscreen capture, also at
 `gpu-uikit-20260907-part6/1788773639965179/uikit-gpu.png`; it is not a DCP dump.
+
+## Subsequent V11 result
+
+[Framebuffer-read evidence and the first verified UIKit image](gpu-framebuffer-feedback-ios27.md)
+supersede the open host-feedback and offscreen pixel-acceptance items above.
+V11 passes ordered color read/modify/write tests; changing native/forwarded
+host scenes agree exactly. Exact guest job 1788775984328876 passes independent
+native composition of its own glyph inputs within one byte per channel and
+retires its resources. Its original CPU comparison remains failed, and the
+earlier failed guest processes remain failed. This is offscreen UIKit, not
+displayed UIKit or system-wide acceleration. The next acceptance target is
+the actual UIKit consumer on the existing owned display surface.

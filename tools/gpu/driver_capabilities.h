@@ -1,7 +1,7 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 10u
+#define DVM_CONTRACT_VERSION 11u
 #define DVM_TEXTURE_TRANSFER_CHUNK 32768u
 #define DVM_QUEUED_COMMAND_BUFFERS 32u
 #define DVM_TEXTURE_DIMENSION 4096u
@@ -59,7 +59,7 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
  B(supportsSIMDShuffleAndFill,NO) \
  B(supportsSIMDReduction,NO) \
  B(supportsCorrectTextureUsageBits,NO) \
- B(isFramebufferReadSupported,NO) \
+ B(isFramebufferReadSupported,YES) \
  B(supportsBufferlessClientStorageTexture,NO) \
  B(supportsLossyCompression,NO) \
  B(supportsPerPlaneCompression,NO) \
@@ -82,7 +82,8 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"alpha-sampled-images-v10",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"color-attachment-feedback-v11",
+        @"framebufferRead":@"current-fragment-single-color-attachment-ordered-programmable-blending",
         @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureUploadTransactions":@1,
         @"queuedCommandBuffers":@DVM_QUEUED_COMMAND_BUFFERS,@"executionQueues":@1,
         @"queries":@{DVM_CAPABILITY_QUERIES(DVM_BOOL_VALUE,DVM_UINT_VALUE)},

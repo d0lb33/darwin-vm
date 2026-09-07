@@ -9,7 +9,7 @@ import re
 
 ALLOWED={'.json','.jsonl','.log','.txt','.md','.py','.sh','.m','.c','.cpp','.h','.tsv',
          '.stdout','.stderr','.exit','.plist','.tbd','.ll','.png','.command',
-         '.nm-u','.otool-l','.disass','.csv','.bgra','.inc','.s'}
+         '.nm-u','.otool-l','.disass','.csv','.bgra','.a8','.inc','.s'}
 
 
 def main():

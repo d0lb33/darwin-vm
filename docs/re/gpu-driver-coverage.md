@@ -21,7 +21,7 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Area | Implemented | Verified behavior | Unsupported / unknown contract |
 | --- | --- | --- | --- |
 | Discovery | Explicit process-local device factory | Exact guest signed bundle load and CARenderer use | Normal plugin discovery, service-global context, system compositor adoption |
-| Capabilities | Versioned forwarding profile; original 20 queries plus compression/format batch | Exact guest original 20 and observed lossless-format path; host profile mismatch rejection | Full GPU-family predicates remain false; static query coverage is not a runtime trace |
+| Capabilities | V11 forwarding profile; original 20 queries, compression/format batch and single-color-attachment framebuffer reads | Exact guest framebuffer-fetch specialization; host ordered overlap/reuse and unsupported-host rejection | Full GPU-family predicates remain false; static query coverage is not a runtime trace |
 | Libraries | Requested guest URL/data identity; select a unique bounded MTLB slice by container contents, not a known shader size | Exact unmodified AIR, real function specialization/render execution; different-sized host AIR and malformed-container controls | Host currently needs matching local AIR cache; ambiguous multiple AIR slices and general multi-library delivery pending |
 | Functions/render pipelines | Named/indexed constants; general vertex/fragment pipeline descriptors within documented bounds | Exact QuartzCore specialized vertex/fragment pair; 65 constants | Linked functions, archives, writable fragment bindings, tile/MSAA/depth targets |
 | Command encoding | Direct indexed/nonindexed draws, 31 buffer slots, 16 fragment textures/samplers; bounded FIFO of 32 command buffers on one execution queue | Exact changing scenes and 64×64 group opacity with private intermediate targets; host queued GPU dependency and cancellation tests | Multiple execution queues, indirect commands, fragment buffer writes and general barriers remain unsupported |
@@ -59,20 +59,20 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
    final pixels, native DCP bytes and ownership return. Next: actual UIKit view
    content, controls, text and visual effects in the persistent runner; this
    is not yet a Liquid Glass or system-compositor claim.
-3. **UIKit content:** the actual guest UIKit layer tree now submits three host
-   GPU passes/ten draws, and bounded V8 transfers capture the full 320×480
-   target. V10 fixes row alignment and adds A8 sampling, so all labels draw. Pixel
-   orientation is corrected with an explicit CARenderer coordinate option. The
-   asymmetric nearest-image control passes all pixels and retirement. Full
-   UIKit comparison still fails at image/text edges. Catalyst controls now
-   separate CPU/GPU rasterization differences from host fallback failures:
-   native Metal with framebuffer-read capability disabled reproduces the
-   rounded-corner artifact, and native/forwarded later frames match exactly
-   under matched capability answers. First-use generic-shader behavior still
-   fails; native controls also reproduce early corruption, so forwarding is
-   not established as its sole cause. Captured backend replay reproduces the
-   failure with Metal API/GPU validation enabled. This is an offscreen diagnostic, not a displayed
-   UIKit or Liquid Glass pass. See [UIKit evidence](gpu-uikit-ios27.md).
+3. **UIKit content:** exact guest job 1788775984328876 passes the full 320×480
+   offscreen image against independent native composition of captured guest
+   glyph inputs and layer metadata, within one byte per channel, with clean
+   process completion and resource retirement. Actual UIKit/CARenderer submits
+   three GPU passes/ten draws through the driver. The original CPU rasterizer
+   comparison remains failed; historical failed jobs are not promoted.
+   V11 framebuffer reads remove the reproduced Catalyst fallback corruption;
+   native/forwarded changing host frames now match exactly. Plain backend
+   replay matches all 206 requests; shader-validation replay stops at six
+   one-byte differences and remains a strict failure. Next: this UIKit scene
+   on the owned shared display surface, then sustained changing frames.
+   Displayed UIKit, system adoption and Liquid Glass remain untested. See
+   [framebuffer and UIKit acceptance](gpu-framebuffer-feedback-ios27.md) and
+   [earlier UIKit evidence](gpu-uikit-ios27.md).
 
 The displayed scenes, partial transfers and interactive session evidence are in
 [shared scene verification](gpu-shared-scenes-regions-ios27.md). Group-opacity

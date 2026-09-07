@@ -32,6 +32,10 @@ static void UIKitInspect(CALayer *layer, const char *stage, unsigned depth){
         stage,depth,NSStringFromClass(layer.class).UTF8String,NSStringFromClass([(id)layer.delegate class]).UTF8String,
         layer.bounds.size.width,layer.bounds.size.height,layer.contents?NSStringFromClass([layer.contents class]).UTF8String:"nil",
         layer.needsDisplay,layer.geometryFlipped,layer.contentsAreFlipped,layer.contentsScale);
+    CGRect frame=layer.frame;
+    fprintf(stderr,"GPU_LOAD_UIKIT_GEOMETRY stage=%s depth=%u frame=%.3f,%.3f,%.3f,%.3f corner_radius=%.3f corner_curve=%s masks=%u edge_mask=%u edge_aa=%u\n",
+        stage,depth,frame.origin.x,frame.origin.y,frame.size.width,frame.size.height,
+        layer.cornerRadius,layer.cornerCurve.UTF8String,layer.masksToBounds,(unsigned)layer.edgeAntialiasingMask,layer.allowsEdgeAntialiasing);
     if(layer.contents){
         CFStringRef description=CFCopyDescription((__bridge CFTypeRef)layer.contents);
         NSString *singleLine=[(__bridge NSString *)description stringByReplacingOccurrencesOfString:@"\n" withString:@" "];
@@ -98,7 +102,15 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         NSUInteger different=0;const uint8_t *a=actual.bytes,*b=reference.bytes;
         for(unsigned i=0;i<row*height;i++)if(abs((int)a[i]-(int)b[i])>2)different++;
         fprintf(stderr,"GPU_LOAD_UIKIT_PIXELS width=%u height=%u differing_channels=%lu passes=%lu draws=%lu\n",width,height,(unsigned long)different,(unsigned long)[stats[@"renderPasses"] unsignedIntegerValue],(unsigned long)[stats[@"renderDraws"] unsignedIntegerValue]);
+#ifdef DVM_CA_UIKIT_EXTERNAL_REFERENCE
+        // The raw CPU result stays captured and its mismatch stays reported.
+        // Return resources normally so the external native-composition oracle
+        // can require clean retirement as well as pixels. This marker is not
+        // pixel acceptance; the runner job must be observed, then analyzed.
+        fprintf(stderr,"GPU_LOAD_UIKIT_REFERENCE mode=external-native status=pending\n");
+#else
         if(different)fail("uikit-pixel-reference");
+#endif
         renderer.layer=nil;renderer=nil;CGColorSpaceRelease(space);
     }@catch(NSException *e){fprintf(stderr,"GPU_LOAD_ERROR uikit_stage=%s name=%s reason=%.220s\n",stage,e.name.UTF8String,e.reason.UTF8String);exit(1);}
 }
