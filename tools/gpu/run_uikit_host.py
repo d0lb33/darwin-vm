@@ -21,6 +21,7 @@ def main():
     p.add_argument('--effect',choices=('none','blur','glass'),default='none',help='actual UIVisualEffectView over the checker')
     p.add_argument('--window-root',action='store_true',help='render the entire attached UIWindow layer tree')
     p.add_argument('--window',action='store_true',help='attach view to a public UIWindow; log real lifecycle state')
+    p.add_argument('--window-hold',type=int,choices=(0,20,45),default=0,help='hold our native probe window before offscreen rendering for a bounded compositor capture')
     p.add_argument('--frames',type=int,choices=(1,3),default=1)
     p.add_argument('--display-animate',action='store_true',help='native reference for alternating card geometry/transparency')
     p.add_argument('--display-frame',type=int,help='native 1179x2556 display-layout reference with this final frame marker')
@@ -35,6 +36,7 @@ def main():
     libraries.add_argument('--native-library',type=Path,help='native host control using selected AIR instead of its default FAT library')
     a=p.parse_args()
     if a.window_root and (not a.window or a.display_frame is not None):p.error('window root requires window, no display reference')
+    if a.window_hold and (not a.window or a.forwarded_library):p.error('window capture requires a native window control')
     if a.diagnostic_unsplit and not a.forwarded_library:p.error('unsplit requires forwarded control')
     if a.native_contract and a.forwarded_library:p.error('native contract requires a native control')
     if a.native_query and not a.native_contract:p.error('native query requires native contract')
@@ -67,6 +69,8 @@ def main():
     if a.window_root:env['DVM_UIKIT_WINDOW_ROOT']='1'
     env.pop('DVM_UIKIT_WINDOW',None)
     if a.window:env['DVM_UIKIT_WINDOW']='1'
+    env.pop('DVM_UIKIT_WINDOW_HOLD',None)
+    if a.window_hold:env['DVM_UIKIT_WINDOW_HOLD']=str(a.window_hold)
     env['DVM_UIKIT_HOST_FRAMES']=str(a.frames)
     env.pop('DVM_UIKIT_HOST_ANIMATE',None)
     env.pop('DVM_UIKIT_DISPLAY_FRAME',None)
@@ -89,6 +93,7 @@ def main():
     metadata['effect']=a.effect
     metadata['window_requested']=a.window
     metadata['window_root']=a.window_root
+    metadata['window_hold_seconds']=a.window_hold
     metadata['display_frame']=a.display_frame
     metadata['display_animate']=a.display_animate
     metadata['width']=1179 if a.display_frame is not None else 320
@@ -145,7 +150,7 @@ def main():
     started=time.monotonic()
     try:
         with (a.out/'result.log').open('wb') as log:
-            r=subprocess.run([str(executable),str(a.out)],env=env,stdout=log,stderr=log,timeout=30)
+            r=subprocess.run([str(executable),str(a.out)],env=env,stdout=log,stderr=log,timeout=30+a.window_hold)
         metadata['exit']=r.returncode
         r.check_returncode()
         for name in ('gpu','cpu'):

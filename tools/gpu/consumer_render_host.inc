@@ -78,6 +78,9 @@ static NSDictionary *Sampler(DVMHost *host,uint64_t seq,NSDictionary *r) {
     if(!s||!Add(host,@"sampler",s,&entry))return HostError(seq,ENOMEM,@"sampler allocation");
     return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle)};
 }
+#ifdef DVM_RENDER_DIAGNOSTIC
+#include "render_debug_capture.inc"
+#endif
 static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r,BOOL preflight) {
     NSArray *tasks=r[@"guestTaskIDs"]?:@[];
     if(![tasks isKindOfClass:NSArray.class]||tasks.count>16)return HostError(seq,EINVAL,@"guest attribution extent");
@@ -96,6 +99,9 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     // Encode into an uncommitted command buffer. Validate every pass before any
     // upload or commit, so a bad later operation cannot execute an earlier pass.
     id<MTLCommandBuffer> cb=[host.queue commandBuffer];NSUInteger draws=0;
+#ifdef DVM_RENDER_DIAGNOSTIC
+    NSMutableArray *debugCaptures=[NSMutableArray array];NSUInteger debugPass=0;
+#endif
     NSMutableSet *written=[NSMutableSet set],*sharedTargets=[NSMutableSet set];BOOL serialIndices=NO;
     if(!preflight){
         // Host-only completion fault injection; the normal reply must wait for
@@ -120,6 +126,17 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
         // native Metal, the application must keep read/write subresources
         // disjoint. This does not authorize sampling the destination mip.
         BOOL disjointMipCandidate=level>0&&[(id<MTLTexture>)target.object storageMode]==MTLStorageModePrivate;
+#ifdef DVM_RENDER_DIAGNOSTIC
+        if(!preflight){
+            NSMutableSet *inputs=[NSMutableSet set];
+            for(NSArray *op in ops)if(op.count==3&&[op[0] isEqual:@"fragmentTexture"]&&![op[1] isEqual:@0])[inputs addObject:op[1]];
+            for(NSNumber *handle in [[inputs allObjects] sortedArrayUsingSelector:@selector(compare:)]){
+                DVMEntry *input=Entry(host,handle,@"texture");
+                for(NSUInteger mip=0;mip<[(id<MTLTexture>)input.object mipmapLevelCount];mip++)
+                    DVMDebugSnapshot(host,cb,debugCaptures,input,mip,seq,debugPass,@"input-before-pass");
+            }
+        }
+#endif
         MTLRenderPassDescriptor *d=[MTLRenderPassDescriptor renderPassDescriptor];d.colorAttachments[0].level=level;d.colorAttachments[0].texture=target.object;d.colorAttachments[0].loadAction=[pass[@"load"] unsignedIntegerValue];d.colorAttachments[0].storeAction=[pass[@"store"] unsignedIntegerValue];d.colorAttachments[0].clearColor=MTLClearColorMake([clear[0] doubleValue],[clear[1] doubleValue],[clear[2] doubleValue],[clear[3] doubleValue]);
         id<MTLRenderCommandEncoder> encoder=[cb renderCommandEncoderWithDescriptor:d];
         DVMEntry *pipeline=nil;NSMutableDictionary *vertexBuffers=[NSMutableDictionary dictionary],*fragmentBuffers=[NSMutableDictionary dictionary],*fragmentTextures=[NSMutableDictionary dictionary],*fragmentSamplers=[NSMutableDictionary dictionary];NSString *failure=nil;
@@ -184,6 +201,11 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
             } else {failure=[@"unsupported render operation: " stringByAppendingString:name];break;}
         }
         [encoder endEncoding];if(failure)return HostError(seq,EINVAL,failure);
+#ifdef DVM_RENDER_DIAGNOSTIC
+        if(!preflight&&[pass[@"store"] unsignedIntegerValue]==MTLStoreActionStore)
+            DVMDebugSnapshot(host,cb,debugCaptures,target,level,seq,debugPass,@"target-after-pass");
+        debugPass++;
+#endif
     }
     NSUInteger totalWritten=0;
     for(NSNumber *handle in written){DVMEntry *b=Entry(host,handle,@"buffer");if(!b||b.textureBytes>DVM_BUFFER_BYTES-totalWritten)return HostError(seq,ENOTSUP,@"render writeback budget");totalWritten+=b.textureBytes;}
@@ -191,6 +213,9 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     for(NSArray *transfer in transfers){DVMEntry *e=transfer[0];NSData *data=transfer[1];if([e.kind isEqual:@"buffer"])memcpy([(id<MTLBuffer>)e.object contents],data.bytes,data.length);else [(id<MTLTexture>)e.object replaceRegion:MTLRegionMake3D(0,0,0,e.width,e.height,[(id<MTLTexture>)e.object depth]) mipmapLevel:0 slice:0 withBytes:data.bytes bytesPerRow:e.row bytesPerImage:e.row*e.height];}
     [cb commit];[cb waitUntilCompleted];host.submissions++;
     if(cb.status!=MTLCommandBufferStatusCompleted){for(DVMSharedRender *shared in sharedTargets)shared.state=DVMSharedFailed;return NSErrorReply(seq,cb.error,@"render GPU completion");}
+#ifdef DVM_RENDER_DIAGNOSTIC
+    DVMDebugSave(debugCaptures);
+#endif
     for(DVMSharedRender *shared in sharedTargets)shared.completedWrites++;
     host.renderPasses+=passes.count;host.renderDraws+=draws;
     NSMutableDictionary *result=[NSMutableDictionary dictionary];for(DVMEntry *e in reads)result[@(e.handle).stringValue]=[[NSData dataWithBytes:[(id<MTLBuffer>)e.object contents] length:e.textureBytes] base64EncodedStringWithOptions:0];
@@ -201,7 +226,13 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
 static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
     NSDictionary *check=RenderSubmitPart(host,seq,r,YES);
     if(![check[@"ok"] boolValue])return check;
-    if(![check[@"serialIndices"] boolValue])return RenderSubmitPart(host,seq,r,NO);
+    BOOL split=[check[@"serialIndices"] boolValue];
+#ifdef DVM_RENDER_DIAGNOSTIC
+    // Diagnostic only: reuse the existing store/load split for per-draw
+    // snapshots. Extra nativeCommandBuffers remains visible in the reply.
+    split=split||getenv("DVM_RENDER_CAPTURE_DRAWS")!=NULL;
+#endif
+    if(!split)return RenderSubmitPart(host,seq,r,NO);
     // This bounded profile has one single-sample color target and no depth,
     // tile shaders or visibility queries. Store/load preserves it across native
     // command buffers. Split only batches with writable/index aliases; retain

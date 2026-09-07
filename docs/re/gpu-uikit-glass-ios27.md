@@ -1,5 +1,9 @@
 # UIKit window, half-float and mip rendering evidence
 
+Follow-up: [respecting UIKit invalidation](gpu-uikit-invalidation-ios27.md)
+removes the black covering draws in the exact guest. The black-output results
+below remain the historical V16 evidence, not the current appearance verdict.
+
 2026-09-07; continuation of [material blur](gpu-uikit-effects-ios27.md).
 Exact guest: iOS 27 build 24A5430a, iPhone17,3/T8140. All guest jobs below
 ran as fresh processes in the same isolated `CA_UIKIT_EFFECT_GUEST1` VM,

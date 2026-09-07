@@ -28,7 +28,7 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Compute | Existing luma/blur and bounded compute submission | Exact compute/copy controls and managed blur | Pipeline allowlist remains a development restriction; replace with general validated reflection before claiming broad compute |
 | Resources | Dirty buffer spans, partial 2D/3D transfers, 6 texture formats (A8 sampled only), read-only linear views; private RGBA8/BGRA8/RGBA16Float block-write targets, 2D mip allocation/attachments and opaque guest process metadata | Exact glass half-float/mip allocation; host exact signed/HDR values, eight reuses and mip-relative bounds; private CPU-access rejection | General IOSurface import/planes, heaps, memoryless storage, private blit transfers, mip generation and texture views; axes 4096, private images 16 MiB counting mips, copied images 1 MiB |
 | Presentation | Owned shared-page IOSurface render target with native retirement and fresh-process handoff | Actual UIKit at 1179×2556: first DCP byte comparison and 1,024 changing frames with final pixels, per-frame native completion, retirement and software lock-screen recovery | General surface registration, UIKit window interaction and system-compositor adoption unknown |
-| UIKit effects | Actual UIVisualEffectView material/glass probes and test-only window attachment; original guest QuartzCore shaders | Exact guest blur 9 passes/23 draws; window glass 10 passes/23 draws including original glass shader; active-window host forwarding matches native byte for byte in 3 frames | Glass region remains black even in native offscreen controls; exact guest effect pixel oracle, normal window-compositor comparison and displayed effects remain unproven. See [glass evidence](gpu-uikit-glass-ios27.md) |
+| UIKit effects | Actual UIVisualEffectView material/glass probes; window attachment respecting UIKit invalidation; original guest QuartzCore shaders | Exact guest translucent glass 10 passes/21 draws; removed harness-created black covering draws, all resources retire; native host window visually shows glass | Independent exact-guest effect oracle and displayed/system-wide glass remain unproven. Natural-event-loop host comparison fails; input equivalence needs investigation. See [invalidation evidence](gpu-uikit-invalidation-ios27.md) |
 | Synchronization | Serial RPC, bounded FIFO, completion callbacks, strong resource retention; failed shared jobs prohibit reuse | Exact consumer completion and native retirement; host predecessor GPU-write visibility, disjoint mip read/write and dependent failure cancellation | Same-allocation mip sampling requires application-guaranteed disjoint subresources; dynamic source LOD is not validated. Multiple execution queues, events/fences, reset and timestamp clock translation remain unsupported |
 | Checkpoint | Active GPU migration blocked | Copied-pixel historical checkpoints only | Live host resources and executing commands cannot be checkpointed |
 | Iteration | Fresh-process supervisor, signed package staging, incremental build and captured-submission replay tools; opt-in test-kernel RX mapping exception | Exact guest installed controls; boot-trusted driver staged on Data executes actual CARenderer with verified pixels; 27-request host replay | Two code-distinct runtime revisions now pass real guest CARenderer in one uninstrumented boot using native OOP-JIT signatures plus opt-in xART fixture; global loading and checkpoints remain outside scope |
@@ -75,9 +75,13 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
    software lock screen; the initial idle recovery timeout stays recorded.
    Material blur and original glass shaders now execute through the exact guest
    driver. Window attachment required half-float color targets and mip rendering;
-   V16 covers those contracts. Glass appearance is still black in both guest
-   and native host CARenderer controls, so the next experiment compares our
-   native probe window's normal compositor output with its offscreen output.
+   V16 covers those contracts. Respecting UIKit invalidation removes the black
+   covering draws, and the native window compositor visibly renders glass.
+   The natural-event-loop native/forwarded comparison still differs; next
+   establish equivalent inputs and scope native capability overrides before
+   treating that difference as a driver failure. Independent exact-guest glass
+   correctness and displayed pacing remain unresolved. See
+   [the invalidation intervention and failed comparison](gpu-uikit-invalidation-ios27.md).
    See [glass contracts and exact failures](gpu-uikit-glass-ios27.md) and
    [effect contracts and staging](gpu-uikit-effects-ios27.md). System
    adoption, native window interaction and Liquid Glass remain untested. See

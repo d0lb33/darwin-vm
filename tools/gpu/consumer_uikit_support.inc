@@ -57,5 +57,7 @@ static void UIKitInspect(CALayer *layer, const char *stage, unsigned depth){
     for(CALayer *child in layer.sublayers)UIKitInspect(child,stage,depth+1);
 }
 static void UIKitDisplay(CALayer *layer){
-    [layer setNeedsDisplay];[layer displayIfNeeded];for(CALayer *child in layer.sublayers)UIKitDisplay(child);
+    // Honor UIKit's invalidation. Forcing every private compositor layer dirty
+    // can create raster contents that cover its own GPU effect rendering.
+    [layer displayIfNeeded];for(CALayer *child in layer.sublayers)UIKitDisplay(child);
 }

@@ -124,7 +124,10 @@ static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
         [view layoutIfNeeded];UIKitDisplay(view.layer);
     }
     [CATransaction commit];[CATransaction flush];
-    if(window)[[NSRunLoop mainRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:.1]];
+    // Return to UIApplication's real event loop before offscreen work. A
+    // nested runUntilDate inside the main-queue callback blocks queued UIKit
+    // work and accessibility requests, so it is not a normal window control.
+    void (^render)(void)=^{@autoreleasepool{
     UIKitInspect(view.layer,"after-display",0);
     BOOL displayed=getenv("DVM_UIKIT_DISPLAY_FRAME")!=NULL;
     unsigned width=displayed?1179:320,height=displayed?2556:480;
@@ -176,6 +179,14 @@ static void DVMRunUIKitHost(int argc,const char **argv){@autoreleasepool{
     fprintf(stderr,"UIKIT_HOST_COMPARE different=%u max=%u total=%llu scope=host-catalyst-only\n",different,maxError,(unsigned long long)totalError);
     if(getenv("DVM_UIKIT_NATIVE_AIR"))require(nativeLibraryCalls>0,"native AIR control was exercised");
     renderer.layer=nil;renderer=nil;window.hidden=YES;window.rootViewController=nil;CGContextRelease(context);CGColorSpaceRelease(space);
+    if(window)exit(0);
+    }};
+    if(window){
+        unsigned seconds=getenv("DVM_UIKIT_WINDOW_HOLD")?(unsigned)atoi(getenv("DVM_UIKIT_WINDOW_HOLD")):0;
+        require(seconds==0||seconds==20||seconds==45,"bounded native window capture");
+        fprintf(stderr,"UIKIT_HOST_WINDOW_CAPTURE_READY pid=%d seconds=%u before_offscreen_renderer=1 natural_event_loop=1\n",getpid(),seconds);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,(int64_t)((seconds+.1)*NSEC_PER_SEC)),dispatch_get_main_queue(),render);
+    }else render();
 }}
 
 // UIApplicationMain supplies Catalyst's NSApplication and UIKit lifecycle.
@@ -200,7 +211,7 @@ static const char **DVMUIKitHostArgv;
 - (void)sceneDidBecomeActive:(UIScene *)scene {
     static BOOL rendered=NO;if(rendered)return;rendered=YES;
     fprintf(stderr,"UIKIT_HOST_SCENE_ACTIVE state=%ld\n",(long)scene.activationState);
-    dispatch_async(dispatch_get_main_queue(),^{DVMRunUIKitHost(DVMUIKitHostArgc,DVMUIKitHostArgv);exit(0);});
+    dispatch_async(dispatch_get_main_queue(),^{DVMRunUIKitHost(DVMUIKitHostArgc,DVMUIKitHostArgv);});
 }
 @end
 int main(int argc,const char **argv){@autoreleasepool{
