@@ -73,6 +73,9 @@ static void DVMSystemException(NSException *exception) {
     [super doesNotRecognizeSelector:selector];
 }
 @end
+#ifdef DVM_BOOT_SESSION_RELOAD
+#include "session_revision.inc"
+#endif
 
 __attribute__((constructor)) static void DVMSystemBoot(void) {
     @autoreleasepool {
@@ -100,14 +103,34 @@ __attribute__((constructor)) static void DVMSystemBoot(void) {
 #ifdef DVM_BOOT_RUNTIME_PROBE
             DVMSystemRevisionProbe(ns);
 #endif
+#ifdef DVM_BOOT_SESSION_RELOAD
+            DVMSessionBegin(ns);
+#endif
             io_registry_entry_t service=IORegistryEntryFromPath(0,"IOService:/AppleARMPE/arm-io@10F00000/AppleH17PPlatformIO/dvm-transport@E0000000");
             kern_return_t kr=service?IORegistryEntryGetRegistryEntryID(service,&systemRegistryID):kIOReturnNotFound;
             if(service)IOObjectRelease(service);
             if(kr||!systemRegistryID)fail("registry-identity");
             DVMMetalRPC rpc=^NSDictionary *(NSDictionary *r,NSError **e){return [ns call:r error:e];};
-            systemDevice=DVMCreateSharedMetalDevice(rpc,^id<DVMMetalOwnedMapping>(NSError **e){return DVMMapDriverPool(ns,e);});
+            DVMCreateSharedMetalDeviceFn createShared=DVMCreateSharedMetalDevice;
 #ifdef DVM_SURFACE_IMPORT
-            DVMEnableSurfaceImports(systemDevice,DVMImportedSurfaceProvider(ns));
+            DVMEnableSurfaceImportsFn enableImports=DVMEnableSurfaceImports;
+#endif
+#ifdef DVM_BOOT_SESSION_RELOAD
+            // A staged revision supplies its own factory. Nothing is unloaded
+            // or replaced in place; this process only ever builds one device.
+            DVMSessionStaged staged=DVMSessionLoadStagedRevision(ns);
+            if(staged.create){createShared=staged.create;
+#ifdef DVM_SURFACE_IMPORT
+                enableImports=staged.enable;
+#endif
+            }
+#endif
+            systemDevice=createShared(rpc,^id<DVMMetalOwnedMapping>(NSError **e){return DVMMapDriverPool(ns,e);});
+#ifdef DVM_BOOT_SESSION_RELOAD
+            if(staged.create)DVMSessionAdoptDeviceClass([systemDevice class]);
+#endif
+#ifdef DVM_SURFACE_IMPORT
+            enableImports(systemDevice,DVMImportedSurfaceProvider(ns));
 #endif
             (void)[(DVMDevice *)systemDevice contractCapabilities];
             // Registration asserts protocol identity, not complete selector
@@ -118,6 +141,13 @@ __attribute__((constructor)) static void DVMSystemBoot(void) {
             id<MTLDevice> after=create();
             if(after!=systemDevice)fail("default-device-registration");
             DVMReport(stderr,"GPU_LOAD_SYSTEM_REGISTERED pid=%d registry=%llu name=%s\n",getpid(),systemRegistryID,after.name.UTF8String);
+#ifdef DVM_BOOT_SESSION_RELOAD
+            sessionPut(DVM_SESSION_GUEST_STATE,DVM_SESSION_STATE_RUNNING);
+            DVMReport(stderr,"GPU_LOAD_SYSTEM_REVISION_LOADED pid=%d generation=%llu job=%llu revision=%llu staged=%d class=%s width=%lu\n",
+                getpid(),sessionGeneration,staged.job,sessionRevision,staged.create!=NULL,class_getName([systemDevice class]),
+                (unsigned long)[(DVMDevice *)systemDevice maxTextureWidth2D]);
+            if(staged.create)DVMSessionStagedResult(ns,staged.job,YES,"registered",[systemDevice class]);
+#endif
         } @catch(NSException *e) {
             // Before registration, ordinary nil-device software selection stays
             // available. Post-registration failures need the recorded recovery

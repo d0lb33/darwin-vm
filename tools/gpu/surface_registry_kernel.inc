@@ -17,6 +17,29 @@ static IOReturn dvm_surface_registry(IOUserClient *client,IOService *provider,ui
     DVMSurfaceProviderLock lock(provider);if(!lock.locked)return kIOReturnBusy;
     if(provider->getProperty("DVMSurfaceOwner")&&provider->getProperty("DVMSurfaceOwner")!=client)return kIOReturnNotPermitted;
     if(provider->getProperty("DVMManagedOwner")&&provider->getProperty("DVMManagedOwner")!=client)return kIOReturnNotPermitted;
+    if(selector==0x44565303){
+        // Explicit relinquish, for a controlled process replacement only.
+        // BBRELOAD_SESSION2 generation 2 (pid 344) proved the cost of the old
+        // rule: the provider kept the dead client in DVMSurfaceOwner and every
+        // later registration returned kIOReturnNotPermitted (0xe00002e2).
+        //
+        // This gives up the *right to register*. It never unpins a page, never
+        // retires a record and never runs on client death: the owner has to
+        // ask while it is still alive. Pages the owner failed to retire stay
+        // owned in the registry's per-page map, so a replacement that lands on
+        // them is still refused. Ownership is not a completion fence.
+        // No register aperture is touched: this changes nothing in the
+        // registry, only who is allowed to talk to it next.
+        if(a->scalarInput[1]||a->scalarInput[2])return kIOReturnBadArgument;
+        bool owned=provider->getProperty("DVMSurfaceOwner")||provider->getProperty("DVMManagedOwner");
+        a->scalarOutput[0]=1;a->scalarOutput[1]=owned;
+        if(owned){
+            provider->removeProperty("DVMSurfaceOwner");
+            provider->removeProperty("DVMManagedOwner");
+            provider->close(client);
+        }
+        return kIOReturnSuccess;
+    }
     if(!provider->getProperty("DVMSurfaceOwner")){
         if(!provider->getProperty("DVMManagedOwner")&&!provider->open(client))return kIOReturnExclusiveAccess;
         if(!provider->setProperty("DVMSurfaceOwner",client))return kIOReturnNoMemory;
@@ -36,8 +59,9 @@ static IOReturn dvm_surface_registry(IOUserClient *client,IOService *provider,ui
         if(status){map->release();return kIOReturnBusy;}
         IOReturn kr=memory->complete(kIODirectionInOut);a->scalarOutput[3]=(uint32_t)kr;
         if(kr){reg[0x130/8]=1;__asm__ volatile("dsb sy":::"memory");map->release();return kr;}
-        // The owning client is kept by the provider. A failed owner never
-        // hands these pages to a replacement process; restart is unsupported.
+        // The owning client is kept by the provider until it relinquishes
+        // explicitly (0x44565303). A failed owner never hands these pages to a
+        // replacement process; only a retired record frees its pages.
         client->removeProperty(key);map->release();return kIOReturnSuccess;
     }
     uint64_t address=a->scalarInput[1],length=a->scalarInput[2];

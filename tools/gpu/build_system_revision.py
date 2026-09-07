@@ -18,10 +18,12 @@ def main():
     p.add_argument('base',type=Path,help='build_system_bootstrap.py --runtime-probe output')
     p.add_argument('out',type=Path)
     p.add_argument('--revision',type=int,default=1)
+    p.add_argument('--parent',type=Path,help='executable whose CodeDirectory hash the linkage signature names; default is the loader build\'s backboardd')
     a=p.parse_args()
     if not 1<=a.revision<=1000000:p.error('revision out of bounds')
     a.base=a.base.resolve();a.out=a.out.resolve()
-    if not json.loads((a.base/'build.json').read_text()).get('runtime_probe'):p.error('requires opted-in loader build')
+    build=json.loads((a.base/'build.json').read_text())
+    if not (build.get('runtime_probe') or build.get('session_reload')):p.error('requires opted-in loader build')
     a.out.mkdir(exist_ok=False);shutil.copytree(a.base/'stubs',a.out/'stubs')
     src=Path(__file__).resolve().parent;commands=[]
     def run(cmd):commands.append(cmd);subprocess.run(cmd,check=True)
@@ -43,7 +45,7 @@ def main():
         '-framework','Foundation','-framework','CoreFoundation','-framework','Metal','-framework','IOSurface','-lobjc','-o',str(bundle/'DVMProxy')])
     (bundle/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier=f'org.darwin-vm.revision{a.revision}',CFBundleExecutable='DVMProxy',CFBundlePackageType='BNDL',CFBundleVersion=str(a.revision))))
     run(['codesign','--force','--sign','-','--timestamp=none',str(bundle)])
-    run(['python3',str(src/'sign_linked_revision.py'),str(bundle),str(a.out/'linked'),'--parent',str(a.base/'backboardd')])
+    run(['python3',str(src/'sign_linked_revision.py'),str(bundle),str(a.out/'linked'),'--parent',str((a.parent or a.base/'backboardd').resolve())])
     imports=a.out/'imports.nm-u';imports.write_bytes(subprocess.check_output(['nm','-u',str(bundle/'DVMProxy')]))
     run(['python3',str(src/'verify_guest_imports.py'),'--output',str(a.out/'imports.tsv'),str(imports)])
     for f in src.iterdir():

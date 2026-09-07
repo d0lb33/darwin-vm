@@ -22,6 +22,7 @@ def main():
     p.add_argument('--runtime-probe',action='store_true',help='bounded arm64e runtime loading probe inside backboardd; does not replace/unload the boot driver')
     p.add_argument('--surface-pin-probe',action='store_true',help='audit the first actual compositor IOSurface and exercise the opt-in kernel pin/complete probe')
     p.add_argument('--surface-import',action='store_true',help='opt-in retained compositor page imports; requires matching registry kernel and QEMU')
+    p.add_argument('--session-reload',action='store_true',help='opt-in host-controlled revision staging, generation announcement and retirement; process replacement only, never a live unload')
     a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
     source=Path(__file__).resolve().parent;repo=source.parents[1];start=time.monotonic()
     shutil.copytree(a.base/'stubs',a.out/'stubs')
@@ -33,6 +34,7 @@ def main():
     flags=['-target','arm64e-apple-ios27.0','-isysroot',sdk,'-Wno-incompatible-sysroot','-fobjc-arc','-fobjc-arc-exceptions',
            '-O1','-Wall','-Wextra','-Werror','-Wno-deprecated-declarations','-Wno-protocol','-Wno-objc-protocol-property-synthesis','-fno-objc-msgsend-selector-stubs']
     if a.runtime_probe:flags.append('-DDVM_BOOT_RUNTIME_PROBE')
+    if a.session_reload:flags.append('-DDVM_BOOT_SESSION_RELOAD')
     if a.surface_pin_probe:flags.append('-DDVM_SURFACE_PIN_PROBE')
     if a.surface_import:flags.append('-DDVM_SURFACE_IMPORT')
     commands=[]
@@ -42,8 +44,11 @@ def main():
     symbols=set(subprocess.check_output(['nm','-u',str(obj)],text=True).split())
     additions={
       'usr/lib/libobjc.tbd':[s for s in symbols if s.startswith('_objc_') or s.startswith('_class_') or s.startswith('_sel_')],
-      'usr/lib/libSystem.tbd':['_getprogname'],
-      'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL','_OBJC_CLASS_$_NSMapTable'],
+      # verify_guest_imports.py checks every one of these against the exact
+      # guest cache exports, so a stub entry cannot invent a missing symbol.
+      'usr/lib/libSystem.tbd':['_getprogname','_fflush','_stat','_time',
+        '_pthread_create','_pthread_attr_init','_pthread_attr_setdetachstate','_pthread_attr_destroy'],
+      'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL','_OBJC_CLASS_$_NSMapTable','_OBJC_CLASS_$_NSFileManager'],
       'System/Library/Frameworks/IOSurface.framework/IOSurface.tbd':[s for s in symbols if s.startswith(('_IOSurface','_kIOSurface'))],
     }
     for rel,names in additions.items():
@@ -76,7 +81,7 @@ def main():
     target=a.out/'backboardd';target.write_bytes(b);target.chmod(0o755)
     result=run(['codesign','-d','--entitlements',':-',str(a.backboardd)],capture_output=True)
     entitlements=plistlib.loads(result.stdout);entitlements['platform-application']=True;entitlements['org.darwin-vm.transport']=True
-    if a.runtime_probe:
+    if a.runtime_probe or a.session_reload:
         entitlements.update({'org.darwin-vm.development-loader':True,'get-task-allow':True,'com.apple.private.oop-jit.loader':'previews'})
         entitlements['com.apple.security.exception.files.absolute-path.read-write']=['/private/var/tmp/dvm-gpu-runner/']
     key='com.apple.security.exception.iokit-user-client-class'
@@ -104,7 +109,7 @@ def main():
     for f in source.iterdir():
         if f.suffix in ('.m','.h','.inc','.py'):shutil.copyfile(f,a.out/f.name)
     (a.out/'build.json').write_text(json.dumps(dict(commands=commands,seconds=time.monotonic()-start,
-        runtime_probe=a.runtime_probe,surface_pin_probe=a.surface_pin_probe,surface_import=a.surface_import,
+        runtime_probe=a.runtime_probe,session_reload=a.session_reload,surface_pin_probe=a.surface_pin_probe,surface_import=a.surface_import,
         before_sha256=sha(before),after_sha256=sha(target),plugin_sha256=sha(binary),
         dependency=install,header_edit=dict(offset=off,bytes=length),
         scope='backboardd boot dependency and dedicated transport entitlement; no kernel, guest cache, SPTM or TXM edits'),indent=2)+'\n')

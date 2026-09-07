@@ -6,6 +6,28 @@
 @property(nonatomic) uint64_t resourceID;
 @property(nonatomic) BOOL retired;
 @end
+// Retirement accounting for the session lifecycle. Registration and explicit
+// retirement are counted separately: a process that exits without retiring
+// leaves its pages pinned, which the host must quarantine rather than reuse.
+static uint64_t DVMImportedRegisteredCount,DVMImportedRetiredCount;
+static NSMutableArray *DVMImportedRegistry;
+static void DVMImportedSurfaceCounts(uint64_t *registered,uint64_t *retired){
+    if(registered)*registered=DVMImportedRegisteredCount;
+    if(retired)*retired=DVMImportedRetiredCount;
+}
+// Strong, for quiescence only: the retiring process must be able to name every
+// resource it registered even while the compositor still holds the textures.
+static NSArray<NSNumber *> *DVMImportedOutstandingIDs(void){
+    NSMutableArray<NSNumber *> *ids=[NSMutableArray array];
+    for(DVMImportedMapping *m in DVMImportedRegistry)
+        if(!m.retired&&m.resourceID)[ids addObject:@(m.resourceID)];
+    return ids;
+}
+static BOOL DVMImportedRetireID(uint64_t resource){
+    for(DVMImportedMapping *m in DVMImportedRegistry)
+        if(m.resourceID==resource)return [m retire];
+    return NO;
+}
 @implementation DVMImportedMapping
 - (NSUInteger)mappingVersion {return 2;}
 - (IOSurfaceRef)iosurface {return (__bridge IOSurfaceRef)_surfaceObject;}
@@ -17,7 +39,7 @@
     kern_return_t kr=IOConnectCallScalarMethod(_owner.client,0x44565302,input,3,output,&count);
     BOOL ok=!kr&&count==4&&output[0]==1&&output[1]==_resourceID&&!output[2]&&!output[3];
     DVMReport(stderr,"GPU_LOAD_SURFACE_RETIRE id=%llu kr=%x count=%u status=%llu complete=%llu ok=%d\n",_resourceID,kr,count,output[2],output[3],ok);
-    if(ok){_retired=YES;IOSurfaceDecrementUseCount(self.iosurface);}return ok;
+    if(ok){_retired=YES;DVMImportedRetiredCount++;IOSurfaceDecrementUseCount(self.iosurface);}return ok;
 }
 // No dealloc unpin. Uncertain ownership is quarantined until VM destruction.
 @end
@@ -40,6 +62,9 @@ static DVMMetalSurfaceProvider DVMImportedSurfaceProvider(Namespace *ns){
         BOOL ok=!kr&&count==4&&output[0]==1&&output[1]&&output[2]==m.length&&output[3]==span;
         DVMReport(stderr,"GPU_LOAD_SURFACE_REGISTER surface=%u kr=%x count=%u id=%llu bytes=%llu span=%llu ok=%d\n",IOSurfaceGetID(s),kr,count,output[1],output[2],output[3],ok);
         if(!ok){ns.failed=YES;if(e)*e=[NSError errorWithDomain:@"DVMSurfaceRegistration" code:kr?:kIOReturnBadArgument userInfo:@{NSLocalizedDescriptionKey:@"kernel registration contract"}];return nil;}
-        m.resourceID=output[1];[cache setObject:m forKey:key];return m;
+        m.resourceID=output[1];DVMImportedRegisteredCount++;
+        if(!DVMImportedRegistry)DVMImportedRegistry=[NSMutableArray array];
+        [DVMImportedRegistry addObject:m];
+        [cache setObject:m forKey:key];return m;
     };
 }
