@@ -4,7 +4,8 @@ import hashlib
 from pathlib import Path
 import tempfile
 import unittest
-from shared_consumer_verify import verify_records,verify_scanout_export,BYTES,WIDTH,HEIGHT,ROW
+import struct
+from shared_consumer_verify import verify_records,verify_scanout_export,verify_handoff,BYTES,WIDTH,HEIGHT,ROW
 
 
 class SharedConsumerVerification(unittest.TestCase):
@@ -58,6 +59,21 @@ class SharedConsumerVerification(unittest.TestCase):
         for bad in (self.display.replace('gpu-present frame=2','other frame=2'),self.display.replace('D594 nested completed, status 0x0','D594 failed')):
             (self.out/'display.log').write_text(bad)
             with self.assertRaises(ValueError):verify_records(self.out,self.lines,self.records,3)
+
+    def test_handoff_requires_parent_receipt_and_shared_bytes(self):
+        lines=['GPU_LOAD_SURFACE_SEND job=7 result=0 surface=42',
+               'GPU_LOAD_SURFACE_RECEIVED job=7 surface=42 bytes=12435456',*self.lines,
+               'GPU_LOAD_SURFACE_RETURN job=7 pid=100 surface=42 alias_verified=1']
+        struct.pack_into('<QQ',self.data,BYTES,7,7^0x44564d48414e4446)
+        (self.out/'managed-final.bgra').write_bytes(self.data)
+        (self.out/'managed-pages.bin').write_bytes(bytes(16)+struct.pack('<QQ',759*16384,759)+struct.pack('<759Q',*(i*16384 for i in range(759))))
+        (self.out/'shared-ram.bin').write_bytes(bytes(32))
+        self.assertTrue(verify_handoff(self.out,lines,7,100)['verified'])
+        for old,new in [('pid=100','pid=101'),('alias_verified=1','alias_verified=0'),('result=0','result=5')]:
+            with self.assertRaises(ValueError):verify_handoff(self.out,[x.replace(old,new) for x in lines],7,100)
+        with self.assertRaisesRegex(ValueError,'order'):verify_handoff(self.out,lines[::-1],7,100)
+        self.data[BYTES+8]^=1;(self.out/'managed-final.bgra').write_bytes(self.data)
+        with self.assertRaisesRegex(ValueError,'independent shared-memory'):verify_handoff(self.out,lines,7,100)
 
 
 if __name__=='__main__':unittest.main()

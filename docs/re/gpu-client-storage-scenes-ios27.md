@@ -28,7 +28,7 @@ compiler are not advertised. Profile v5 is `bounded-client-storage-v5`.
 | Writable/index aliases and generated indices | Yes, serialized dependent draws | Host GPU test proves generated indices, stable index snapshot, pixel correctness and rejection of invalid generated indices before dependent draw |
 | Invalid later static command | Rejected before any GPU execution | Host test with a bad later writable binding |
 | 22 scalar capability queries | Yes | Exact guest job 1788756752501613 plus host contract tests |
-| Screen-sized shared-RAM render target | Exact guest: 3 displayed CARenderer frames pass | See `gpu-shared-quartzcore-ios27.md`; persistent cross-process pool handoff and sustained pacing remain unproven |
+| Screen-sized shared-RAM render target | Exact guest: 23 frames across 3 fresh processes, same IOSurface | See `gpu-surface-handoff-ios27.md`; successful handoff verified, crash recovery and sustained pacing unproven |
 | Generic IOSurface import / system compositor discovery | Not implemented | Next integration dependency; software compositor retained |
 | Long-run stability and 60 Hz pacing | Not passed as a reliability claim | One SIGABRT in four 2,048-frame attempts; three instrumented repetitions passed, all had deadline misses |
 

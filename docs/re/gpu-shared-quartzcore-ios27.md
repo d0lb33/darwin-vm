@@ -1,5 +1,9 @@
 # Guest QuartzCore rendering directly into the displayed shared IOSurface
 
+Follow-up: [supervisor-held surface handoff](gpu-surface-handoff-ios27.md)
+now proves reuse across three fresh guest processes. The ownership failures
+below describe the earlier per-child service-mapping design.
+
 2026-09-07. Exact **iOS 27 24A5430a, iPhone17,3/T8140**, original SPTM/TXM,
 native SMC, migrated disk lineage and software fallback. Solo work in
 `codex/metal-driver-ios27`; isolated install/test disk children only. No

@@ -38,7 +38,11 @@ def verify(path):
         from shared_consumer_verify import verify_records as verify_shared
         evidence=verify_shared(p,lines[:end+1],records,job['frames'])
     else:evidence=verify_records(p,lines[:end+1],records,job.get('frames',1),job.get('scene',0))
-    return dict(job=job['job'],guest_pid=result['pid'],audit_crc_verified=True,consumer=evidence)
+    output=dict(job=job['job'],guest_pid=result['pid'],audit_crc_verified=True,consumer=evidence)
+    if job.get('surface_handoff'):
+        from shared_consumer_verify import verify_handoff
+        output['handoff']=verify_handoff(p,lines,job['job'],result['pid'])
+    return output
 
 
 if __name__=='__main__':

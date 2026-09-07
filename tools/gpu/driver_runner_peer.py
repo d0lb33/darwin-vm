@@ -44,6 +44,10 @@ class RunnerPeer(MMIOPeer):
         if op == 'runnerNext':
             if self.current is not None:
                 raise ValueError('job still owns runner')
+            if self.pending is not None:
+                return dict(action='idle')
+            if any(r.get('shared_surface') and not r['verified'] for r in self.results):
+                raise ValueError('failed shared job requires VM recovery before pool reuse')
             files = sorted(self.inbox.glob('*.json'))
             if not files:
                 return dict(action='stop' if (self.inbox/'stop').exists() else 'idle')
@@ -86,6 +90,7 @@ class RunnerPeer(MMIOPeer):
                                 started=time.monotonic(),first_serial=(self.out/'serial.log').stat().st_size,
                                 first_display=(self.out/'stderr.log').stat().st_size)
             return dict(action='stage',job=job['job'],bytes=len(payload),sha256=job['sha256'],test=job.get('test','builtin'),mode=job.get('mode','data'),development=job.get('development',False),
+                        shared_surface=job.get('shared_surface',False),
                         info=base64.b64encode(info).decode(),resources=base64.b64encode(resources).decode())
         if op == 'runnerFetch':
             c = self.current
@@ -128,10 +133,11 @@ class RunnerPeer(MMIOPeer):
                 from managed_pages import read_resource
                 if (self.out/'managed-pages.bin').exists():
                     (directory/'managed-final.bgra').write_bytes(read_resource(self.out))
+                    shutil.copyfile(self.out/'managed-pages.bin',directory/'managed-pages.bin')
                 display,_=capture_uart_interval(self.out/'stderr.log',c['first_display'])
                 (directory/'display.log').write_bytes(display)
             result=dict(c['result'],host_elapsed_seconds=c['ended']-c['started'],
-                        expected=c['job'].get('expected','observe'),verified=False,loading_evidence=loading)
+                        expected=c['job'].get('expected','observe'),shared_surface=c['job'].get('shared_surface',False),verified=False,loading_evidence=loading)
             if result['spawn']==0 and result['exit']==0 and result['signal']==0:
                 from consumer_verify import verify_records
                 if c['job'].get('shared_surface'):
@@ -139,6 +145,9 @@ class RunnerPeer(MMIOPeer):
                 child=[x['line'] for x in audits]
                 end=child.index('GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0')
                 result['consumer']=verify_shared(directory,child[:end+1],records,c['job']['frames']) if c['job'].get('shared_surface') else verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
+                if c['job'].get('surface_handoff'):
+                    from shared_consumer_verify import verify_handoff
+                    result['handoff']=verify_handoff(directory,child,c['job']['job'],result['pid'])
                 result['verified']=True
             else:
                 result['failure_evidence']=[x['line'] for x in audits if 'ERROR' in x['line'] or 'FAULT' in x['line']]

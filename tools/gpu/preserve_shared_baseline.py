@@ -20,6 +20,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     for name in ('manifest', 'trial', 'job', 'installed-build', 'runtime-build', 'linked', 'out'):
         p.add_argument('--'+name, type=Path, required=True)
+    p.add_argument('--handoff-jobs',nargs='+',type=int,help='also require verified successive-process surface reuse')
     a = p.parse_args()
     m = json.loads(a.manifest.read_text())
     result = json.loads((a.trial/'result.json').read_text())
@@ -34,6 +35,11 @@ def main():
         p.error('requires shared-surface runtime revision')
     evidence = verify(a.job)
     scanout = verify_scanout_export(a.trial, a.job)
+    handoff=None
+    if a.handoff_jobs:
+        from verify_surface_handoff_batch import verify_batch
+        if job['job']!=a.handoff_jobs[-1]:p.error('final scanout must match last handoff job')
+        handoff=verify_batch(a.trial,a.handoff_jobs)
     if sha256(a.linked/'DVMProxy.bundle/DVMProxy') != job['sha256']:
         p.error('linked revision differs from tested job')
     worker = json.loads((a.job/'worker.json').read_text())
@@ -83,7 +89,8 @@ def main():
     shutil.copy2(a.manifest,a.out/'source-manifest.json')
     (a.out/'provenance.json').write_text(json.dumps(dict(
         manifest_sha256=sha256(a.manifest), trial=str(a.trial), result_sha256=sha256(a.trial/'result.json'),
-        job=evidence, scanout=scanout, scope='sealed installation copy; disposable children only; one pool-owning process per VM until handoff is proven'),indent=2)+'\n')
+        job=evidence, scanout=scanout, handoff=handoff,
+        scope='sealed installation copy; disposable children only; supervisor owns the VM-lifetime pool' if handoff else 'sealed installation copy; disposable children only; one pool-owning process per VM until handoff is proven'),indent=2)+'\n')
     print(a.out)
 
 

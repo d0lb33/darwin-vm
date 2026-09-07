@@ -2,6 +2,7 @@
 import hashlib
 import math
 import re
+import struct
 from pathlib import Path
 
 WIDTH, HEIGHT, ROW = 1179, 2556, 4864
@@ -93,3 +94,38 @@ def verify_scanout_export(trial, job):
         raise ValueError('actual final DCP scanout differs from verified owned IOSurface')
     return dict(verified=True,bytes=BYTES,sha256=hashlib.sha256(actual).hexdigest(),
                 scope='actual final DCP pixel DMA equals independently verified guest shared IOSurface')
+
+
+def verify_handoff(directory, lines, job, pid):
+    """Additional proof, required alongside rendering/pixels/native retirement."""
+    events={}
+    for tag in ('SEND','RECEIVED','RETURN'):
+        rows=[fields(x) for x in lines if x.startswith('GPU_LOAD_SURFACE_'+tag+' ')]
+        if len(rows)!=1 or rows[0]['job']!=str(job):
+            raise ValueError('surface handoff job witness '+tag)
+        events[tag]=rows[0]
+    surface=int(events['SEND']['surface'])
+    if not surface or events['SEND']['result']!='0' or any(int(x['surface'])!=surface for x in events.values()):
+        raise ValueError('surface handoff identity')
+    if events['RETURN']['alias_verified']!='1' or events['RETURN']['pid']!=str(pid):
+        raise ValueError('supervisor did not verify returned child alias')
+    if events['RECEIVED']['bytes']!=str(759*16384):
+        raise ValueError('surface handoff extent')
+    positions=[next(i for i,x in enumerate(lines) if x.startswith('GPU_LOAD_SURFACE_'+tag+' ')) for tag in ('SEND','RECEIVED','RETURN')]
+    done=lines.index('GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0')
+    setup=[fields(x) for x in lines if x.startswith('GPU_LOAD_CA_SHARED_SETUP ')]
+    if not positions[0]<positions[1]<done<positions[2] or len(setup)!=1 or int(setup[0]['surface'])!=surface:
+        raise ValueError('surface handoff rendering/return order or target')
+    pixels=(Path(directory)/'managed-final.bgra').read_bytes()
+    if struct.unpack_from('<QQ',pixels,BYTES)!=(job,job^0x44564d48414e4446):
+        raise ValueError('surface handoff independent shared-memory witness')
+    registration=(Path(directory)/'managed-pages.bin').read_bytes()
+    if len(registration)!=32+759*8:
+        raise ValueError('surface handoff page registration extent')
+    session=(Path(directory)/'shared-ram.bin').read_bytes()[16:32]
+    pages=struct.unpack_from('<759Q',registration,32)
+    if registration[:16]!=session or struct.unpack_from('<QQ',registration,16)!=(759*16384,759) or len(set(pages))!=759 or any(x%16384 or x>0x300000000-16384 for x in pages):
+        raise ValueError('surface handoff page registration contract')
+    return dict(verified=True,surface_id=surface,guest_pid=pid,job=job,
+                registration_sha256=hashlib.sha256(registration).hexdigest(),
+                scope='supervisor retained pool; child Mach-port IOSurface alias; successful return only')

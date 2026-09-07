@@ -17,6 +17,10 @@ id<MTLDevice> DVMCreateBinaryMetalDevice(DVMMetalRPC rpc);
 - (NSUInteger)mappingVersion;
 - (void *)bytes;
 - (NSUInteger)length;
+@optional
+// A supervisor-held IOSurface may supply the same owned pool in a child task.
+// The mapping object retains the surface; callers must not release this getter.
+- (IOSurfaceRef)iosurface;
 @end
 typedef id<DVMMetalOwnedMapping> (^DVMMetalMappingProvider)(NSError **error);
 typedef id<MTLDevice> (*DVMCreateSharedMetalDeviceFn)(DVMMetalRPC,DVMMetalMappingProvider);

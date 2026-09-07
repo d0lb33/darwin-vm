@@ -103,6 +103,7 @@ cp "$repo/tools/gpu/present_"* "$repo/tools/gpu/blur_"* "$repo/tools/gpu/driver_
 cp "$repo/qemu-sptm/include/xnu/darwin_gpu_transport.h" "$out/"
 cp "$repo/tools/gpu/managed_host.h" "$out/"
 cp "$repo/tools/gpu/managed_guest.h" "$out/"
+cp "$repo/tools/gpu/surface_handoff.h" "$out/"
 cp "$repo/tools/gpu/consumer_"* "$out/"
 printf "%s\n" "${DVM_CA_PROBE:-0}" > "$out/consumer-probe.txt"
 printf "%s\n" "$consumer_frames" > "$out/consumer-frames.txt"

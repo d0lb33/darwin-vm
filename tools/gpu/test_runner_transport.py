@@ -61,5 +61,11 @@ class RunnerVerdictTests(unittest.TestCase):
         p=self.peer([dict(pid=1,expected='pass',verified=True),dict(pid=1,expected='pass',verified=True)])
         with self.assertRaisesRegex(ValueError,'fresh-process identity'):p.verify([])
 
+    def test_shared_failure_prevents_backend_reset_and_pool_reuse(self):
+        p=self.peer([dict(shared_surface=True,verified=False)])
+        with self.assertRaisesRegex(ValueError,'VM recovery'):p.control_reply(dict(op='runnerNext'))
+        p=self.peer([]);p.pending=dict(result='awaiting verification')
+        self.assertEqual(p.control_reply(dict(op='runnerNext')),dict(action='idle'))
+
 
 if __name__=='__main__':unittest.main()

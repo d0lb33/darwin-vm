@@ -29,7 +29,8 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device){
         NSDictionary *properties=@{(__bridge id)*address:@((uintptr_t)mapping.bytes),(__bridge id)*cache:@0x700,
             (id)kIOSurfaceWidth:@DVM_PRESENT_WIDTH,(id)kIOSurfaceHeight:@DVM_PRESENT_HEIGHT,(id)kIOSurfaceBytesPerElement:@4,
             (id)kIOSurfaceBytesPerRow:@DVM_PRESENT_ROW,(id)kIOSurfaceAllocSize:@DVM_PRESENT_BUFFER_BYTES,(id)kIOSurfacePixelFormat:@(0x42475241)};
-        stage="surface";IOSurfaceRef surface=IOSurfaceCreate((__bridge CFDictionaryRef)properties);
+        stage="surface";IOSurfaceRef surface=[mapping respondsToSelector:@selector(iosurface)]?mapping.iosurface:NULL;
+        if(surface)CFRetain(surface);else surface=IOSurfaceCreate((__bridge CFDictionaryRef)properties);
         if(!surface||IOSurfaceGetBaseAddress(surface)!=mapping.bytes)fail("shared-surface-alias");
         stage="texture";MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:DVM_PRESENT_WIDTH height:DVM_PRESENT_HEIGHT mipmapped:NO];
         d.storageMode=MTLStorageModeShared;d.usage=MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget;

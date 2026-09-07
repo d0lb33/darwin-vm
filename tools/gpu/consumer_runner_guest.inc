@@ -20,6 +20,10 @@ static int DVMRunTestSupervisor(const char *executable) {
     const char *base="/private/var/tmp/dvm-gpu-runner";
     if(mkdirFn(base,0700)&&errno!=EEXIST)DVMRunnerFail("runner-directory");
     BOOL systemWritable=NO;
+    // Stable owner across exec'd workers. Only the supervisor maps the pool;
+    // each worker gets a scoped IOSurface capability, never the service owner.
+    id<DVMMetalOwnedMapping> pool=nil;id surfaceObject=nil;
+    DVMSurfacePortAPI portAPI;
     fprintf(stderr,"GPU_LOAD_RUNNER_READY pid=%d\n",getpid());
     while(1)@autoreleasepool {
         NSError *error=nil;NSDictionary *job=[ns call:@{@"op":@"runnerNext"} error:&error];
@@ -74,8 +78,24 @@ static int DVMRunTestSupervisor(const char *executable) {
         fprintf(stderr,"GPU_LOAD_RUNNER_STAGED job=%llu bytes=%lu sha256=%s staging_us=%.3f mode=%s\n",jobID,(unsigned long)length,[job[@"sha256"] UTF8String],(now()-staged)*1e6,mode.UTF8String);
         NSString *env=[@"DVM_DRIVER_BUNDLE_PATH=" stringByAppendingString:bundle];
         BOOL package=[job[@"test"] isEqual:@"package"],development=[job[@"development"] isEqual:@YES];
-        char *args[]={(char *)executable,"--worker",NULL};char *environment[]={(char *)env.UTF8String,package?"DVM_RUNNER_TEST=package":"DVM_RUNNER_TEST=builtin",development?"DVM_RUNNER_DEVELOPMENT=1":"DVM_RUNNER_DEVELOPMENT=0",NULL};
+        BOOL shared=[job[@"shared_surface"] isEqual:@YES];DVMSurfacePortScope portScope={0};
+        if(shared){
+            if(!pool){pool=DVMMapDriverPool(ns,&error);if(!pool)DVMRunnerFail("supervisor-pool");
+                surfaceObject=CFBridgingRelease(DVMCreatePoolSurface(pool));
+                if(!DVMSurfacePortLoad(&portAPI))DVMRunnerFail("supervisor-port-symbols");
+                fprintf(stderr,"GPU_LOAD_SURFACE_OWNER pid=%d surface=%u bytes=%lu\n",getpid(),IOSurfaceGetID((__bridge IOSurfaceRef)surfaceObject),(unsigned long)pool.length);
+            }
+            IOSurfaceRef surface=(__bridge IOSurfaceRef)surfaceObject;
+            if(IOSurfaceLock(surface,0,NULL))DVMRunnerFail("supervisor-lock");
+            uint64_t *witness=(uint64_t *)((uint8_t *)pool.bytes+DVM_PRESENT_BYTES);witness[0]=jobID;witness[1]=0;
+            if(IOSurfaceUnlock(surface,0,NULL))DVMRunnerFail("supervisor-unlock");
+            kern_return_t portRC=DVMSurfacePortsBegin(&portAPI,surface,&portScope);
+            fprintf(stderr,"GPU_LOAD_SURFACE_SEND job=%llu result=%x surface=%u\n",jobID,portRC,IOSurfaceGetID(surface));
+            if(portRC)DVMRunnerFail("supervisor-port-register");
+        }
+        char *args[]={(char *)executable,"--worker",NULL};char *environment[]={(char *)env.UTF8String,package?"DVM_RUNNER_TEST=package":"DVM_RUNNER_TEST=builtin",development?"DVM_RUNNER_DEVELOPMENT=1":"DVM_RUNNER_DEVELOPMENT=0",shared?"DVM_RUNNER_SURFACE=1":"DVM_RUNNER_SURFACE=0",NULL};
         pid_t child=0;double started=now();int rc=spawn(&child,executable,NULL,NULL,args,environment);
+        if(shared&&DVMSurfacePortsEnd(&portAPI,&portScope))DVMRunnerFail("supervisor-port-restore");
         int status=0;pid_t waited=-1;
         if(!rc){
             do {waited=waitpid(child,&status,WNOHANG);if(waited==0)usleep(10000);}while((waited==0||(waited<0&&errno==EINTR))&&now()-started<90);
@@ -84,8 +104,20 @@ static int DVMRunTestSupervisor(const char *executable) {
         // Child was the sole shared-RAM producer until waitpid completed.
         ns.sequence=*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_DONE);
         mmioReportSequence=*(volatile uint64_t *)(ns.shared+0x180);
+        BOOL sharedSafe=YES;
+        if(shared){
+            IOSurfaceRef surface=(__bridge IOSurfaceRef)surfaceObject;
+            int lockRC=IOSurfaceLock(surface,kIOSurfaceLockReadOnly,NULL);
+            uint64_t *witness=(uint64_t *)((uint8_t *)pool.bytes+DVM_PRESENT_BYTES);
+            sharedSafe=!rc&&waited==child&&WIFEXITED(status)&&!WEXITSTATUS(status)&&!lockRC&&witness[0]==jobID&&witness[1]==(jobID^0x44564d48414e4446ULL);
+            if(!lockRC&&IOSurfaceUnlock(surface,kIOSurfaceLockReadOnly,NULL))sharedSafe=NO;
+            fprintf(stderr,"GPU_LOAD_SURFACE_RETURN job=%llu pid=%d surface=%u alias_verified=%u\n",jobID,child,IOSurfaceGetID(surface),sharedSafe);
+        }
         fprintf(stderr,"GPU_LOAD_RUNNER_EXIT job=%llu pid=%d spawn=%d waited=%d status=%x elapsed_us=%.3f\n",jobID,child,rc,waited,status,(now()-started)*1e6);
         NSDictionary *result=@{@"op":@"runnerResult",@"job":@(jobID),@"pid":@(child),@"spawn":@(rc),@"waited":@(waited),@"exit":@(rc||waited!=child?-1:WIFEXITED(status)?WEXITSTATUS(status):-1),@"signal":@(rc||waited!=child?0:WIFSIGNALED(status)?WTERMSIG(status):0),@"elapsed_us":@((now()-started)*1e6)};
         if(![ns call:result error:&error])DVMRunnerFail("runner-result");
+        // Failure can leave GPU/display work outstanding. Do not hand the pool
+        // to another child merely because waitpid or client close succeeded.
+        if(!sharedSafe)DVMRunnerFail("shared-child-failed-no-reuse");
     }
 }
