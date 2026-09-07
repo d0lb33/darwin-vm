@@ -20,6 +20,7 @@ static double blurRPCus,blurDoorbellus;
 #endif
 #include <signal.h>
 #include <sys/ucontext.h>
+#ifndef DVM_BOOT_PLUGIN
 static void mmioCrash(int signal, siginfo_t *info, void *context) {
     ucontext_t *u=context;
     const char *names[]={"signal","code","address","pc","lr","x0","x1","x2","esr"};
@@ -35,6 +36,7 @@ static void mmioCrash(int signal, siginfo_t *info, void *context) {
     }
     line[at++]='\n';write(2,line,at);_exit(128+signal);
 }
+#endif
 static void mmioBarrier(void) { __asm__ volatile("dsb sy" ::: "memory"); }
 // Single producer at a time, fixed 64 x 512-byte slots before request data.
 // Guest publishes payload/header before the monotonic head. Host checks CRC.
@@ -140,8 +142,10 @@ static Namespace *openMMIO(void *lib) {
     while(!(service=p_IORegistryEntryFromPath(0,path))&&now()<until)usleep(10000);
     if(!service)fail("mmio-service");
     char cls[128]={0};if(p_IOObjectGetClass(service,cls)||strcmp(cls,"AppleARMIODevice"))fail("mmio-class");
+#ifndef DVM_BOOT_PLUGIN
     struct sigaction action={0};action.sa_sigaction=mmioCrash;action.sa_flags=SA_SIGINFO;
     if(sigaction(SIGBUS,&action,NULL))fail("mmio-signal-handler");
+#endif
     fprintf(stderr,"GPU_LOAD_DRIVER_MMIO_ADDRESSES memcpy=%p\n",dlsym(RTLD_DEFAULT,"memcpy"));
     Namespace *ns=[Namespace new];ns.closeClient=p_IOServiceClose;ns.unmap=p_IOConnectUnmapMemory64;
     uint32_t openType=DVM_GPU_OPEN_TYPE;

@@ -1,5 +1,6 @@
-// Experimental process-local Metal forwarding driver. Public selector/structure ABI;
-// only the documented subset is implemented. Never publish this device globally.
+// Experimental Metal forwarding driver. Public selector/structure ABI; only
+// the documented subset is implemented. Boot registration is opt-in and
+// restricted to backboardd in the isolated system_bootstrap experiment.
 #import "driver_api.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <IOSurface/IOSurface.h>
@@ -100,6 +101,10 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @interface DVMQueue : NSObject <MTLCommandQueue>
 @property(nonatomic, strong) DVMDevice *owner;
 @property(atomic, copy) NSString *label;
+@property(nonatomic,strong) dispatch_queue_t submissionQueue;
+@property(nonatomic,strong) dispatch_queue_t completionQueue;
+@property(nonatomic) BOOL configurationFrozen;
+@property(nonatomic) NSUInteger maxCommandBufferCount,pendingSubmissions;
 @end
 static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
     NSData *data=texture.pendingUpload;NSNumber *token=@0;NSError *failure=nil;
@@ -361,7 +366,12 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (id<MTLCommandQueue>)newCommandQueue {
     DVMQueue *q = [DVMQueue new];
     q.owner = self;
+    q.maxCommandBufferCount=DVM_QUEUED_COMMAND_BUFFERS;
     return q;
+}
+- (id<MTLCommandQueue>)newCommandQueueWithMaxCommandBufferCount:(NSUInteger)count {
+    if(!count||count>DVM_QUEUED_COMMAND_BUFFERS)return nil;
+    DVMQueue *queue=(id)[self newCommandQueue];queue.maxCommandBufferCount=count;return queue;
 }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)options {
     if (!n || n > DVM_BUFFER_BYTES || !DVMResourceOptionsValid(options))
@@ -568,10 +578,29 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @end
 
 @implementation DVMQueue
+// The one physical execution queue has no guest priority classes. These
+// private selectors return whether the requested policy was accepted; return
+// NO instead of pretending to change GPU scheduling. Exact QuartzCore's
+// constructor ignores both results (0x184588da0 and 0x1845891c4).
+- (BOOL)setGPUPriority:(NSUInteger)priority {(void)priority;return NO;}
+- (BOOL)setBackgroundGPUPriority:(NSUInteger)priority {(void)priority;return NO;}
+- (void)setSubmissionQueue:(dispatch_queue_t)queue {
+    @synchronized(self) {
+        if(!queue||_configurationFrozen)reject(@"submission queue must be configured before command-buffer creation");
+        _submissionQueue=queue;
+    }
+}
+- (void)setCompletionQueue:(dispatch_queue_t)queue {
+    @synchronized(self) {
+        if(!queue||_configurationFrozen)reject(@"completion queue must be configured before command-buffer creation");
+        _completionQueue=queue;
+    }
+}
 - (id<MTLDevice>)device {
     return _owner;
 }
 - (id<MTLCommandBuffer>)commandBuffer {
+    @synchronized(self){_configurationFrozen=YES;}
     DVMCommand *b = [DVMCommand new];
     b.commandQueue = self;
     b.commands = [NSMutableArray array];
@@ -645,8 +674,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
         @synchronized(_commandQueue.owner) {
             if (_commandQueue.owner.pendingSubmissions>=DVM_QUEUED_COMMAND_BUFFERS)
                 reject(@"bounded command buffer queue is full");
+            if(_commandQueue.pendingSubmissions>=_commandQueue.maxCommandBufferCount)
+                reject(@"command queue's configured command-buffer bound is full");
             if(!_commandQueue.owner.pendingSubmissions)_commandQueue.owner.lastSubmissionError=nil;
             _commandQueue.owner.pendingSubmissions++;
+            _commandQueue.pendingSubmissions++;
         }
         self.status = MTLCommandBufferStatusCommitted;
         dispatch_group_enter(_completion);
@@ -670,6 +702,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             [textures addObject:t];
         }
     dispatch_async(_commandQueue.owner.serial, ^{
+        // Keep the device FIFO reservation in place while the caller's
+        // submission queue executes. Resource RPCs cannot overtake this work.
+        // As with native private dispatch queues, callers must not block the
+        // supplied serial target waiting for work scheduled onto that target.
+        void (^execute)(void)=^{
         @autoreleasepool {
             @try {
                 NSError *e = nil;
@@ -783,13 +820,15 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             @synchronized(self.commandQueue.owner) {
                 self.commandQueue.owner.lastSubmissionError=self.error;
                 self.commandQueue.owner.pendingSubmissions--;
+                self.commandQueue.pendingSubmissions--;
             }
             dispatch_group_leave(self.completion);
-            for (MTLCommandBufferHandler h in handlers)
-                dispatch_async(dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE, 0), ^{
-                    h(self);
-                });
+            dispatch_queue_t callbacks=self.commandQueue.completionQueue?:dispatch_get_global_queue(QOS_CLASS_USER_INTERACTIVE,0);
+            dispatch_async(callbacks, ^{for(MTLCommandBufferHandler h in handlers)h(self);});
         }
+        };
+        if(self.commandQueue.submissionQueue)dispatch_sync(self.commandQueue.submissionQueue,execute);
+        else execute();
     });
     }
 }
