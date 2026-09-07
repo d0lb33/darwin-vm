@@ -11,6 +11,14 @@ GPU controls passed. Implementation stopped at that limit. The user subsequently
 lifted the fix limit and requested continued dynamic-driver work. The bounded
 batch below remains a record of completed experiments, not the current stop rule.
 
+**Current result:** runtime revisions now pass actual guest CARenderer and
+verified host Metal pixels, including a code-changed revision built after VM
+start, repeated without debugger or trace plugin. The resolution combines
+native OOP-JIT linkage signatures, the entitled helper, the existing scoped
+kernel support and an opt-in SEP xART status record. See
+[gpu-linked-runtime-loading-ios27.md](gpu-linked-runtime-loading-ios27.md)
+for the exact failed contracts, controls, commands and durable test package.
+
 ## Contract and bounds
 
 Question: can a fresh, explicitly authorized test process map a newly staged

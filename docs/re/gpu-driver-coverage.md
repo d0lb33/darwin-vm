@@ -30,14 +30,21 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Presentation | Separate managed shared-page IOSurface extension with native retirement | Earlier exact displayed blur and input recovery | CARenderer output is currently offscreen; generic render target adoption unknown |
 | Synchronization | Serial RPC, completion callbacks, strong resource retention | Exact single-consumer completion and retirement; host failure tests | Multiple queues/in-flight buffers, events/fences, reset; timestamp clock translation |
 | Checkpoint | Active GPU migration blocked | Copied-pixel historical checkpoints only | Live host resources and executing commands cannot be checkpointed |
-| Iteration | Fresh-process supervisor, signed package staging, incremental build and captured-submission replay tools; opt-in test-kernel RX mapping exception | Exact guest installed controls; boot-trusted driver staged on Data executes actual CARenderer with verified pixels; 27-request host replay | New revision passes scoped AMFI completion and stock TXM hash matching, but TXM signature validation fails; stopped after three additional authorized fixes |
+| Iteration | Fresh-process supervisor, signed package staging, incremental build and captured-submission replay tools; opt-in test-kernel RX mapping exception | Exact guest installed controls; boot-trusted driver staged on Data executes actual CARenderer with verified pixels; 27-request host replay | Two code-distinct runtime revisions now pass real guest CARenderer in one uninstrumented boot using native OOP-JIT signatures plus opt-in xART fixture; global loading and checkpoints remain outside scope |
 | Performance | Separate first-use and host GPU timing; prior sustained managed-blur controls | Prior displayed blur missed target pacing; red draw is not a benchmark | Native Liquid Glass/scrolling and sustained CARenderer performance unproven |
 
 ## Current bounded experiments
 
 1. **Persistent staging/loading:** boot one isolated runner, require existing
    native display plus stable input/fresh ACK, then stage the trusted driver and
-   a newly signed revision through controlled staging paths. The scoped kernel service and helper `get-task-allow` obtain stock TXM approval. The user then allowed only two further fixes. Fix 1 reaches a narrowly scoped ad-hoc CT acceptance branch, but the revision still fails subsequent signature validation. Fix 2 corrects the exact observed RX mmap denial for the entitled/debugged child: a boot-trusted driver staged on Data now executes real CARenderer and verifies pixels. The new revision still fails before mapping. After honoring that stop, three additional authorized fixes reached original AMFI callback success and stock TXM compilation-hash matching. The revised file still fails TXM selector-24 signature validation, including after preserving the kernel compilation capability. **Stopped after all three additional fixes**; six further installed GPU controls pass. This remains an iteration blocker, not a failure of existing GPU rendering. See [kernel evidence](gpu-development-loader-ios27.md). Each job
+   a newly signed revision through controlled staging paths. **Proven for the
+   scoped development runner:** native OOP-JIT signatures and an opt-in SEP
+   xART status record resolve the observed TXM failures; the existing scoped
+   kernel mmap support remains necessary. Two distinct Data-loaded revisions
+   pass real CARenderer, exact pixels and resource release in one uninstrumented
+   boot, including a revision compiled after boot. Wrong subtype is rejected;
+   ordinary controls and display/input readiness survive. See
+   [runtime-loading evidence](gpu-linked-runtime-loading-ios27.md). Each job
    execs the pinned helper in a fresh PID and uses a fresh host worker. Require
    real GPU output for successful loads; retain exact dyld/signing or process
    termination evidence for failures. Stop an individual child after 90 seconds;

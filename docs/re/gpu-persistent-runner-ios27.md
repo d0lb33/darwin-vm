@@ -139,8 +139,14 @@ scoped AMFI completion, stock TXM compilation-hash authorization, and retaining
 the kernel compilation capability. AMFI now returns success and TXM matches the
 real candidate hash, but selector 24 still rejects its signature. All three
 failed revised-driver acceptance; six further installed controls verified pixels.
-**Work stopped after the three additional fixes.** Runtime loading remains
-unresolved; GPU development can still use isolated installation/reboot.
+That stop was honored, then the user removed the limit. **Runtime revision
+loading now works in the scoped development runner:** linked OOP-JIT signatures
+and an opt-in SEP xART record resolve the exact TXM gates. Two code-distinct
+Data revisions execute actual guest CARenderer with verified host pixels in
+one uninstrumented boot; one was built after boot. Wrong subtype still fails
+signature validation and omitting development opening still fails mmap.
+See [current runtime-loading evidence](gpu-linked-runtime-loading-ios27.md)
+for commands, iteration timings and the durable runner package.
 
 The user authorized an opt-in kernel addition for testing on isolated boot
 artifacts. Stop searching for a remount/entitlement-only shortcut. The required

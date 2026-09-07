@@ -11,6 +11,21 @@ import time
 from driver_mmio_peer import MMIOPeer
 
 
+def capture_uart_interval(path, start, limit=4*1024*1024):
+    # The UART file is still growing. A second read after EOF can observe a
+    # newly appended byte and falsely report overflow, even for a tiny log.
+    end = path.stat().st_size
+    size = end-start
+    if not 0 <= size <= limit:
+        raise ValueError('job UART evidence exceeds bound or was truncated')
+    with path.open('rb') as serial:
+        serial.seek(start)
+        uart = serial.read(size)
+    if len(uart) != size:
+        raise ValueError('job UART evidence truncated while reading')
+    return uart, dict(start=start, end=end, bytes=size)
+
+
 class RunnerPeer(MMIOPeer):
     runner = True
 
@@ -98,10 +113,9 @@ class RunnerPeer(MMIOPeer):
             directory=c['out']
             # Early dyld/open failures precede the child's MMIO audit mapping.
             # Preserve the bounded UART interval as a separate evidence source.
-            with (self.out/'serial.log').open('rb') as serial:
-                serial.seek(c['first_serial']);uart=serial.read(4*1024*1024)
-                if serial.read(1):raise ValueError('job UART evidence exceeds bound')
+            uart, interval = capture_uart_interval(self.out/'serial.log', c['first_serial'])
             (directory/'guest-loading.log').write_bytes(uart)
+            (directory/'guest-loading-interval.json').write_text(json.dumps(interval,indent=2)+'\n')
             loading=[line for line in uart.decode(errors='replace').splitlines()
                      if line.startswith(('GPU_LOAD_','DVM_DEV_LOADER '))]
             (directory/'driver-host.jsonl').write_text(''.join(json.dumps(r)+'\n' for r in records))

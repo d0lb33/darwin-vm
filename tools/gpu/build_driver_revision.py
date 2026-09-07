@@ -18,9 +18,11 @@ def main():
     p.add_argument('--bootstrap',action='store_true',help='incrementally rebuild the pinned mode-3 consumer supervisor; requires reinstall/reboot')
     p.add_argument('--development-loader',action='store_true',help='add the dedicated test entitlement; requires --bootstrap and a new boot trust cache')
     p.add_argument('--compilation-loader',action='store_true',help='opt-in TXM compilation-hash authorization entitlement; requires --bootstrap --development-loader')
+    p.add_argument('--oopjit-loader',choices=('previews','ml-compiler'),help='exact guest OOP-JIT loader subtype; requires --bootstrap --development-loader')
     a=p.parse_args()
     if a.development_loader and not a.bootstrap:p.error('development loader requires bootstrap revision')
     if a.compilation_loader and not (a.bootstrap and a.development_loader):p.error('compilation loader requires bootstrap development revision')
+    if a.oopjit_loader and not (a.bootstrap and a.development_loader):p.error('OOP-JIT loader requires bootstrap development revision')
     a.base=a.base.resolve();a.out=a.out.resolve()
     repo=Path(__file__).resolve().parents[2];source=repo/'tools/gpu'
     started=time.monotonic();shutil.copytree(a.base,a.out)
@@ -74,10 +76,14 @@ def main():
             entitlements['get-task-allow']=True
         if a.compilation_loader:
             entitlements['com.apple.private.amfi.can-load-cdhash']=True
+        if a.oopjit_loader:
+            # Exact TXM +0x47220 checks this string against the linkage subtype.
+            entitlements['com.apple.private.oop-jit.loader']=a.oopjit_loader
         entitlements_path.write_bytes(plistlib.dumps(entitlements))
         helper_changed=entitlements_path.read_bytes()!=before_entitlements
         record['development_loader_entitlement']=bool(entitlements.get('org.darwin-vm.development-loader'))
         record['compilation_loader_entitlement']=bool(entitlements.get('com.apple.private.amfi.can-load-cdhash'))
+        record['oopjit_loader_entitlement']=entitlements.get('com.apple.private.oop-jit.loader')
         for name in ('driver_probe','driver_workload'):
             flags=common+guest+defines+(['-O3'] if name=='driver_probe' else [])
             scan=subprocess.check_output(['xcrun','clang',*flags,'-MM','-MT','dependencies',str(source/(name+'.m'))],text=True)
