@@ -5,7 +5,7 @@ static BOOL BlitPair(id raw) {
 }
 static NSString *EncodeBlit(DVMHost *host,id<MTLCommandBuffer> cb,NSDictionary *pass,NSMutableSet *written) {
     NSArray *ops=pass[@"operations"];
-    if(![ops isKindOfClass:NSArray.class]||ops.count>256)return @"blit operation budget";
+    if(![ops isKindOfClass:NSArray.class]||ops.count>DVM_ENCODER_OPERATIONS)return @"blit operation budget";
     id<MTLBlitCommandEncoder> encoder=[cb blitCommandEncoder];if(!encoder)return @"native blit encoder allocation";
     NSString *failure=nil;
     for(NSArray *op in ops){

@@ -16,9 +16,13 @@ def main():
     p.add_argument('--min-presentations',type=int,default=1,help='bounded native compositor presentations before stopping, 1..1024')
     p.add_argument('--home-after-presentations',type=int,help='one native Home press after N completed presentations; require both dispatched edges and later display completion')
     p.add_argument('--runtime-probe',action='store_true',help='reuse runner inbox/package transport for the bounded backboardd loading probe')
+    p.add_argument('--observe-seconds',type=int,default=0,help='continue observing after the presentation/input target; overall deadline still applies')
+    p.add_argument('--trace-home',action='store_true',help='capture before Home and source-timestamped transition thumbnails; requires tracing QEMU')
     a=p.parse_args()
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag)>40 or not 30<=a.seconds<=600:p.error('invalid tag/deadline')
     if not 1<=a.min_presentations<=1024:p.error('invalid presentation count')
+    if not 0<=a.observe_seconds<=300:p.error('invalid observation duration')
+    if a.trace_home and a.home_after_presentations is None:p.error('trace requires Home test')
     if a.home_after_presentations is not None and not 1<=a.home_after_presentations<a.min_presentations:p.error('Home test must precede final presentation count')
     m=json.loads(a.manifest.read_text());verify_backing_chain(m['disk']['backing_chain'])
     for name,item in m['qemu_inputs'].items():
@@ -42,6 +46,7 @@ def main():
     model.update(DARWIN_GPU_SHM_PATH=str(out/'shared-ram.bin'),DARWIN_GPU_MANAGED_RAM_PATH=str(out/'managed-ram.bin'),
         DARWIN_GPU_MANAGED_PAGES_PATH=str(out/'managed-pages.bin'),DARWIN_GPU_PRESENT_TRANSPORT='1',DARWIN_DCP_GPU_PRESENT_DIR=str(out),
         DARWIN_INPUT_STATUS=str(out/'input-status.json'),DARWIN_TOUCH_EVENTS=str(out/'events.jsonl'))
+    if a.trace_home:model.update(DARWIN_DCP_TRANSITION_TRACE_DIR=str(out),DARWIN_INPUT_TIMING='1')
     env={k:v for k,v in os.environ.items() if not k.startswith(('DVM_','DARWIN_','GXFSTAT_'))};env.update(model)
     (out/'launch.json').write_text(json.dumps(dict(argv=argv,env=model),indent=2)+'\n')
     (out/'source-manifest.json').write_bytes(a.manifest.read_bytes())
@@ -51,6 +56,7 @@ def main():
     proc=None;uart=None;start=time.monotonic();failure_at=None;serial_offset=0;stderr_offset=0;tail='';errtail='';stderr_partial=''
     display=DisplayAcceptance()
     input_started=None;input_before=None;input_complete=False;input_frames=0
+    acceptance_at=None
     try:
         with (out/'stderr.log').open('wb') as log:
             proc=subprocess.Popen(argv,env=env,stdout=log,stderr=subprocess.STDOUT)
@@ -91,6 +97,10 @@ def main():
                     if input_started is None and display.reached(a.home_after_presentations) and input_status.get('guest_state')=='R':
                         input_before=input_status;input_started=time.monotonic();input_frames=display.completions
                         report['input_probe']=dict(scope='native Home dispatch and subsequent presentation, not an independent UI response oracle',before=input_before,command='sendkey f5 100')
+                        if a.trace_home:
+                            answer=HMP(out/'monitor.sock',timeout=5).command(f'screendump "{out}/home-before.ppm"')
+                            if answer:raise RuntimeError('Home baseline capture failed: '+answer)
+                            (out/'transition.enable').touch()
                         answer=HMP(out/'monitor.sock',timeout=5).command('sendkey f5 100')
                         report['input_probe']['monitor_reply']=answer
                         if answer:report['stop_reason']='native Home injection failed';break
@@ -113,7 +123,11 @@ def main():
                 report['render_submissions']=sum(r['reply'].get('ok',False) and bool(r['reply'].get('renderPasses',r['reply'].get('passes') if r['op']=='renderSubmit' else 0)) for r in peer.records)
                 report['blit_submissions']=sum(r['reply'].get('ok',False) and bool(r['reply'].get('blitPasses')) for r in peer.records)
                 if report['registered'] and report['render_submissions'] and display.reached(a.min_presentations) and (a.home_after_presentations is None or input_complete):
-                    report['stop_reason']='registered compositor submitted render work and native display presented';break
+                    if acceptance_at is None:
+                        acceptance_at=time.monotonic();report['presentation_target_at']=acceptance_at-start
+                    if time.monotonic()-acceptance_at>=a.observe_seconds:
+                        report['post_target_observation_seconds']=time.monotonic()-acceptance_at
+                        report['stop_reason']='registered compositor submitted render work and native display presented';break
                 readers=([uart] if uart else [])+([peer.sock] if peer.sock else [])
                 if readers:
                     ready,_,_=select.select(readers,[],[],.02)

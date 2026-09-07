@@ -64,6 +64,8 @@ int main(void){@autoreleasepool{
         id<MTLTexture> a=[device newTextureWithDescriptor:d iosurface:surface plane:0];
         id<MTLTexture> b=[device newTextureWithDescriptor:d iosurface:surface plane:0];
         assert(a&&b&&registrations==1&&host.imports.count==1&&host.importedBytes==32768);
+        id<MTLTexture> view=[a newTextureViewWithPixelFormat:115];
+        assert(view&&view.parentTexture==a&&view.iosurface==surface&&host.importedBytes==32768);
         assert([a setPurgeableState:MTLPurgeableStateKeepCurrent]==MTLPurgeableStateNonVolatile);
         BOOL refused=NO;@try{[a setPurgeableState:MTLPurgeableStateVolatile];}@catch(NSException *e){refused=[e.reason containsString:@"pinned IOSurface volatility"];}
         assert(refused&&[b setPurgeableState:MTLPurgeableStateKeepCurrent]==MTLPurgeableStateNonVolatile);
@@ -73,12 +75,12 @@ int main(void){@autoreleasepool{
                 // Native validation assumes Apple resource subclasses in the
                 // host descriptor setters. Exercise backend native resources
                 // separately; do not call this branch a frontend render test.
-                NSNumber *handle=[(id)(frame&1?a:b) valueForKey:@"handle"];
+                NSNumber *handle=[(id)(frame&1?view:b) valueForKey:@"handle"];
                 NSDictionary *reply=rpc(@{@"op":@"renderSubmit",@"commands":@[@{@"kind":@"render",@"target":handle,
                     @"load":@2,@"store":@1,@"clear":@[@(frame==7?2:0),@(-.5),@.25,@1],@"operations":@[]}],@"uploads":@[],@"readbacks":@[]},NULL);
                 assert(reply&&[reply[@"renderPasses"] unsignedIntValue]==1);continue;
             }
-            MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];pass.colorAttachments[0].texture=frame&1?a:b;
+            MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];pass.colorAttachments[0].texture=frame&1?view:b;
             pass.colorAttachments[0].loadAction=2;pass.colorAttachments[0].storeAction=1;
             pass.colorAttachments[0].clearColor=MTLClearColorMake(frame==7?2:0,-.5,.25,1);
             id<MTLCommandBuffer> cb=[queue commandBuffer];id<MTLRenderCommandEncoder> encoder=[cb renderCommandEncoderWithDescriptor:pass];assert(encoder);[encoder endEncoding];[cb commit];[cb waitUntilCompleted];
@@ -89,6 +91,8 @@ int main(void){@autoreleasepool{
         // A synchronous allocation drains the preceding asynchronous release.
         id<MTLBuffer> barrier=[device newBufferWithLength:16 options:0];assert(barrier&&!retiredMappings&&host.imports.count==1);barrier=nil;
         assert(![[NSFileManager defaultManager] fileExistsAtPath:ack]);
+        assert(view.parentTexture!=nil);view=nil;
+        barrier=[device newBufferWithLength:16 options:0];assert(barrier&&!retiredMappings&&host.imports.count==1);barrier=nil;
         fprintf(stderr,"HOST_IMPORT frames=8 pixels=4096 bad=%u registrations=%u live_bytes=%lu aliases=1\n",bad,registrations,(unsigned long)host.importedBytes);
     }
     id<MTLBuffer> barrier=[device newBufferWithLength:16 options:0];assert(barrier&&!host.imports.count&&!host.importedBytes);

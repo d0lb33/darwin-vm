@@ -72,3 +72,118 @@ harness, not the executable alone. Full outputs are retained.
 
 Do not mistake this checkpoint or its implemented selectors for completed
 system-wide acceleration or universal Metal compatibility.
+
+## Follow-up: residency and alias contracts
+
+The follow-up source now queries the native initial view residency rather than
+copying its parent's state. The frontend checks allocation residency and its
+own view state, and catches a transport exception after a view state change,
+quarantining the root before any subsequent recovery RPC or alias creation.
+
+Evidence and current build sources:
+`/Users/jdolbe1/dvm-artifacts/research/gpu-texture-views-20260907-residency-host`.
+
+- `backend-tests2.log`: 31 passing backend tests. The exact guest AIR luma
+  reduction now reads a real texture view; three batches produce exact
+  expected output. Nested overlapping blits are rejected without submission;
+  copying between distinct absolute mip levels succeeds. Parent release is
+  rejected while views remain.
+- `purgeability-fix2.log`: native private RGBA16F root volatility blocks view
+  reuse despite its NonVolatile hint; reacquisition permits reuse. An injected
+  exception after the native state change blocks subsequent root/view use.
+  The earlier test used a small BGRA allocation whose hint did not become
+  volatile (`test_purgeability_frontend1.log`); this was a test assumption,
+  not evidence that all private allocations share one residency behavior.
+- `test_imported_surface_frontend2.log`, `3.log`, `4.log`: imported views
+  render through the frontend, preserve their original IOSurface and retain
+  their parent mapping. Final-alias retirement, lost-reply quarantine and
+  backend-only Metal validation pass. Kernel registration and DCP are mocked
+  in these host tests, not claimed as new guest evidence.
+- `test_texture_views0.log`: the existing 24-frame exact-pixel checks pass.
+
+The boot bootstrap, kernel and device model are unchanged. Dynamic backboardd
+reload development continues in a separate worktree; none of its pending
+lifecycle changes is required for this GPU implementation batch.
+
+## Exact guest: CA_TEXTURE_VIEW_GUEST1
+
+A fresh disposable disk boot (no saved RAM or debugger) reaches the 64-frame
+condition in 102.271 seconds. All 802 host RPCs succeed. There are 64 completed
+GPU batches, 753 render passes, 2,267 draws, two compute dispatches, and 64
+native presentations with 64 D594 completions. No reload tooling is involved.
+
+RPC325 creates view169 of parent155: private RGBA16Float, 576×64, level0/count1,
+slice0/count1, allocatedSize311296 and native residency2. In RPC330 the actual
+guest encodes `compute_average_luma` pipeline168 with groups3×2×1,
+threads32×32×1 and 16384 bytes threadgroup memory, then `compute_sum_luma`
+pipeline171 with groups1×1×1, threads1×1×1 and 16 bytes threadgroup memory.
+The batch contains 18 render passes plus these two dispatches. It completes
+with native status4 and reports buffer88 written. Its GPU time is 2343.375µs.
+This is actual compositor work, not an injected test scene or host rehearsal.
+
+`scanout-verification.json` independently verifies final source→conversion→
+console delivery with zero conversion or display differences at 1179×2556.
+The actual screenshot still has a dark clock on a black background. Delivery
+correctness does not prove full Liquid Glass appearance or scene semantics.
+The luma buffer has not been compared with an independent exact-guest oracle.
+This run did not inject input; earlier input recovery remains separate evidence.
+
+GPU batch times: first1988.750µs, subsequent33.792–2343.375µs; host batch
+service878.208–8460.708µs. These exclude uploads, guest scheduling and display;
+64 startup presentations do not establish sustained frame pacing. Recorded
+allocation peaks:136 handles,8175232 ordinary native bytes,48431104 imported
+mapped bytes.75 late one-second RSS samples peak at31136KiB worker and
+5626080KiB QEMU; these are not leak or full-retirement proofs.
+
+Durable run evidence:
+`/Users/jdolbe1/dvm-artifacts/research/gpu-texture-views-20260907-guest/CA_TEXTURE_VIEW_GUEST1`.
+Sibling `control.json` pins the preserved installed child and unchanged boot
+inputs. Reproduce with `run_system_boot.py control.json`, the residency-host
+`driver_host`, the exact QuartzCore library and existing library cache from
+`gpu-compute-descriptor-ios27.md`, a unique tag, `--seconds 180` and
+`--min-presentations 64`. The next acceptance check is longer displayed work
+with input recovery and a scene/luma correctness oracle, not more loader work.
+
+## Longer observation: CA_TEXTURE_VIEW_PACING1
+
+The same installed guest and host driver, plus QEMU log-only source timestamps,
+were run with `--seconds 240 --min-presentations 64
+--home-after-presentations 32 --observe-seconds 30`. The Home check passed:
+helper PID86/epoch2 stayed stable, both edges dispatched, queues drained,
+error counters did not increase, and display completion followed. This is
+dispatch/recovery evidence, not input-to-first-visible-change timing.
+
+The run completed64 GPU/display batches (627 render passes,2070 draws and
+four compute dispatches), then stopped at95.836s on RPC972: allocation of
+another1216×2560 private RGBA16F usage65541 texture exceeded the aggregate
+64MiB resource budget. A previous1216×2560 private texture209 was still live;
+tracked native ordinary allocation peaked at45896064 bytes before rejection.
+The requested image has24903680 logical bytes. This is a concrete bounded
+allocation failure, not evidence that view creation or shader execution failed.
+The intended30-second post-target observation did not finish.
+
+QEMU timestamps are appended at framebuffer delivery and native D594 handling;
+they do not represent physical display refresh. `report_compositor_pacing.py`
+pairs repeated swap IDs by order and refuses incomplete or mismatched samples.
+Across this startup/input interval, scanout takes 5.232–7.641 ms (p95: 6.565 ms), and delivery-to-D594 takes
+0.434–2.432 ms.
+These measurements locate work but do not establish perceptual pacing. The
+largest inter-presentation gap is1215.257ms after frame6, during startup.
+The raw overall median40.796ms includes unknown frame demand. Neither that
+median nor idle gaps are automatically missed frames or recurring stutter.
+
+Evidence:
+`/Users/jdolbe1/dvm-artifacts/research/gpu-texture-views-20260907-pacing/CA_TEXTURE_VIEW_PACING1`.
+Final source-to-console pixel delivery was verified separately after stopping.
+Next: account for the observed simultaneous private allocations, test bounded
+budget/release behavior, then use a known visible transition with before/after
+state verification, input-to-first-visible-change timing and transition-only
+frame gaps. Do not promote the current mixed startup/input interval to a
+steady-animation performance result.
+
+Wallpaper is a separate integration lead: `lock-screen-wallpaper.md` records
+the MercuryPosterExtension Metal renderer and its shader libraries. Our
+bootstrap remains backboardd-only, so its success does not establish a device
+in MercuryPosterExt. The extension's current runtime device result and selected
+API path still need verification. A dark clock over a missing black wallpaper
+is not by itself proof of incorrect clock shading.

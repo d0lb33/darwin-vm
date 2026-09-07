@@ -128,7 +128,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
         DVMEntry *target=Entry(host,pass[@"target"],@"texture");NSArray *clear=pass[@"clear"],*ops=pass[@"operations"];
         if(target.importedPages.failed)return HostError(seq,EBUSY,@"imported target quarantined");
         if(target.sharedRender){if(target.sharedRender.state!=DVMSharedAcquired)return HostError(seq,EBUSY,@"shared render target is not acquired");[sharedTargets addObject:target.sharedRender];}
-        if(!target||[(id<MTLTexture>)target.object textureType]!=MTLTextureType2D||!([(id<MTLTexture>)target.object usage]&MTLTextureUsageRenderTarget)||!RenderUInt(pass[@"load"],2)||!RenderUInt(pass[@"store"],1)||!RenderNumbers(clear,4)||![ops isKindOfClass:NSArray.class]||ops.count>256)return HostError(seq,EINVAL,@"render pass descriptor");
+        if(!target||[(id<MTLTexture>)target.object textureType]!=MTLTextureType2D||!([(id<MTLTexture>)target.object usage]&MTLTextureUsageRenderTarget)||!RenderUInt(pass[@"load"],2)||!RenderUInt(pass[@"store"],1)||!RenderNumbers(clear,4)||![ops isKindOfClass:NSArray.class]||ops.count>DVM_ENCODER_OPERATIONS)return HostError(seq,EINVAL,@"render pass descriptor");
         uint64_t level;
         if(!Number(pass[@"level"]?:@0,&level)||level>=[(id<MTLTexture>)target.object mipmapLevelCount])return HostError(seq,EINVAL,@"render target mip level");
         NSUInteger targetWidth=MAX((NSUInteger)1,target.width>>level),targetHeight=MAX((NSUInteger)1,target.height>>level);

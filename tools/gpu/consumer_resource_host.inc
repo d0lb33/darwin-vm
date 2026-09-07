@@ -66,10 +66,13 @@ static NSDictionary *TextureView(DVMHost *host,uint64_t seq,NSDictionary *r){
         return HostError(seq,ENOTSUP,@"texture view format/type/subresource contract");
     if(ResourceRoot(parent).textureUpload||parent.importedPages.failed||(parent.sharedRender&&parent.sharedRender.state!=DVMSharedIdle&&parent.sharedRender.state!=DVMSharedAcquired))return HostError(seq,EBUSY,@"texture view parent ownership");
     id<MTLTexture> view=[source newTextureViewWithPixelFormat:format textureType:type levels:NSMakeRange(level,levels) slices:NSMakeRange(0,1)];
+    if(!view)return HostError(seq,ENOMEM,@"native texture view allocation");
+    MTLPurgeableState residency=[view setPurgeableState:MTLPurgeableStateKeepCurrent];
+    if(residency<2||residency>4)return HostError(seq,EIO,@"native texture view residency");
     DVMEntry *entry=nil;if(!view||!Add(host,@"texture",view,&entry))return HostError(seq,ENOMEM,@"native texture view allocation");
     entry.parent=parent;entry.textureView=YES;entry.viewBaseLevel=level;entry.format=format;
     entry.width=view.width;entry.height=view.height;entry.row=view.width*DVMFormatBytes(format);entry.textureBytes=entry.row*entry.height;
     entry.importedPages=parent.importedPages;entry.sharedRender=parent.sharedRender;
-    entry.purgeableState=ResourceRoot(parent).purgeableState;
-    return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle),@"allocatedSize":@(view.allocatedSize),@"width":@(view.width),@"height":@(view.height),@"levels":@(view.mipmapLevelCount),@"parentLevel":@(view.parentRelativeLevel),@"parentSlice":@(view.parentRelativeSlice)};
+    entry.purgeableState=residency;
+    return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle),@"purgeableState":@(residency),@"allocatedSize":@(view.allocatedSize),@"width":@(view.width),@"height":@(view.height),@"levels":@(view.mipmapLevelCount),@"parentLevel":@(view.parentRelativeLevel),@"parentSlice":@(view.parentRelativeSlice)};
 }

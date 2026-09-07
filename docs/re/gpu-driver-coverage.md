@@ -21,12 +21,12 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Area | Implemented | Verified behavior | Unsupported / unknown contract |
 | --- | --- | --- | --- |
 | Discovery | Explicit process-local factory and opt-in backboardd boot registration through MTLAddDevice | Actual backboardd loads the arm64e driver and its default factory returns that device | Normal global plugin discovery and accelerated system UI output remain unproven |
-| Capabilities | V21 forwarding profile; original 20 queries, compression/format batch, framebuffer reads, private half-float/color mip targets, bounded render staging and explicit owned/pinned purgeability policy | CA_CAPS_GUEST14 passes all original queries; exact guest framebuffer-fetch/glass specialization and HDR LUT allocations; host ordered overlap/reuse and unsupported-host rejection | Full GPU-family predicates remain false; absence from a capability-gated runtime path is not evidence of non-requirement |
+| Capabilities | V28 forwarding profile; original 20 queries, compression/format batch, framebuffer reads, private half-float/color mip targets, bounded render staging and explicit owned/pinned purgeability policy | CA_CAPS_GUEST14 passes all original queries; exact guest framebuffer-fetch/glass specialization and HDR LUT allocations; host ordered overlap/reuse and unsupported-host rejection | Full GPU-family predicates remain false; absence from a capability-gated runtime path is not evidence of non-requirement |
 | Libraries | Requested guest file/URL/data identity; unique bounded MTLB slice; explicit content-addressed multi-library host cache | Exact unmodified AIR specialization/render execution in earlier consumers; GUEST12 loads QuartzCore and HDRProcessing; host replay and malformed-container controls | General library-byte upload and ambiguous multiple AIR slices; HDR library loading does not prove compositor shader execution |
 | Functions/render pipelines | Named/indexed constants; owned native function stage metadata, including unspecialized functions; general vertex/fragment pipeline descriptors within documented bounds | Exact QuartzCore specialized vertex/fragment pair; 65 constants | Linked functions, archives, writable fragment bindings, tile/MSAA/depth targets |
 | Command encoding | Direct indexed/nonindexed draws, 31 buffer slots, 16 fragment textures/samplers; bounded FIFO of 32 command buffers on one execution queue; atomic staging of render requests up to 2 MiB over 64 KiB MMIO | Exact changing scenes and 64×64 group opacity with private intermediate targets; host queued GPU dependency and cancellation tests | Multiple execution queues, indirect commands, fragment buffer writes and general barriers remain unsupported |
-| Compute | Descriptor pipelines use owned specialized function handles and native reflection; ordered serial render/compute/blit, sparse bindings and writable-buffer completion delivery | Six native/forwarded mixed host frames and exact guest AIR reduction on host; earlier exact guest luma/blur controls | Guest pipeline creation passes; actual compositor dispatch still unverified; legacy function-based controls retain a separate allowlist. Guest reflection, active stage input/linking, nonuniform/concurrent/tile dispatch unsupported |
-| Resources | Dirty buffer spans, partial 2D/3D transfers, bounded color formats and sampled 1D R16Uint/R16Float/R32Float/RG32Float LUTs; private color mip targets; ordered 2D texture copies/mips and buffer fill/copy/writeback | Exact HDR LUT allocations and earlier glass mip allocations; 40 native-equal host LUT frames, 48 blit frames/96 outputs; private CPU-access rejection | General IOSurface import/planes, heaps, memoryless and texture views; imported/buffer-backed texture blits; axes 4096, copied images 4 MiB, private images 32 MiB counting mips with a 64 MiB ordinary live-byte cap |
+| Compute | Descriptor pipelines use owned specialized function handles and native reflection; ordered serial render/compute/blit, sparse bindings and writable-buffer completion delivery | Six native/forwarded mixed host frames and exact guest AIR reduction on host; earlier exact guest luma/blur controls | Actual compositor average/sum luma dispatch passes; independent guest luma output remains unverified; legacy function-based controls retain a separate allowlist. Guest reflection, active stage input/linking, nonuniform/concurrent/tile dispatch unsupported |
+| Resources | Dirty buffer spans, partial 2D/3D transfers, bounded color formats and sampled 1D R16Uint/R16Float/R32Float/RG32Float LUTs; private color mip targets; ordered 2D texture copies/mips and buffer fill/copy/writeback | Exact HDR LUT allocations and earlier glass mip allocations; 40 native-equal host LUT frames, 48 blit frames/96 outputs; private CPU-access rejection | General IOSurface import/planes, heaps, memoryless and texture-view reinterpretation/arrays/swizzles; imported/buffer-backed texture blits; axes 4096, copied images 4 MiB, private images 128 MiB counting mips with a 64 MiB ordinary live-byte cap |
 | Presentation | Owned shared-page IOSurface render target with native retirement and fresh-process handoff | Actual UIKit at 1179×2556: first DCP byte comparison and 1,024 changing frames with final pixels, per-frame native completion, retirement and software lock-screen recovery | General registry now imports actual compositor pages; system DCP presentation, correct HDR/color output and UIKit window interaction remain unverified |
 | UIKit effects | Actual UIVisualEffectView material/glass probes; window attachment respecting UIKit invalidation; original guest QuartzCore shaders | Exact guest translucent glass 10 passes/21 draws; removed harness-created black covering draws; paired prepared native/forwarded host scene comparison added in 10ed430 | Independent exact-guest effect oracle and displayed/system-wide glass remain unproven. Historical natural-event-loop comparison failed; host input matching is separate from guest evidence. See [invalidation evidence](gpu-uikit-invalidation-ios27.md) |
 | Synchronization | Serial RPC, bounded FIFO, completion callbacks, strong resource retention; failed shared jobs prohibit reuse | Exact consumer completion and native retirement; host predecessor GPU-write visibility, disjoint mip read/write and dependent failure cancellation | Same-allocation mip sampling requires application-guaranteed disjoint subresources; dynamic source LOD is not validated. Multiple execution queues, events/fences, reset and timestamp clock translation remain unsupported |
@@ -37,18 +37,24 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 
 ## Current priority and evidence classes
 
-Latest [descriptor-compute evidence](gpu-compute-descriptor-ios27.md): one exact
-boot completes eight actual compositor submissions, native presentations and
-D594 completions; both Home edges dispatch with stable helper recovery and
-subsequent display. Final source-to-console pixels match exactly. This boot
-stops before compute. A longer second boot takes a different allocation path
-and rejects a 1216×2560 private RGBA16F target under the old 16 MiB cap. V25
-adds the larger private profile, 64 ordered commands and reflected descriptor
-compute. The latest exact boot creates compute_average_luma through this path,
-then fails at the missing single-mip texture-view API before dispatch. Four
-prior displayed batches (82 passes/225 draws) complete with exact final console
-delivery. Host tests pass. Exact compositor compute dispatch and sustained pacing
-remain gates.
+Latest: [V28 development profile and Home transition](gpu-development-profile-ios27.md)
+passes 493 actual compositor GPU/display/completion batches and the full
+30-second post-Home observation. Both former allocation/operation limits are
+exercised; final source-to-console pixels match. The visible Home transition
+contains a 648 ms gap and is not smooth. Earlier evidence below retains its
+original scope.
+
+Latest [texture-view evidence](gpu-texture-view-checkpoint-ios27.md):
+CA_TEXTURE_VIEW_GUEST1 completes 64 actual compositor GPU batches and native
+presentations/D594 completions. RPC325 creates the actual 576×64 RGBA16F
+single-mip view; RPC330 executes average/sum luma alongside 18 render passes.
+There are 802 RPCs, no host errors, 753 render passes and 2,267 draws. Final
+source-to-console delivery has zero differing pixels. This clears the previous
+missing-view/compute-dispatch gate. Full scene semantics (including the dark
+clock), independent luma output, fresh input recovery, sustained pacing and
+complete native ownership retirement remain unverified in this run. Earlier
+eight-frame input recovery remains separately documented in
+[descriptor-compute evidence](gpu-compute-descriptor-ios27.md).
 
 Previous milestone: [RGhA compositor scanout](gpu-rgha-compositor-ios27.md) proves four
 actual backboardd presentations/completions and exact final imported-source to

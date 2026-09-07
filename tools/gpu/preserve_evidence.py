@@ -18,6 +18,7 @@ def main():
     p.add_argument('--reference-streams',action='store_true',help='include captured LIBREF streams (skip full-library uploads)')
     p.add_argument('--mmio-frames',action='store_true',help='include owned 16 MiB transport RAM and bounded luma/blur frames, never full guest RAM')
     p.add_argument('--compositor-scanout',action='store_true',help='include final A408/RGhA/BGRA/PPM witnesses matching the scanout verification hashes, at most 64 MiB each')
+    p.add_argument('--transition-frames',action='store_true',help='include bounded transition thumbnails and the Home baseline console capture')
     p.add_argument('sources',type=Path,nargs='+')
     a=p.parse_args()
     a.output.mkdir(exist_ok=False)
@@ -37,6 +38,7 @@ def main():
                     compressed=any(x['compressed']==path.name and x['compressed_sha256']==hashlib.sha256(path.read_bytes()).hexdigest() for x in json.loads(ledger.read_text()))
             mmio=False
             scanout=False
+            transition=a.transition_frames and path.stat().st_size<=16*1024*1024 and (path.name=='home-before.ppm' or re.fullmatch(r'transition-\d{4}\.ppm',path.name))
             if a.compositor_scanout and path.name in ('last-scanout.a408','last-scanout.rgha','last-scanout.bgra','scanout.ppm') and path.stat().st_size<=64*1024*1024:
                 ledger=path.with_name('scanout-verification.json')
                 if ledger.is_file():
@@ -71,7 +73,7 @@ def main():
                 request=path.with_name('guest-requests.bin').read_bytes()
                 if not request.startswith(b'LIBREF ') and request:
                     continue # legacy captures can contain the full Apple library
-            if not scanout and ((path.suffix not in ALLOWED and not stream and not mmio and not compressed) or path.stat().st_size>16*1024*1024):
+            if not scanout and not transition and ((path.suffix not in ALLOWED and not stream and not mmio and not compressed) or path.stat().st_size>16*1024*1024):
                 continue
             relative=Path(source.name)/(path.relative_to(source) if source.is_dir() else Path(path.name))
             target=a.output/relative

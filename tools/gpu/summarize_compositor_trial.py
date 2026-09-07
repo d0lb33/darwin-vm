@@ -18,7 +18,7 @@ def main():
     gpu = [r for r in rows if r['reply'].get('ok') and 'gpu_us' in r['reply']]
     live = {}
     peaks = dict(objects=0, ordinary_native_allocated_bytes=0, imported_mapped_bytes=0)
-    allocations = {'buffer','texture','linearTexture','surfaceImport','library','function',
+    allocations = {'buffer','texture','textureView','linearTexture','surfaceImport','library','function',
                    'pipeline','computePipeline','renderPipeline','sampler','depthState'}
     for r in rows:
         q, reply = r['request'], r['reply']

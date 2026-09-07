@@ -1,12 +1,13 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 26u
+#define DVM_CONTRACT_VERSION 28u
 #define DVM_COMPUTE_THREADS 1024u
 #define DVM_COMPUTE_MEMORY 32768u
 #define DVM_COMPUTE_INVOCATIONS (16u*1024u*1024u)
-#define DVM_OBJECTS 256u
-#define DVM_ORDERED_COMMANDS 64u
+#define DVM_OBJECTS 4096u
+#define DVM_ORDERED_COMMANDS 256u
+#define DVM_ENCODER_OPERATIONS 4096u
 #define DVM_RENDER_REQUEST_BYTES (2u*1024u*1024u)
 #define DVM_RENDER_REQUEST_CHUNK 32768u
 #define DVM_RENDER_DIRECT_BYTES 60000u
@@ -20,10 +21,14 @@
 #define DVM_TEXTURE_DIRECT_READ_BYTES (1024u*1024u)
 // Private images never cross the framed CPU-transfer channel. Keep their
 // allocation budget separate; total live ordinary/shared resources stay capped.
-#define DVM_PRIVATE_TEXTURE_BYTES (32u*1024u*1024u)
+#define DVM_PRIVATE_TEXTURE_BYTES (128u*1024u*1024u)
 // Observed 1216x2560 RGBA16F private compositor target is 24,903,680 bytes.
-// Permit bounded intermediates alongside it; imported DRAM is accounted apart.
-#define DVM_ORDINARY_RESOURCE_BYTES (64u*1024u*1024u)
+// Development headroom, not an Apple GPU-family limit or a leak allowance.
+// CA_TEXTURE_VIEW_PACING1 RPC972 needs 68,698,622 simultaneous logical bytes;
+// CA_BUDGET_GUEST1 subsequently reaches the old 256-operation pass limit.
+// This is a logical allocation budget, not native Metal/RSS accounting.
+// Imported DRAM remains separately bounded; release/alias rules are unchanged.
+#define DVM_ORDINARY_RESOURCE_BYTES (512u*1024u*1024u)
 #define DVM_BUFFER_BINDING_ALIGNMENT 16u
 #define DVM_COMPUTE_BINDINGS 8u
 #define DVM_RENDER_BUFFERS 31u
@@ -130,8 +135,8 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-texture-view-aliases-v26",
-        @"computeDescriptorVersion":@1,@"orderedComputeRenderBlit":@YES,@"orderedCommandLimit":@DVM_ORDERED_COMMANDS,@"computeReflectionArrays":@NO,
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-development-headroom-v28",
+        @"computeDescriptorVersion":@1,@"orderedComputeRenderBlit":@YES,@"orderedCommandLimit":@DVM_ORDERED_COMMANDS,@"encoderOperationLimit":@DVM_ENCODER_OPERATIONS,@"computeReflectionArrays":@NO,
         @"computeThreadsPerGroup":@DVM_COMPUTE_THREADS,@"computeThreadgroupBytes":@DVM_COMPUTE_MEMORY,@"computeInvocationsPerDispatch":@DVM_COMPUTE_INVOCATIONS,
         @"resourcePurgeabilityVersion":@1,@"resourcePurgeabilityStates":@[@1,@2,@3,@4],
         @"pinnedSurfacePurgeabilityStates":@[@1,@2],@"volatileResourceAccess":@"reacquire-nonvolatile-before-use",

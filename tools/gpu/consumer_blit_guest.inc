@@ -8,7 +8,7 @@
 @implementation DVMBlitEncoder
 - (id<MTLDevice>)device {return self.command.device;}
 - (void)record:(NSArray *)op {
-    [self.command encoding];if(self.ended||self.operations.count>=256)reject(@"blit encoder state/budget");
+    [self.command encoding];if(self.ended||self.operations.count>=DVM_ENCODER_OPERATIONS)reject(@"blit encoder state/budget");
     [self.operations addObject:op];
 }
 - (NSNumber *)own:(id)object kind:(Class)kind {
