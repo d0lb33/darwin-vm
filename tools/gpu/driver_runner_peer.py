@@ -139,16 +139,22 @@ class RunnerPeer(MMIOPeer):
             result=dict(c['result'],host_elapsed_seconds=c['ended']-c['started'],
                         expected=c['job'].get('expected','observe'),shared_surface=c['job'].get('shared_surface',False),verified=False,loading_evidence=loading)
             if result['spawn']==0 and result['exit']==0 and result['signal']==0:
-                from consumer_verify import verify_records
-                if c['job'].get('shared_surface'):
-                    from shared_consumer_verify import verify_records as verify_shared
-                child=[x['line'] for x in audits]
-                end=child.index('GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0')
-                result['consumer']=verify_shared(directory,child[:end+1],records,c['job']['frames'],c['job'].get('hz',0),c['job'].get('scene',0)) if c['job'].get('shared_surface') else verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
-                if c['job'].get('surface_handoff'):
-                    from shared_consumer_verify import verify_handoff
-                    result['handoff']=verify_handoff(directory,child,c['job']['job'],result['pid'])
-                result['verified']=True
+                try:
+                    from consumer_verify import verify_records
+                    if c['job'].get('shared_surface'):
+                        from shared_consumer_verify import verify_records as verify_shared
+                    child=[x['line'] for x in audits]
+                    end=child.index('GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0')
+                    result['consumer']=verify_shared(directory,child[:end+1],records,c['job']['frames'],c['job'].get('hz',0),c['job'].get('scene',0)) if c['job'].get('shared_surface') else verify_records(directory,child[:end+1],records,c['job'].get('frames',1),c['job'].get('scene',0))
+                    if c['job'].get('surface_handoff'):
+                        from shared_consumer_verify import verify_handoff
+                        result['handoff']=verify_handoff(directory,child,c['job']['job'],result['pid'])
+                    result['verified']=True
+                except (ValueError,KeyError,IndexError,TypeError,OSError) as error:
+                    # Keep the guest exit and raw evidence even if host acceptance
+                    # rejects it. A failed shared job still forbids pool reuse;
+                    # an offscreen diagnostic can be followed by a fresh process.
+                    result['verification_error']=f'{type(error).__name__}: {error}'
             else:
                 result['failure_evidence']=[x['line'] for x in audits if 'ERROR' in x['line'] or 'FAULT' in x['line']]
             (directory/'result.json').write_text(json.dumps(result,indent=2)+'\n')

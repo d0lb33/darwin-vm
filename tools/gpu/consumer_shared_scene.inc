@@ -6,6 +6,11 @@ static CALayer *sharedSceneCreate(CALayer *root,CGColorSpaceRef space){
     if(!DVM_CA_SCENE)return nil;
     sharedColor(root,space,0xff0000ff);
     CALayer *moving=[CALayer layer],*front=[CALayer layer];
+    CALayer *parent=root;
+    if(DVM_CA_SCENE==4){
+        parent=[CALayer layer];parent.frame=root.bounds;parent.opacity=.5;
+        parent.allowsGroupOpacity=YES;[root addSublayer:parent];
+    }
     moving.frame=CGRectMake(0,0,160,DVM_PRESENT_HEIGHT);
     front.frame=CGRectMake(280,0,80,DVM_PRESENT_HEIGHT);
     sharedColor(moving,space,0xffff0000);sharedColor(front,space,0xff00ff00);
@@ -15,7 +20,7 @@ static CALayer *sharedSceneCreate(CALayer *root,CGColorSpaceRef space){
         clip.masksToBounds=YES;[root addSublayer:clip];[clip addSublayer:moving];
         moving.anchorPoint=CGPointZero;moving.bounds=CGRectMake(0,0,80,DVM_PRESENT_HEIGHT);
         moving.transform=CATransform3DMakeScale(2,1,1);
-    }else [root addSublayer:moving];
+    }else [parent addSublayer:moving];
     if(DVM_CA_SCENE==3){
         const uint8_t bytes[]={255,0,0,255,0,255,0,255};
         CFDataRef data=CFDataCreate(NULL,bytes,sizeof(bytes));
@@ -26,7 +31,7 @@ static CALayer *sharedSceneCreate(CALayer *root,CGColorSpaceRef space){
         moving.magnificationFilter=kCAFilterNearest;moving.minificationFilter=kCAFilterNearest;
         CGImageRelease(image);CGDataProviderRelease(provider);CFRelease(data);
     }
-    [root addSublayer:front];return moving;
+    [parent addSublayer:front];return moving;
 }
 static void sharedSceneUpdate(CALayer *root,CALayer *moving,CGColorSpaceRef space,unsigned frame){
     if(!DVM_CA_SCENE){sharedColor(root,space,frame%3==1?0xffff0000:frame%3==2?0xff00ff00:0xff0000ff);return;}

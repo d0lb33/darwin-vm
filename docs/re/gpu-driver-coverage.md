@@ -21,17 +21,17 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
 | Area | Implemented | Verified behavior | Unsupported / unknown contract |
 | --- | --- | --- | --- |
 | Discovery | Explicit process-local device factory | Exact guest signed bundle load and CARenderer use | Normal plugin discovery, service-global context, system compositor adoption |
-| Capabilities | Versioned forwarding profile and 20 related scalar getters | Exact guest all 20; host mismatch rejection | Full GPU-family predicates remain false; wider feature queries incomplete |
+| Capabilities | Versioned forwarding profile; original 20 queries plus compression/format batch | Exact guest original 20 and observed lossless-format path; host profile mismatch rejection | Full GPU-family predicates remain false; static query coverage is not a runtime trace |
 | Libraries | Requested guest URL/data identity, exact AIR forwarded to configured host library | Exact unmodified AIR, real function specialization and render execution | Host currently needs matching local AIR cache; general multi-library delivery pending |
 | Functions/render pipelines | Named/indexed constants; general vertex/fragment pipeline descriptors within documented bounds | Exact QuartzCore specialized vertex/fragment pair; 65 constants | Linked functions, archives, writable fragment bindings, tile/MSAA/depth targets |
-| Command encoding | Direct indexed/nonindexed draws, state and binding serialization, one in-flight command | Exact 64×64 red CALayer, one indexed draw, exact pixels, zero objects | Offset/bulk bindings and unbinding implemented; 31 buffer slots and vertex writeback tested on host. Multi-frame rehearsal now stops at fragment texture slot 8 |
+| Command encoding | Direct indexed/nonindexed draws, 31 buffer slots, 16 fragment textures/samplers; bounded FIFO of 32 command buffers on one execution queue | Exact changing scenes and 64×64 group opacity with private intermediate targets; host queued GPU dependency and cancellation tests | Multiple execution queues, indirect commands, fragment buffer writes and general barriers remain unsupported |
 | Compute | Existing luma/blur and bounded compute submission | Exact compute/copy controls and managed blur | Pipeline allowlist remains a development restriction; replace with general validated reflection before claiming broad compute |
-| Resources | Owned buffer shadows, 5 texture formats, allocation/protection metadata, read-only linear views | Host alias coherence/bounds/parent lifetime, chunked vertex writeback and atomic error publication; exact CARenderer allocation | Dirty tracking, general IOSurface import/planes, heaps/private/memoryless storage |
-| Presentation | Separate managed shared-page IOSurface extension with native retirement | Earlier exact displayed blur and input recovery | CARenderer output is currently offscreen; generic render target adoption unknown |
-| Synchronization | Serial RPC, completion callbacks, strong resource retention | Exact single-consumer completion and retirement; host ordered vertex writes, CPU/GPU reuse and failure tests | Multiple queues/in-flight buffers, events/fences, reset; timestamp clock translation |
+| Resources | Dirty buffer spans, partial 2D/3D transfers, 5 texture formats, read-only linear views, private GPU textures and opaque guest process metadata | Exact 2D transfer/control and private intermediate allocation; host GPU dependency, linear/3D transfers, private CPU-access rejection | General IOSurface import/planes, heaps, memoryless storage, private blit transfers; texture axes 4096, private images 16 MiB, copied images 1 MiB |
+| Presentation | Owned shared-page IOSurface render target with native retirement and fresh-process handoff | Exact displayed alpha, clip/transform and image CARenderer batches; actual DCP bytes, display/input recovery | Exact 1,024-frame screen group-opacity path now passes; general surface registration and system-compositor adoption unknown |
+| Synchronization | Serial RPC, bounded FIFO, completion callbacks, strong resource retention; failed shared jobs prohibit reuse | Exact consumer completion and native retirement; host predecessor GPU-write visibility and dependent failure cancellation | Multiple execution queues, events/fences, reset; timestamp clock translation |
 | Checkpoint | Active GPU migration blocked | Copied-pixel historical checkpoints only | Live host resources and executing commands cannot be checkpointed |
 | Iteration | Fresh-process supervisor, signed package staging, incremental build and captured-submission replay tools; opt-in test-kernel RX mapping exception | Exact guest installed controls; boot-trusted driver staged on Data executes actual CARenderer with verified pixels; 27-request host replay | Two code-distinct runtime revisions now pass real guest CARenderer in one uninstrumented boot using native OOP-JIT signatures plus opt-in xART fixture; global loading and checkpoints remain outside scope |
-| Performance | Separate first-use and host GPU timing; prior sustained managed-blur controls | Prior displayed blur missed target pacing; red draw is not a benchmark | Native Liquid Glass/scrolling and sustained CARenderer performance unproven |
+| Performance | Separate setup, frame work, native presentation and pacing measurements | 1,024 displayed image frames average 60.028 fps, p95 work 12.475 ms; 44 absolute misses and maximum native gap 91.922 ms | Smooth native Liquid Glass/scrolling remains unproven; average throughput is not smooth pacing |
 
 ## Current bounded experiments
 
@@ -50,15 +50,22 @@ specification. `CA_CAPS_GUEST14` superseded its capability-getter failure claims
    termination evidence for failures. Stop an individual child after 90 seconds;
    stop the session explicitly or at its recorded overall deadline. Do not
    interpret the absent trust-cache hash as proof that loading must fail.
-2. **Changing scene:** the first three-layer frame passes in the host rehearsal.
-   Vertex-buffer writeback and 31 buffer slots are now implemented and tested;
-   exact-guest dynamically loaded revision 5 still passes the red control.
-   The next host prewarm failure is fragment texture `img_tex_1C` at slot 8
-   (`CA_BUFFER_SEQUENCE_HOST5`), beyond the eight-slot contract. Inventory the
-   related texture/sampler requirements and extend them together, including
-   bounds and capability negotiation tests. Package-test scene verification is
-   needed to avoid changing the pinned helper for revised capability limits.
-   Then compare native/forwarded output and run the exact guest scene.
+2. **Intermediate targets:** displayed alpha, clipping/transforms and image
+   scenes pass. Group opacity passes both offscreen and on the owned screen
+   IOSurface. GUEST3 made no intermediate allocation request: exact static code
+   checks the reported texture width limit before calling Metal. V7 adds real
+   larger private allocations and corresponding limits. GUEST4 then creates a
+   256×2560 private intermediate and passes 16/128/1,024 displayed frames with verified
+   final pixels, native DCP bytes and ownership return. Next: actual UIKit view
+   content, controls, text and visual effects in the persistent runner; this
+   is not yet a Liquid Glass or system-compositor claim.
+
+The displayed scenes, partial transfers and interactive session evidence are in
+[shared scene verification](gpu-shared-scenes-regions-ios27.md). Group-opacity
+and FIFO evidence is preserved under
+`~/dvm-artifacts/research/gpu-group-opacity-20260907-part1`; the failed GUEST1
+trial remains failed even though its last consumer passes post-hoc verification.
+See [group-opacity contracts and evidence](gpu-group-opacity-ios27.md).
 
 Main/DCP integration, the failed and corrected vertex barrier experiment,
 current evidence and reproduction are in

@@ -1,6 +1,7 @@
 // Host test of frontend ownership and asynchronous failure semantics. The fake
 // transport never executes shaders; real GPU execution has a separate test.
 #import "driver_api.h"
+#include "driver_capabilities.h"
 #include <stdio.h>
 static void check(BOOL b, const char *why) {
     if (!b) {
@@ -101,15 +102,17 @@ int main(void) {
             check(!dispatch_semaphore_wait(uploading,
                                            dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)),
                   "upload began asynchronously");
-            BOOL concurrentRejected = NO;
-            @try {
-                [second commit];
-            } @catch (NSException *e) {
-                concurrentRejected = YES;
-            }
-            check(concurrentRejected, "unsupported concurrent submission rejected");
-            second = nil;
+            [second commit];
+            check(second.status==MTLCommandBufferStatusCommitted,"dependent command queued while predecessor is active");
+            NSMutableArray *queued=[NSMutableArray array];
+            for(unsigned i=2;i<DVM_QUEUED_COMMAND_BUFFERS;i++){id<MTLCommandBuffer> c=[queue commandBuffer];[c commit];[queued addObject:c];}
+            BOOL refused=NO;@try{[[queue commandBuffer] commit];}@catch(NSException *e){refused=YES;}
+            check(refused,"queue budget enforced before unbounded retention");
             dispatch_semaphore_signal(resume);
+            [second waitUntilCompleted];
+            check(second.status==MTLCommandBufferStatusError&&second.error!=nil,"failed predecessor cancels dependent queued work");
+            for(id<MTLCommandBuffer> c in queued){[c waitUntilCompleted];check(c.status==MTLCommandBufferStatusError,"all pending dependents cancelled");}
+            second = nil;
         } // Drain the rejected command and exception autoreleases before checking retirement.
         check(
             !dispatch_semaphore_wait(completed, dispatch_time(DISPATCH_TIME_NOW, 5 * NSEC_PER_SEC)),

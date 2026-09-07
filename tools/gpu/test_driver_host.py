@@ -49,6 +49,49 @@ class HostTests(unittest.TestCase):
         self.assertFalse(self.rpc('upload',buffer=b,data=base64.b64encode(data[:-1]).decode())['ok'])
         self.assertTrue(self.rpc('upload',buffer=b,data=base64.b64encode(data).decode())['ok'])
         self.assertEqual(base64.b64decode(self.rpc('read',buffer=b)['data']),data)
+
+    def test_private_texture_rejects_cpu_access_and_upload_before_execution(self):
+        t=self.rpc('texture',width=4,height=4,format=80,usage=5,storage=2)
+        self.assertTrue(t['ok']);self.assertEqual(t['nativeStorageMode'],2)
+        handle=t['handle'];data=base64.b64encode(bytes(64)).decode()
+        self.assertFalse(self.rpc('read',texture=handle)['ok'])
+        self.assertFalse(self.rpc('upload',texture=handle,row=16,data=data)['ok'])
+        before=self.rpc('stats')['submissions']
+        self.assertFalse(self.rpc('renderSubmit',commands=[],uploads=[dict(texture=handle,row=16,data=data)],readbacks=[])['ok'])
+        self.assertEqual(self.rpc('stats')['submissions'],before)
+        self.assertFalse(self.rpc('texture',width=4,height=4,format=80,usage=5,storage=3)['ok'])
+
+    def test_resource_process_bits_are_owned_opaque_metadata(self):
+        handle=self.rpc('buffer',length=16)['handle']
+        for bits in (0,42,2**32-1):
+            result=self.rpc('resourceProcess',handle=handle,processBits=bits)
+            self.assertTrue(result['ok']);self.assertEqual((result['handle'],result['processBits']),(handle,bits))
+        for bits in (-1,2**32,True,2.5):self.assertFalse(self.rpc('resourceProcess',handle=handle,processBits=bits)['ok'])
+        self.assertFalse(self.rpc('resourceProcess',handle=0,processBits=42)['ok'])
+
+    def test_private_size_contract_and_live_budget(self):
+        contract=self.rpc('capabilities')['contract']
+        self.assertEqual(contract['queries']['maxTextureWidth2D'],4096)
+        self.assertEqual(contract['privateTextureBytes'],16*1024*1024)
+        for storage in (0,1):
+            self.assertFalse(self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=storage)['ok'])
+        screen=self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=2)
+        self.assertTrue(screen['ok']);self.assertEqual(screen['nativeStorageMode'],2)
+        self.assertTrue(self.rpc('release',handle=screen['handle'])['ok'])
+        # Independent axis and byte limits, plus the 32 MiB live allocation cap.
+        self.assertFalse(self.rpc('texture',width=4097,height=1,format=80,usage=5,storage=2)['ok'])
+        self.assertFalse(self.rpc('texture',width=2048,height=2049,format=80,usage=5,storage=2)['ok'])
+        handles=[]
+        for _ in range(2):
+            r=self.rpc('texture',width=2048,height=2048,format=80,usage=5,storage=2)
+            self.assertTrue(r['ok']);handles.append(r['handle'])
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],32*1024*1024)
+        self.assertFalse(self.rpc('texture',width=1,height=1,format=80,usage=5,storage=2)['ok'])
+        self.assertTrue(self.rpc('release',handle=handles.pop())['ok'])
+        tiny=self.rpc('texture',width=1,height=1,format=80,usage=5,storage=2)
+        self.assertTrue(tiny['ok'])
+        for handle in handles+[tiny['handle']]:self.assertTrue(self.rpc('release',handle=handle)['ok'])
+        self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
     def test_bad_second_encoder_cannot_execute_first(self):
         lib=self.rpc('library',length=AIR.stat().st_size,sha256=SHA)['handle']
         avg=self.rpc('pipeline',library=lib,function='compute_average_luma')['handle']

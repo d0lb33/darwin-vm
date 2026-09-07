@@ -19,7 +19,7 @@ def main():
     p.add_argument('--worker',type=Path,help='matching host backend revision; default is the boot runner backend')
     p.add_argument('--test',choices=('builtin','package'),default='builtin',help='built-in red control or explicit DVMRunGuestTest export')
     p.add_argument('--frames',type=int,default=1,help='required frame count for package-scene verification')
-    p.add_argument('--scene',type=int,choices=range(4),default=0,help='0 moving, 1 alpha, 2 clip/transform, 3 image')
+    p.add_argument('--scene',type=int,choices=range(5),default=0,help='0 moving, 1 alpha, 2 clip/transform, 3 image, 4 group opacity')
     p.add_argument('--shared-surface',action='store_true',help='require shared CARenderer/surface/native scanout evidence')
     p.add_argument('--surface-handoff',action='store_true',help='also require supervisor/child Mach-port alias witnesses')
     p.add_argument('--hz',type=int,choices=(0,30,60),default=0,help='required shared-surface pacing rate; 0 means unpaced')

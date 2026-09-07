@@ -22,7 +22,7 @@ def verify_records(directory, lines, records, count, hz=0, scene=None):
     if scene is None:
         job=directory/'job.json'
         scene=json.loads(job.read_text()).get('scene',0) if job.exists() else 0
-    if type(count) is not int or not 3<=count<=1024 or hz not in (0,30,60) or scene not in range(4):
+    if type(count) is not int or not 3<=count<=1024 or hz not in (0,30,60) or scene not in range(5):
         raise ValueError('shared consumer frame scope')
     if lines[-1]!='GPU_LOAD_COMPLETE result=pass scope=quartzcore-render resources=0':
         raise ValueError('shared consumer completion')
@@ -119,7 +119,7 @@ def verify_records(directory, lines, records, count, hz=0, scene=None):
 
 
 def verify_pixels(pixels, frame, scene):
-    if len(pixels)<BYTES or scene not in range(4):raise ValueError('shared pixel extent/scene')
+    if len(pixels)<BYTES or scene not in range(5):raise ValueError('shared pixel extent/scene')
     colors=[(0xffff0000,0xff00ff00,0xff0000ff)[(frame-1)%3]]*WIDTH
     normalize=bytearray(range(256));normalize[127]=128;normalize[129]=128
     if scene:
@@ -128,17 +128,18 @@ def verify_pixels(pixels, frame, scene):
             if scene==2 and not 80<=x<WIDTH-80:continue
             colors[x]=0xff800080 if scene==1 else 0xff00ff00 if scene==3 and x>=left+80 else 0xffff0000
         colors[280:360]=[0xff00ff00]*80
+        if scene==4:colors=[0xff008080 if c==0xff00ff00 else 0xff800080 if c==0xffff0000 else c for c in colors]
     row=b''.join(c.to_bytes(4,'little') for c in colors)
     markers=b''.join(x.to_bytes(4,'little') for x in (0xff44564d,0xff505253,0xff424c52,0xff000000|frame))
     for y in range(HEIGHT):
         actual=pixels[y*ROW:y*ROW+WIDTH*4];wanted=markers+row[16:] if y==0 else row
-        if scene==1:
+        if scene in (1,4):
             # One RGB code tolerance only in the expected half-opacity region.
             # Marker bytes, alpha and all other colors remain exact.
             adjusted=bytearray(actual)
             for x,c in enumerate(colors):
-                if c==0xff800080 and (y or x>=4):
-                    for channel in (0,2):adjusted[x*4+channel]=normalize[adjusted[x*4+channel]]
+                if c in (0xff800080,0xff008080) and (y or x>=4):
+                    for channel in (0,2 if c==0xff800080 else 1):adjusted[x*4+channel]=normalize[adjusted[x*4+channel]]
             actual=bytes(adjusted)
         if actual!=wanted:raise ValueError(f'shared independent pixel oracle row {y}')
 

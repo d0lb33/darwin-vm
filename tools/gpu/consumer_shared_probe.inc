@@ -29,6 +29,7 @@ static unsigned sharedPixels(IOSurfaceRef surface,unsigned frame){
             if(DVM_CA_SCENE==3&&red&&x>=left+80){red=NO;green=YES;}
             expected=green?0xff00ff00:red?0xffff0000:0xff0000ff;
             if(DVM_CA_SCENE==1&&red){expected=0xff800080;tolerance=1;}
+            if(DVM_CA_SCENE==4&&(red||green)){expected=green?0xff008080:0xff800080;tolerance=1;}
         }
         if(y==0&&x<4){expected=marker[x];tolerance=0;}
         if((pixel>>24)!=255)bad++;

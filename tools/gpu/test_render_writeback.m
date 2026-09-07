@@ -39,6 +39,7 @@ int main(void){@autoreleasepool {
       "vertex O v(uint i[[vertex_id]],device uint *s[[buffer(30)]],constant uint &step[[buffer(8)]]){"
       "if(i%3==0){s[0]+=step;s[16384]+=7;}float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return O{float4(p[i%3],0,1)};}\n"
       "fragment float4 f(constant float4 &color[[buffer(30)]]){return color;}\n"
+      "fragment float4 fs(texture2d<float> image[[texture(0)]]){constexpr sampler s(coord::normalized,filter::nearest);return image.sample(s,float2(.5));}\n"
       "fragment float4 fw(device uint *s[[buffer(0)]]){s[0]=1;return float4(1,0,0,1);}"
       "vertex O vg(uint i[[vertex_id]],device uint *s[[buffer(30)]],constant uint &step[[buffer(8)]]){if(i==0){s[0]+=1;s[4]=step;s[5]=1;s[6]=0;}float2 p[3]={float2(-1,-1),float2(3,-1),float2(-1,3)};return O{float4(p[i%3],0,1)};}"
       "fragment float4 ft(texture2d<float> image[[texture(8)]],texture3d<float> lut[[texture(15)]],sampler sam[[sampler(15)]]){return image.sample(sam,float2(.5))*lut.sample(sam,float3(.5,.5,.75));}";
@@ -46,7 +47,10 @@ int main(void){@autoreleasepool {
     require(native!=nil,error.description.UTF8String);
     __block uint64_t seq=0;__block BOOL corrupt=NO;__block unsigned chunks=0;__block unsigned uploads=0;
     __block DVMSharedRender *partialLease=nil;
+    __block BOOL gateNextSubmit=NO;
+    dispatch_semaphore_t entered=dispatch_semaphore_create(0),resume=dispatch_semaphore_create(0);
     DVMMetalRPC rpc=^NSDictionary *(NSDictionary *request,NSError **outError){
+        if(gateNextSubmit&&[request[@"op"] isEqual:@"renderSubmit"]){gateNextSubmit=NO;dispatch_semaphore_signal(entered);require(!dispatch_semaphore_wait(resume,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"resume queued GPU test");}
         @synchronized(host) {
         // Round-trip every request/reply through JSON, including writeback IDs.
         NSDictionary *r=[NSJSONSerialization JSONObjectWithData:[NSJSONSerialization dataWithJSONObject:request options:0 error:nil] options:0 error:nil];
@@ -202,6 +206,32 @@ int main(void){@autoreleasepool {
         require(freed==1,"client deallocator exactly once after final reference");
         fprintf(stderr,"PASS client storage and index dependencies: original pointer, GPU writeback, valid generated indices, invalid-index stop, final deallocator\n");
         testRegions(d,t);
+        // Both commands exist before the first executes. A pending blue CPU
+        // image must be uploaded once, then replaced by GPU red before B samples
+        // it. Replaying A's pending upload in B would produce incorrect blue.
+        desc.vertexFunction=[lib newFunctionWithName:@"v"];desc.fragmentFunction=[lib newFunctionWithName:@"fs"];
+        id<MTLRenderPipelineState> samplePipeline=[d newRenderPipelineStateWithDescriptor:desc error:&error];require(samplePipeline!=nil,"queued sample pipeline");
+        MTLTextureDescriptor *queuedDesc=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm width:64 height:64 mipmapped:NO];
+        queuedDesc.storageMode=MTLStorageModeShared;queuedDesc.usage=MTLTextureUsageShaderRead|MTLTextureUsageRenderTarget;
+        id<MTLTexture> source=[d newTextureWithDescriptor:queuedDesc],destination=[d newTextureWithDescriptor:queuedDesc];
+        uint32_t blue[4096];for(unsigned i=0;i<4096;i++)blue[i]=0xff0000ff;
+        [source replaceRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0 withBytes:blue bytesPerRow:256];
+        NSMutableArray<id<MTLCommandBuffer>> *sequence=[NSMutableArray array];uint32_t increment=1;uint32_t previous=((uint32_t *)b.contents)[0];
+        for(unsigned index=0;index<2;index++){
+            MTLRenderPassDescriptor *rp=[MTLRenderPassDescriptor renderPassDescriptor];rp.colorAttachments[0].texture=index?destination:source;
+            rp.colorAttachments[0].loadAction=MTLLoadActionClear;rp.colorAttachments[0].storeAction=MTLStoreActionStore;
+            id<MTLCommandBuffer> cb=[q commandBuffer];id<MTLRenderCommandEncoder> re=[cb renderCommandEncoderWithDescriptor:rp];
+            [re setRenderPipelineState:index?samplePipeline:pipeline];[re setVertexBuffer:b offset:0 atIndex:30];[re setVertexBytes:&increment length:4 atIndex:8];
+            if(index)[re setFragmentTexture:source atIndex:0];else [re setFragmentBytes:red length:16 atIndex:30];
+            [re drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[re endEncoding];[sequence addObject:cb];
+        }
+        gateNextSubmit=YES;[sequence[0] commit];require(!dispatch_semaphore_wait(entered,dispatch_time(DISPATCH_TIME_NOW,5*NSEC_PER_SEC)),"first GPU command held");
+        [sequence[1] commit];require([sequence[1] status]==MTLCommandBufferStatusCommitted,"second command retained pending");dispatch_semaphore_signal(resume);
+        [sequence[1] waitUntilCompleted];require([sequence[0] status]==MTLCommandBufferStatusCompleted&&[sequence[1] status]==MTLCommandBufferStatusCompleted,"ordered GPU completions");
+        require(((uint32_t *)b.contents)[0]==previous+2,"dependent buffer consumes predecessor GPU writeback");
+        [destination getBytes:pixels bytesPerRow:256 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];
+        for(unsigned i=0;i<4096;i++)require(!pixels[4*i]&&!pixels[4*i+1]&&pixels[4*i+2]==255&&pixels[4*i+3]==255,"dependent texture uses GPU output, not stale pending upload");
+        fprintf(stderr,"PASS queued submissions: FIFO completion, dependent texture/buffer visibility, no stale upload and retained resources\n");
     }
     // Drain queued retirements through a fresh device-independent host check.
     NSUInteger remaining=1;

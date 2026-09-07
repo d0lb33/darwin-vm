@@ -33,6 +33,7 @@ enum {
 @property(nonatomic) MTLPixelFormat format;
 @property(nonatomic,strong) DVMEntry *parent;
 @property(nonatomic,strong) DVMSharedRender *sharedRender;
+@property(nonatomic) uint32_t guestProcessBits;
 @end
 @implementation DVMEntry
 - (void)dealloc {_object=nil;_sharedRender=nil;}
@@ -234,12 +235,14 @@ static NSDictionary *Pipeline(DVMHost *host, uint64_t seq, NSDictionary *request
     };
 }
 static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request) {
-    uint64_t width, height, format,depth,type;
+    uint64_t width, height, format,depth,type,storage;
     MTLTextureUsage usage;
     if (!Number(request[@"width"], &width) || !Number(request[@"height"], &height) || !width ||
         !height || width > kMaxDimension || height > kMaxDimension ||
         !Usage(request[@"usage"], &usage))
         return HostError(seq, EINVAL, @"invalid texture descriptor");
+    if(!Number(request[@"storage"]?:@0,&storage)||storage>MTLStorageModePrivate)
+        return HostError(seq,EINVAL,@"unsupported texture storage mode");
     if(!Number(request[@"depth"]?:@1,&depth)||!depth||depth>kMaxDimension||!Number(request[@"type"]?:@2,&type)||
        (type!=MTLTextureType2D&&type!=MTLTextureType3D)||(type==MTLTextureType2D&&depth!=1)||
        (type==MTLTextureType3D&&usage!=MTLTextureUsageShaderRead))return HostError(seq,EINVAL,@"texture type/depth/usage contract");
@@ -250,8 +253,8 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     bpp=DVMFormatBytes(format);pixel=format;
     if(!bpp)return HostError(seq, EINVAL, @"unsupported texture format");
     NSUInteger bytes = (NSUInteger)width * (NSUInteger)height * (NSUInteger)depth * bpp;
-    if (bytes > DVM_TEXTURE_BYTES)
-        return HostError(seq, EINVAL, @"texture exceeds framed transfer limit");
+    if (bytes > (storage==MTLStorageModePrivate?DVM_PRIVATE_TEXTURE_BYTES:DVM_TEXTURE_BYTES))
+        return HostError(seq, EINVAL, @"texture exceeds storage-mode byte limit");
     if (bytes > kMaxTextures - host.textureBytes)
         return HostError(seq, ENOSPC, @"texture memory cap exceeded");
     MTLTextureDescriptor *descriptor =
@@ -260,7 +263,7 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
                                                           height:(NSUInteger)height
                                                        mipmapped:NO];
     descriptor.textureType=type;descriptor.depth=depth;
-    descriptor.storageMode = MTLStorageModeShared;
+    descriptor.storageMode = storage==MTLStorageModePrivate?MTLStorageModePrivate:MTLStorageModeShared;
     descriptor.usage = usage;
     id<MTLTexture> texture = [host.device newTextureWithDescriptor:descriptor];
     if (!texture)
@@ -274,7 +277,7 @@ static NSDictionary *Texture(DVMHost *host, uint64_t seq, NSDictionary *request)
     entry.row = (NSUInteger)width * bpp;
     entry.format = pixel;
     host.textureBytes += bytes;
-    return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(entry.handle), @"row" : @(entry.row), @"allocatedSize":@(texture.allocatedSize)};
+    return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(entry.handle), @"row" : @(entry.row), @"allocatedSize":@(texture.allocatedSize),@"nativeStorageMode":@(texture.storageMode)};
 }
 static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) {
     DVMEntry *entry = Entry(host, request[@"texture"], @"texture");
@@ -290,7 +293,7 @@ static NSDictionary *Upload(DVMHost *host, uint64_t seq, NSDictionary *request) 
         memcpy([(id<MTLBuffer>)b.object contents], data.bytes, data.length);
         return @{@"seq" : @(seq), @"ok" : @YES};
     }
-    if (!entry || entry.sharedRender || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
+    if (!entry || entry.sharedRender || [(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate || !Number(request[@"row"], &row) || row < entry.row || row > UINT32_MAX || !data ||
         data.length != row * entry.height * [(id<MTLTexture>)entry.object depth])
         return HostError(seq, EINVAL, @"upload must contain one complete texture");
     MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
@@ -312,6 +315,7 @@ static NSDictionary *ReadTexture(DVMHost *host, uint64_t seq, NSDictionary *requ
     if (!entry)
         return HostError(seq, ENOENT, @"unknown texture handle");
     if(entry.sharedRender)return HostError(seq,ENOTSUP,@"shared render pixels use owned mapping, not readback RPC");
+    if([(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate)return HostError(seq,ENOTSUP,@"private texture has no CPU read access");
     NSMutableData *data = [NSMutableData dataWithLength:entry.textureBytes];
     MTLRegion region = MTLRegionMake3D(0,0,0,entry.width,entry.height,[(id<MTLTexture>)entry.object depth]);
     [(id<MTLTexture>)entry.object getBytes:data.mutableBytes
@@ -468,7 +472,7 @@ static NSDictionary *Submit(DVMHost *host, uint64_t seq, NSDictionary *r) {
         id encoded = u[@"data"];
         NSData *data = DVMBPayload(encoded);
         uint64_t row = 0;
-        if (!entry || entry.sharedRender || (buffer && u[@"texture"]) || !data || data.length != entry.textureBytes ||
+        if (!entry || entry.sharedRender || (!buffer&&[(id<MTLTexture>)entry.object storageMode]==MTLStorageModePrivate) || (buffer && u[@"texture"]) || !data || data.length != entry.textureBytes ||
             [written containsObject:@(entry.handle)] ||
             (!buffer && (!Number(u[@"row"], &row) || row != entry.row)))
             return HostError(seq, EINVAL, @"invalid or duplicate batch upload");
@@ -549,6 +553,14 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     if([op isEqual:@"depthState"])return DepthState(host,seq,request);
     if([op isEqual:@"linearLayout"])return LinearLayout(host,seq,request);
     if([op isEqual:@"linearTexture"])return LinearTexture(host,seq,request);
+    if([op isEqual:@"resourceProcess"]){
+        DVMEntry *entry=Entry(host,request[@"handle"],@"texture")?:Entry(host,request[@"handle"],@"buffer");uint64_t bits;
+        if(!entry||!Number(request[@"processBits"],&bits)||bits>UINT32_MAX)return HostError(seq,EINVAL,@"resource process ownership/value");
+        // Guest pid_t is opaque attribution; never charge or impersonate a
+        // host PID using a numerically equal identifier from the VM.
+        entry.guestProcessBits=(uint32_t)bits;
+        return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle),@"processBits":@(entry.guestProcessBits)};
+    }
     if([op isEqual:@"renderPipeline"])return RenderPipeline(host,seq,request);
     if([op isEqual:@"sampler"])return Sampler(host,seq,request);
     if([op isEqual:@"renderSubmit"])return RenderSubmit(host,seq,request);

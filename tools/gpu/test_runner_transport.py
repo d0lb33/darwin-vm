@@ -7,6 +7,7 @@ from pathlib import Path
 import struct
 import tempfile
 import unittest
+from unittest.mock import patch
 import zlib
 
 from driver_mmio_peer import MMIOPeer
@@ -84,6 +85,32 @@ class RunnerVerdictTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'VM recovery'):p.control_reply(dict(op='runnerNext'))
         p=self.peer([]);p.pending=dict(result='awaiting verification')
         self.assertEqual(p.control_reply(dict(op='runnerNext')),dict(action='idle'))
+
+    def test_acceptance_exception_preserves_guest_result_and_raw_evidence(self):
+        for shared in (False, True):
+            with self.subTest(shared=shared), tempfile.TemporaryDirectory() as temp:
+                p=self.peer([]);p.out=Path(temp);p.records=[];p.ram=b'captured-transport'
+                (p.out/'driver-audit.jsonl').write_text('')
+                directory=p.out/'job';directory.mkdir()
+                p.pending=dict(job=dict(job=42,expected='pass',shared_surface=shared),
+                    result=dict(job=42,pid=123,spawn=0,exit=0,signal=0),out=directory,
+                    first_record=0,first_audit=0,first_serial=0,first_display=0,started=10,ended=11)
+                # A successful process exit with no completion witness must
+                # fail acceptance without losing the exit or killing collection.
+                with patch.object(MMIOPeer,'audit',return_value=[]), patch(
+                        'driver_runner_peer.capture_uart_interval',return_value=(b'raw-log',{})):
+                    self.assertEqual(p.audit(),[])
+                result=json.loads((directory/'result.json').read_text())
+                self.assertEqual(result['exit'],0)
+                self.assertFalse(result['verified'])
+                self.assertIn('ValueError',result['verification_error'])
+                self.assertEqual((directory/'shared-ram.bin').read_bytes(),p.ram)
+                self.assertEqual((directory/'guest-loading.log').read_bytes(),b'raw-log')
+                self.assertIsNone(p.pending)
+                self.assertEqual(p.results,[result])
+                if shared:
+                    with self.assertRaisesRegex(ValueError,'VM recovery'):
+                        p.control_reply(dict(op='runnerNext'))
 
 
 if __name__=='__main__':unittest.main()

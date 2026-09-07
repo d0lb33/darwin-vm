@@ -9,7 +9,7 @@ frames=${DVM_CA_FRAMES:-1}
 [[ "$frames" =~ ^[0-9]+$ ]] && (( (frames==1 || frames>=3) && frames<=4096 )) || exit 2
 flags+=(-DDVM_CA_FRAMES="$frames")
 scene=${DVM_CA_SCENE:-0}
-[[ "$scene" =~ ^[0-3]$ ]] || exit 2
+[[ "$scene" =~ ^[0-4]$ ]] || exit 2
 flags+=(-DDVM_CA_SCENE="$scene")
 if [[ ${DVM_CA_NATIVE:-0} == 1 ]]; then flags+=(-DDVM_CA_NATIVE); fi
 xcrun clang "${flags[@]}" -DDVM_CA_PROBE -DDVM_CA_REHEARSAL "$repo/tools/gpu/driver_guest.m" "$repo/tools/gpu/driver_workload.m" "$repo/tools/gpu/driver_client.m" -framework Metal -framework Foundation -framework IOSurface -framework QuartzCore -framework CoreGraphics -o "$out/driver_client"

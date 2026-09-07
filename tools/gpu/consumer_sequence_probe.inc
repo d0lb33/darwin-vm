@@ -28,7 +28,8 @@ static void DVMConsumerCheck(id<MTLTexture> texture,unsigned frame) {
         if(DVM_CA_SCENE==3&&red&&x>=x0+8){red=NO;green=YES;}
         unsigned b=green||red?0:255,g=green?255:0,r=red?255:0;
         if(DVM_CA_SCENE==1&&red){b=128;r=128;}
-        int tolerance=DVM_CA_SCENE==1?1:0;
+        if(DVM_CA_SCENE==4&&(red||green)){b=128;g=green?128:0;r=red?128:0;}
+        int tolerance=DVM_CA_SCENE==1||DVM_CA_SCENE==4?1:0;
         if(abs((int)p[0]-(int)b)>tolerance||abs((int)p[1]-(int)g)>tolerance||abs((int)p[2]-(int)r)>tolerance||p[3]!=255)bad++;
     }
     fprintf(stderr,"GPU_LOAD_CA_SEQUENCE_PIXELS frame=%u bad_pixels=%u\n",frame,bad);
@@ -51,6 +52,8 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {
         [CATransaction begin];[CATransaction setDisableActions:YES];
         CALayer *root=[CALayer layer],*moving=[CALayer layer],*front=[CALayer layer];
         root.frame=CGRectMake(0,0,64,64);moving.frame=CGRectMake(0,0,16,64);front.frame=CGRectMake(28,0,8,64);
+        CALayer *parent=root;
+        if(DVM_CA_SCENE==4){parent=[CALayer layer];parent.frame=root.bounds;parent.opacity=.5;parent.allowsGroupOpacity=YES;[root addSublayer:parent];}
         DVMConsumerColor(root,space,0,0,1);DVMConsumerColor(moving,space,1,0,0);DVMConsumerColor(front,space,0,1,0);
         CALayer *clip=nil;
         if(DVM_CA_SCENE==1)moving.opacity=.5;
@@ -59,7 +62,7 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {
             [root addSublayer:clip];[clip addSublayer:moving];
             moving.anchorPoint=CGPointZero;moving.bounds=CGRectMake(0,0,8,64);
             moving.transform=CATransform3DMakeScale(2,1,1);
-        }else [root addSublayer:moving];
+        }else [parent addSublayer:moving];
         if(DVM_CA_SCENE==3){
             const uint8_t imageBytes[]={255,0,0,255,0,255,0,255};
             CFDataRef data=CFDataCreate(NULL,imageBytes,sizeof(imageBytes));
@@ -69,7 +72,7 @@ static void DVMRunQuartzCoreConsumer(id<MTLDevice> device) {
             moving.magnificationFilter=kCAFilterNearest;moving.minificationFilter=kCAFilterNearest;
             CGImageRelease(image);CGDataProviderRelease(provider);CFRelease(data);
         }
-        CGColorSpaceRelease(space);[root addSublayer:front];
+        CGColorSpaceRelease(space);[parent addSublayer:front];
         fprintf(stderr,"GPU_LOAD_CA_SCENE id=%u\n",DVM_CA_SCENE);
         renderer.layer=root;renderer.bounds=root.frame;[CATransaction commit];
         setup=DVMConsumerTime()-setup;

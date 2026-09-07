@@ -3,6 +3,7 @@
 #import "driver_api.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <IOSurface/IOSurface.h>
+#include <dlfcn.h>
 #include "present_layout.h"
 #include "driver_capabilities.h"
 #include "dirty_buffer_range.h"
@@ -15,12 +16,24 @@ static NSError *error(NSString *s) {
 static void reject(NSString *s) {
     [NSException raise:NSInvalidArgumentException format:@"DVM Metal: %@", s];
 }
+static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSurfaceRef surface,NSUInteger plane){
+    // The installed test supervisor exposes its checked audit writer. Driver
+    // stderr alone is not retained by that guest launch path. Native clients
+    // without the supervisor keep ordinary stderr diagnostics.
+    int (*report)(FILE *,const char *,...)=dlsym(RTLD_DEFAULT,"DVMReport");
+    if(!report)report=fprintf;
+    report(stderr,"GPU_LOAD_TEXTURE_REJECT reason=%s type=%lu width=%lu height=%lu depth=%lu format=%lu storage=%lu usage=%lu options=%lu levels=%lu samples=%lu array=%lu compression=%ld surface=%u plane=%lu\n",
+        reason,(unsigned long)d.textureType,(unsigned long)d.width,(unsigned long)d.height,(unsigned long)d.depth,(unsigned long)d.pixelFormat,
+        (unsigned long)d.storageMode,(unsigned long)d.usage,(unsigned long)d.resourceOptions,(unsigned long)d.mipmapLevelCount,
+        (unsigned long)d.sampleCount,(unsigned long)d.arrayLength,(long)d.compressionType,surface?IOSurfaceGetID(surface):0,(unsigned long)plane);
+}
 @class DVMDevice, DVMLibrary, DVMFunction, DVMPipeline, DVMTexture, DVMCommand, DVMBuffer;
 
 @interface DVMDevice : NSObject <MTLDevice>
 @property(nonatomic, copy) DVMMetalRPC transport;
 @property(nonatomic, strong) dispatch_queue_t serial;
-@property(nonatomic) BOOL submissionInFlight;
+@property(nonatomic) NSUInteger pendingSubmissions;
+@property(nonatomic,readonly) BOOL submissionInFlight;
 @property(nonatomic) BOOL binaryPayloads;
 @property(nonatomic,strong) NSDictionary *negotiatedContract;
 @property(nonatomic,strong) NSMutableDictionary *linearAlignments;
@@ -118,6 +131,7 @@ static void reject(NSString *s) {
 #include "consumer_render_guest.inc"
 #include "consumer_function_guest.inc"
 @implementation DVMDevice
+- (BOOL)submissionInFlight {@synchronized(self){return self.pendingSubmissions!=0;}}
 - (NSDictionary *)consumerCompletion {
     // EndFrame has submitted on the one queue. The serial barrier observes host
     // completion before the final-only pixel read, and propagates async errors.
@@ -136,15 +150,17 @@ static void reject(NSString *s) {
 }
 - (NSString *)vendorName {return @"Darwin VM";}
 - (NSDictionary *)contractCapabilities {
-    @synchronized(self) {
-        if(!_negotiatedContract) {
-            NSError *failure=nil;NSDictionary *r=[self call:@{@"op":@"capabilities"} error:&failure];
-            NSDictionary *profile=r[@"contract"];
-            if(![profile isEqual:DVMContractProfile()])reject(failure.description?:@"guest/host capability contract mismatch");
-            _negotiatedContract=DVMContractProfile();
-        }
-        return _negotiatedContract[@"queries"];
+    NSDictionary *contract;
+    @synchronized(self){contract=_negotiatedContract;}
+    if(!contract) {
+        // Never wait for the serial transport while holding the owner
+        // monitor: an earlier completion needs it to retire its queue slot.
+        NSError *failure=nil;NSDictionary *r=[self call:@{@"op":@"capabilities"} error:&failure];
+        NSDictionary *profile=r[@"contract"];
+        if(![profile isEqual:DVMContractProfile()])reject(failure.description?:@"guest/host capability contract mismatch");
+        @synchronized(self){if(!_negotiatedContract)_negotiatedContract=DVMContractProfile();contract=_negotiatedContract;}
     }
+    return contract[@"queries"];
 }
 #define DVM_BOOL_GETTER(selector,value) - (BOOL)selector {return [[self contractCapabilities][@#selector] boolValue];}
 #define DVM_UINT_GETTER(selector,value) - (NSUInteger)selector {return [[self contractCapabilities][@#selector] unsignedIntegerValue];}
@@ -286,13 +302,17 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     return o;
 }
 - (id<MTLTexture>)newTextureWithDescriptor:(MTLTextureDescriptor *)d {
-    if(!DVMTextureDescriptorValid(d))return nil;
+    if(!DVMTextureDescriptorValid(d)){
+        DVMTextureRejection("descriptor",d,NULL,0);
+        return nil;
+    }
     NSError *e = nil;
     NSDictionary *r = [self call:@{
         @"op" : @"texture",
         @"width" : @(d.width),
         @"height" : @(d.height), @"depth":@(d.depth), @"type":@(d.textureType),
         @"format" : @(d.pixelFormat),
+        @"storage" : @(d.storageMode),
         @"usage" : @(d.usage)
     }
                            error:&e];
@@ -315,12 +335,12 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     if(!s||!d||plane||!self.mappingProvider||d.textureType!=MTLTextureType2D||d.width!=DVM_PRESENT_WIDTH||
        d.height!=DVM_PRESENT_HEIGHT||d.depth!=1||d.arrayLength!=1||d.mipmapLevelCount!=1||d.sampleCount!=1||
        d.pixelFormat!=MTLPixelFormatBGRA8Unorm||d.usage!=(MTLTextureUsageRenderTarget|MTLTextureUsageShaderRead)||
-       d.storageMode!=MTLStorageModeShared||!DVMResourceOptionsValid(d.resourceOptions)||
-       ([(id)d respondsToSelector:@selector(protectionOptions)]&&[(id<DVMProtectionMetadata>)d protectionOptions]))return nil;
+       d.storageMode!=MTLStorageModeShared||d.compressionType!=MTLTextureCompressionTypeLossless||!DVMResourceOptionsValid(d.resourceOptions)||
+       ([(id)d respondsToSelector:@selector(protectionOptions)]&&[(id<DVMProtectionMetadata>)d protectionOptions])){DVMTextureRejection("surface-descriptor",d,s,plane);return nil;}
     id<DVMMetalOwnedMapping> mapping=DVMGetOwnedMetalMapping(self,NULL);
     if(!mapping||IOSurfaceGetBaseAddress(s)!=mapping.bytes||IOSurfaceGetAllocSize(s)!=mapping.length||
        IOSurfaceGetWidth(s)!=d.width||IOSurfaceGetHeight(s)!=d.height||IOSurfaceGetBytesPerRow(s)!=DVM_PRESENT_ROW||
-       IOSurfaceGetBytesPerElement(s)!=4||IOSurfaceGetPixelFormat(s)!=0x42475241||IOSurfaceGetPlaneCount(s))return nil;
+       IOSurfaceGetBytesPerElement(s)!=4||IOSurfaceGetPixelFormat(s)!=0x42475241||IOSurfaceGetPlaneCount(s)){DVMTextureRejection("surface-owner",d,s,plane);return nil;}
     NSError *e=nil;NSDictionary *r=[self call:@{@"op":@"sharedRenderCreate",@"width":@(d.width),@"height":@(d.height),
         @"row":@DVM_PRESENT_ROW,@"format":@(d.pixelFormat),@"usage":@(d.usage),@"bytes":@(mapping.length)} error:&e];
     if(!r)return nil;
@@ -437,6 +457,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 - (NSUInteger)mipmapLevelCount {
     return 1;
 }
+- (MTLTextureCompressionType)compressionType {return MTLTextureCompressionTypeLossless;}
 - (NSUInteger)arrayLength {
     return 1;
 }
@@ -445,6 +466,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (void)check:(MTLRegion)r level:(NSUInteger)level row:(NSUInteger)row pointer:(const void *)p {
     if(self.surfaceMapping)reject(@"owned IOSurface CPU access uses its lock and lease contract");
+    if(self.storageMode==MTLStorageModePrivate)reject(@"private textures have no CPU transfer access");
     if (!p || level || !r.size.width || !r.size.height || !r.size.depth ||
         r.origin.x>_width || r.size.width>_width-r.origin.x ||
         r.origin.y>_height || r.size.height>_height-r.origin.y ||
@@ -483,6 +505,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (NSData *)read {
     if(self.surfaceMapping)reject(@"owned IOSurface has no copied readback path");
+    if(self.storageMode==MTLStorageModePrivate)reject(@"private textures have no CPU transfer access");
     if(self.owner.submissionInFlight)reject(@"texture read while GPU work is in flight");
     if(self.completedShadow)return self.completedShadow;
     NSError *e = nil;
@@ -588,14 +611,17 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     }
 }
 - (void)commit {
+    // Commit order and dispatch order must agree, including concurrent callers.
+    @synchronized(_commandQueue.owner) {
     @synchronized(self) {
         [self encoding];
         if (_openEncoders)
             reject(@"unclosed command buffer");
         @synchronized(_commandQueue.owner) {
-            if (_commandQueue.owner.submissionInFlight)
-                reject(@"only one in-flight command buffer supported");
-            _commandQueue.owner.submissionInFlight = YES;
+            if (_commandQueue.owner.pendingSubmissions>=DVM_QUEUED_COMMAND_BUFFERS)
+                reject(@"bounded command buffer queue is full");
+            if(!_commandQueue.owner.pendingSubmissions)_commandQueue.owner.lastSubmissionError=nil;
+            _commandQueue.owner.pendingSubmissions++;
         }
         self.status = MTLCommandBufferStatusCommitted;
         dispatch_group_enter(_completion);
@@ -612,24 +638,28 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             DVMBuffer *b = o;
             [buffers addObject:b];
             if(!render)[readbacks addObject:b.handle];
-            if(!render)[uploads addObject:@{
-                @"op" : @"upload",
-                @"buffer" : b.handle,
-                @"data" : self.commandQueue.owner.binaryPayloads&&!render ? [b cpuData] : [[b cpuData] base64EncodedStringWithOptions:0]
-            }];
         }
     for (id o in _resources)
         if ([o isKindOfClass:DVMTexture.class] && ![textures containsObject:o]) {
             DVMTexture *t = o;
             [textures addObject:t];
-            if (t.pendingUpload)
-                [uploads addObject:@{@"texture":t.handle, @"row":@([t row]),
-                    @"data":self.commandQueue.owner.binaryPayloads&&!render ? t.pendingUpload : [t.pendingUpload base64EncodedStringWithOptions:0]}];
         }
     dispatch_async(_commandQueue.owner.serial, ^{
         @autoreleasepool {
             @try {
                 NSError *e = nil;
+                @synchronized(self.commandQueue.owner){
+                    if(self.commandQueue.owner.lastSubmissionError)reject(@"earlier queued command failed; dependent work cancelled");
+                }
+                // Resolve uploads only after preceding GPU completion/writeback.
+                // Capturing pending textures at commit would re-upload stale
+                // CPU contents over a predecessor's GPU-produced image.
+                if(!render)for(DVMBuffer *b in buffers)
+                    [uploads addObject:@{@"op":@"upload",@"buffer":b.handle,
+                        @"data":self.commandQueue.owner.binaryPayloads?[b cpuData]:[[b cpuData] base64EncodedStringWithOptions:0]}];
+                for(DVMTexture *t in textures)if(t.pendingUpload)
+                    [uploads addObject:@{@"texture":t.handle,@"row":@([t row]),
+                        @"data":self.commandQueue.owner.binaryPayloads&&!render?t.pendingUpload:[t.pendingUpload base64EncodedStringWithOptions:0]}];
                 if(render)for(DVMBuffer *buffer in buffers) {
                     // contents may be written directly, without didModifyRange.
                     // Compare owned bytes; update the cache only after host ACK.
@@ -725,7 +755,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
             }
             @synchronized(self.commandQueue.owner) {
                 self.commandQueue.owner.lastSubmissionError=self.error;
-                self.commandQueue.owner.submissionInFlight = NO;
+                self.commandQueue.owner.pendingSubmissions--;
             }
             dispatch_group_leave(self.completion);
             for (MTLCommandBufferHandler h in handlers)
@@ -734,6 +764,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                 });
         }
     });
+    }
 }
 - (void)waitUntilCompleted {
     if (self.status < MTLCommandBufferStatusCommitted)

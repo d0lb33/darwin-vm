@@ -1,5 +1,6 @@
 """Acceptance must require matching guest audit, GPU draws and final pixels."""
 import base64
+import copy
 import struct
 import tempfile
 import unittest
@@ -117,6 +118,30 @@ class SequenceAcceptanceTests(unittest.TestCase):
     def test_opaque_scene_cannot_pass_as_image(self):
         self.lines.insert(0,'GPU_LOAD_CA_SCENE id=3')
         with self.assertRaisesRegex(ValueError,'oracle'):verify_records(self.out,self.lines,self.records,4,3)
+
+    def test_intermediate_targets_need_private_allocation_and_frame_completion(self):
+        self.lines.insert(0,'GPU_LOAD_CA_SCENE id=4')
+        self.lines[-1]=self.lines[-1].replace('passes=4 draws=12','passes=8 draws=14')
+        records=[self.records[0],dict(op='texture',request=dict(storage=2),reply=dict(ok=True,handle=2,nativeStorageMode=2))]
+        frame=0;passes=draws=0
+        for r in self.records[1:]:
+            if r['op']=='renderSubmit':
+                if frame>=2:r['request']['commands']=[dict(target=1),dict(target=2),dict(target=1)];r['reply'].update(passes=3,draws=4)
+                records.append(r);passes+=r['reply']['passes'];draws+=r['reply']['draws'];frame+=1
+                records.append(dict(op='stats',request={},reply=dict(ok=True,live=dict(objects=3),renderPasses=passes,renderDraws=draws)))
+            else:
+                if r['op']=='read':
+                    data=bytearray(base64.b64decode(r['reply']['data']))
+                    for i in range(0,len(data),4):
+                        if data[i:i+4]==bytes([0,0,255,255]):data[i:i+4]=bytes([128,0,128,255])
+                        elif data[i:i+4]==bytes([0,255,0,255]):data[i:i+4]=bytes([128,128,0,255])
+                    r['reply']['data']=base64.b64encode(data).decode()
+                records.append(r)
+        for i,r in enumerate(records):r['seq']=i+1
+        self.assertTrue(verify_records(self.out,self.lines,records,4,4)['verified'])
+        for mutate in (lambda r:r[1]['reply'].update(nativeStorageMode=0),lambda r:r[3]['reply'].update(renderPasses=999)):
+            bad=copy.deepcopy(records);mutate(bad)
+            with self.assertRaises(ValueError):verify_records(self.out,self.lines,bad,4,4)
 
 
 if __name__ == '__main__':

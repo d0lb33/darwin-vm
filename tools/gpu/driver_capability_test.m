@@ -21,6 +21,9 @@ int main(void){@autoreleasepool{
     check(![device newTextureWithDescriptor:texture],"advertised texture extent enforced");
     check(![device newBufferWithLength:DVM_BUFFER_BYTES+1 options:MTLResourceStorageModeShared],"advertised buffer extent enforced");
     check(requests==1,"out of bounds rejected before transport");
+    texture.width=16;texture.compressionType=MTLTextureCompressionTypeLossy;
+    check(![device newTextureWithDescriptor:texture],"lossy allocation rejected by lossless contract");
+    check(![caps supportsLossyCompression]&&![caps supportsPerPlaneCompression]&&![caps supportsASTCTextureCompression],"compression feature batch remains unsupported");
     for(NSString *key in @[@"version",@"queries"]){
         id<MTLDevice> bad=DVMCreateMetalDevice(^NSDictionary *(NSDictionary *r,NSError **e){
             (void)r;(void)e;NSMutableDictionary *profile=[DVMContractProfile() mutableCopy];

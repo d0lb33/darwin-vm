@@ -5,7 +5,7 @@ static NSDictionary *BlurSubmit(DVMHost*host,uint64_t seq,NSDictionary*r) {
  if(!p||![p.object[@"function"] isEqual:@"compute_simd_blur_5"]||!in||!tmp||!out||in==tmp||in==out||tmp==out)return HostError(seq,EINVAL,@"blur resource handles");
  if(!w||!h||w%32||h%32||w>256||h>256)return HostError(seq,EINVAL,@"blur dimensions");
  NSArray*textures=@[in,tmp,out];for(unsigned i=0;i<3;i++) {
-  DVMEntry*t=textures[i];if(t.width!=(i?w:w+32)||t.height!=(i==2?h:h+32)||t.format!=MTLPixelFormatRGBA16Float||((id<MTLTexture>)t.object).usage!=(MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite))return HostError(seq,EINVAL,@"blur texture geometry or usage");
+  DVMEntry*t=textures[i];if(((id<MTLTexture>)t.object).storageMode==MTLStorageModePrivate||t.width!=(i?w:w+32)||t.height!=(i==2?h:h+32)||t.format!=MTLPixelFormatRGBA16Float||((id<MTLTexture>)t.object).usage!=(MTLTextureUsageShaderRead|MTLTextureUsageShaderWrite))return HostError(seq,EINVAL,@"blur texture geometry, usage or CPU storage");
  }
  NSData*state=r[@"state"],*pixels=r[@"pixels"];
  if(![state isKindOfClass:NSData.class]||state.length!=128||![pixels isKindOfClass:NSData.class]||pixels.length!=in.textureBytes)return HostError(seq,EINVAL,@"blur state or upload size");

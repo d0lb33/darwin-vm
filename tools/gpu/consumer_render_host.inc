@@ -88,7 +88,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
     for(NSDictionary *u in uploads){
         if(![u isKindOfClass:NSDictionary.class])return HostError(seq,EINVAL,@"render upload shape");
         BOOL buffer=u[@"buffer"]!=nil;DVMEntry *e=Entry(host,u[buffer?@"buffer":@"texture"],buffer?@"buffer":@"texture");NSData *data=DVMBPayload(u[@"data"]);
-        if(!e||e.sharedRender||!data||data.length!=e.textureBytes||(buffer&&u[@"texture"])||(!buffer&&![u[@"row"] isEqual:@(e.row)])||[seen containsObject:@(e.handle)])return HostError(seq,EINVAL,@"render upload extent/ownership");
+        if(!e||e.sharedRender||(!buffer&&[(id<MTLTexture>)e.object storageMode]==MTLStorageModePrivate)||!data||data.length!=e.textureBytes||(buffer&&u[@"texture"])||(!buffer&&![u[@"row"] isEqual:@(e.row)])||[seen containsObject:@(e.handle)])return HostError(seq,EINVAL,@"render upload extent/ownership");
         [seen addObject:@(e.handle)];[transfers addObject:@[e,data]];
     }
     [seen removeAllObjects];

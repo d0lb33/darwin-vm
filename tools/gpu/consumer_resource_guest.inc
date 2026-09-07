@@ -3,8 +3,15 @@
 @interface DVMResource : DVMObject
 @property(nonatomic) MTLResourceOptions acceptedOptions;
 @property(nonatomic) NSUInteger hostAllocatedSize;
+@property(nonatomic) int32_t responsibleProcess;
 @end
 @implementation DVMResource
+- (void)setResponsibleProcess:(int32_t)process {
+    NSError *e=nil;NSNumber *bits=@((uint32_t)process);
+    NSDictionary *r=[self.owner call:@{@"op":@"resourceProcess",@"handle":self.handle,@"processBits":bits} error:&e];
+    if(![r[@"handle"] isEqual:self.handle]||![r[@"processBits"] isEqual:bits])reject(e.description?:@"resource process metadata acknowledgement");
+    _responsibleProcess=process;
+}
 - (MTLStorageMode)storageMode {return (self.acceptedOptions>>4)&15;}
 - (MTLCPUCacheMode)cpuCacheMode {return self.acceptedOptions&15;}
 - (MTLHazardTrackingMode)hazardTrackingMode {return MTLHazardTrackingModeTracked;}
@@ -33,9 +40,10 @@ static BOOL DVMResourceOptionsValid(MTLResourceOptions options) {
 static BOOL DVMTextureDescriptorValid(MTLTextureDescriptor *d) {
     if(!d||(d.textureType!=MTLTextureType2D&&d.textureType!=MTLTextureType3D)||!d.depth||d.depth>DVM_TEXTURE_DIMENSION||
        (d.textureType==MTLTextureType2D&&d.depth!=1)||(d.textureType==MTLTextureType3D&&d.usage!=MTLTextureUsageShaderRead)||d.arrayLength!=1||
-       d.mipmapLevelCount!=1||d.sampleCount!=1||!DVMResourceOptionsValid(d.resourceOptions)||
+       d.mipmapLevelCount!=1||d.sampleCount!=1||d.compressionType!=MTLTextureCompressionTypeLossless||d.storageMode>MTLStorageModePrivate||!DVMResourceOptionsValid(d.resourceOptions&~0xf0ul)||
        !d.width||!d.height||d.width>DVM_TEXTURE_DIMENSION||d.height>DVM_TEXTURE_DIMENSION||
        !DVMFormatBytes(d.pixelFormat)||!d.usage||(d.usage&~DVM_TEXTURE_USAGE_MASK))return NO;
     if([(id)d respondsToSelector:@selector(protectionOptions)]&&[(id<DVMProtectionMetadata>)d protectionOptions])return NO;
-    return d.width*d.height*d.depth*DVMFormatBytes(d.pixelFormat)<=DVM_TEXTURE_BYTES;
+    return d.width*d.height*d.depth*DVMFormatBytes(d.pixelFormat)<=
+        (d.storageMode==MTLStorageModePrivate?DVM_PRIVATE_TEXTURE_BYTES:DVM_TEXTURE_BYTES);
 }
