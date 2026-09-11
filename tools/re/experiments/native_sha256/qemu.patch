@@ -1,0 +1,120 @@
+diff --git a/target/arm/tcg/crypto_helper.c b/target/arm/tcg/crypto_helper.c
+index 11977cb..53d84a8 100644
+--- a/target/arm/tcg/crypto_helper.c
++++ b/target/arm/tcg/crypto_helper.c
+@@ -18,6 +18,13 @@
+ #include "helper.h"
+ #include "vec_internal.h"
+ 
++#if defined(__aarch64__) && defined(__ARM_FEATURE_SHA2) && !HOST_BIG_ENDIAN
++#include <arm_neon.h>
++#define DVM_NATIVE_SHA256 1
++#else
++#define DVM_NATIVE_SHA256 0
++#endif
++
+ union CRYPTO_STATE {
+     uint8_t    bytes[16];
+     uint32_t   words[4];
+@@ -274,6 +281,7 @@ void HELPER(crypto_sha1su1)(void *vd, void *vm, uint32_t desc)
+  * http://csrc.nist.gov/groups/STM/cavp/documents/shs/sha256-384-512.pdf
+  */
+ 
++#if !DVM_NATIVE_SHA256
+ static uint32_t S0(uint32_t x)
+ {
+     return ror32(x, 2) ^ ror32(x, 13) ^ ror32(x, 22);
+@@ -294,8 +302,20 @@ static uint32_t s1(uint32_t x)
+     return ror32(x, 17) ^ ror32(x, 19) ^ (x >> 10);
+ }
+ 
++#endif
++
+ void HELPER(crypto_sha256h)(void *vd, void *vn, void *vm, uint32_t desc)
+ {
++#if DVM_NATIVE_SHA256
++    /* The compiler target promises host SHA2. Load all inputs before storing
++     * so architectural register aliases retain the scalar helper's semantics.
++     */
++    uint32x4_t d = vld1q_u32(vd);
++    uint32x4_t n = vld1q_u32(vn);
++    uint32x4_t m = vld1q_u32(vm);
++    vst1q_u32(vd, vsha256hq_u32(d, n, m));
++    clear_tail_16(vd, desc);
++#else
+     uint64_t *rd = vd;
+     uint64_t *rn = vn;
+     uint64_t *rm = vm;
+@@ -327,10 +347,21 @@ void HELPER(crypto_sha256h)(void *vd, void *vn, void *vm, uint32_t desc)
+     rd[1] = d.l[1];
+ 
+     clear_tail_16(vd, desc);
++#endif
+ }
+ 
+ void HELPER(crypto_sha256h2)(void *vd, void *vn, void *vm, uint32_t desc)
+ {
++#if DVM_NATIVE_SHA256
++    /* The compiler target promises host SHA2. Load all inputs before storing
++     * so architectural register aliases retain the scalar helper's semantics.
++     */
++    uint32x4_t d = vld1q_u32(vd);
++    uint32x4_t n = vld1q_u32(vn);
++    uint32x4_t m = vld1q_u32(vm);
++    vst1q_u32(vd, vsha256h2q_u32(d, n, m));
++    clear_tail_16(vd, desc);
++#else
+     uint64_t *rd = vd;
+     uint64_t *rn = vn;
+     uint64_t *rm = vm;
+@@ -354,10 +385,20 @@ void HELPER(crypto_sha256h2)(void *vd, void *vn, void *vm, uint32_t desc)
+     rd[1] = d.l[1];
+ 
+     clear_tail_16(vd, desc);
++#endif
+ }
+ 
+ void HELPER(crypto_sha256su0)(void *vd, void *vm, uint32_t desc)
+ {
++#if DVM_NATIVE_SHA256
++    /* The compiler target promises host SHA2. Load all inputs before storing
++     * so architectural register aliases retain the scalar helper's semantics.
++     */
++    uint32x4_t d = vld1q_u32(vd);
++    uint32x4_t m = vld1q_u32(vm);
++    vst1q_u32(vd, vsha256su0q_u32(d, m));
++    clear_tail_16(vd, desc);
++#else
+     uint64_t *rd = vd;
+     uint64_t *rm = vm;
+     union CRYPTO_STATE d = { .l = { rd[0], rd[1] } };
+@@ -372,10 +413,21 @@ void HELPER(crypto_sha256su0)(void *vd, void *vm, uint32_t desc)
+     rd[1] = d.l[1];
+ 
+     clear_tail_16(vd, desc);
++#endif
+ }
+ 
+ void HELPER(crypto_sha256su1)(void *vd, void *vn, void *vm, uint32_t desc)
+ {
++#if DVM_NATIVE_SHA256
++    /* The compiler target promises host SHA2. Load all inputs before storing
++     * so architectural register aliases retain the scalar helper's semantics.
++     */
++    uint32x4_t d = vld1q_u32(vd);
++    uint32x4_t n = vld1q_u32(vn);
++    uint32x4_t m = vld1q_u32(vm);
++    vst1q_u32(vd, vsha256su1q_u32(d, n, m));
++    clear_tail_16(vd, desc);
++#else
+     uint64_t *rd = vd;
+     uint64_t *rn = vn;
+     uint64_t *rm = vm;
+@@ -392,6 +444,7 @@ void HELPER(crypto_sha256su1)(void *vd, void *vn, void *vm, uint32_t desc)
+     rd[1] = d.l[1];
+ 
+     clear_tail_16(vd, desc);
++#endif
+ }
+ 
+ /*

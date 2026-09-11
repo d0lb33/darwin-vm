@@ -511,3 +511,42 @@ The owned VM was explicitly quit. Evidence is in `page-payload-a/`; source and
 standalone encoding checks are also retained in
 `tools/re/experiments/tlb_page_payload/` so the rejected experiment remains
 reproducible without affecting production QEMU. QEMU source was restored.
+
+
+## Host SHA-256 candidate
+
+The retained startup host profile includes scalar `helper_crypto_sha256h`
+(407 top-of-stack observations), `h2` (181) and `su1` (100). These counts are
+not additive wall-time savings, but identify real arithmetic work rather
+than another cache-size guess. The candidate implements h/h2/su0/su1 through
+ARM NEON SHA-256 intrinsics only when the compiler target is AArch64, declares
+`__ARM_FEATURE_SHA2`, and is little-endian. Other build targets retain scalar
+helpers. This does not change guest instructions, SPTM/TXM or guest signing.
+
+`tools/re/test_native_sha256.py` extracts the original HEAD scalar helpers and
+current helper bodies into separate translation units. It also extracts the
+actual descriptor decoding and vector-tail functions. Two million differential
+helper calls passed under AddressSanitizer and UndefinedBehaviorSanitizer,
+covering all four instructions, five alias patterns and 16/32/64/128/256-byte
+vectors; whole input/output buffers are compared. Generated test sources and
+binary are in `native-sha256-tests/`. This proves these host helper cases, not
+boot performance or universal ISA correctness.
+
+Acceptance: same isolated direct-HID built-in disk, exact guest first-frame
+timing and visible pixels, followed by repeats and input if it improves.
+Stop on panic, 180 seconds without presentation, or no useful initial gain.
+
+
+`TCG_SHA_0911A`: early userspace **11.056 s**, helper ready **40.293 s**,
+first presentation **111.300 s**, zero reported panics. Native code generation
+is confirmed by `native-sha256/host-sha256h.txt` (`sha256h.4s` in the rebuilt
+helper). A mid-run host health check reported 78% system memory free and no
+recorded thermal/performance warning; it does not exclude scheduling or I/O
+variation. No explanation for the whole-boot slowdown is established by this
+single run. It fails the initial boot-time gate and was not retained.
+
+The owned VM was explicitly quit; small run artifacts are in
+`native-sha256-a/`. QEMU source was reverted. The inactive patch is preserved
+in `tools/re/experiments/native_sha256/`, alongside the reusable differential
+test script in `tools/re/`. Arithmetic equivalence and faster-looking native
+instructions are not substitutes for a demonstrated application speedup.
