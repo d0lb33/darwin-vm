@@ -133,7 +133,213 @@ PATH="$PWD/qemu-sptm/build:$PATH" python3 tools/warm_boot_probe.py \
 ```
 
 For a candidate, first pin its executable with `tcg_boot_candidate.py`, then
-supply the generated manifest through `warm_boot_probe.py --manifest`.
+supply the generated manifest as the positional argument to `warm_boot_probe.py`.
 Preserve the result, launch manifest, logs, `jit.txt`, and screenshot outside
 `/tmp` before cleaning up a run. This commit records evidence and improves
 measurement tooling; it does not claim a new TCG performance fix.
+
+
+## Startup host profile and next bounded candidate
+
+`TCG_HOSTPROF_0911A` sampled the installed default for 25 seconds during
+startup, without HMP register sampling. `boot-host-profile/host-sample.txt`
+and `categories.txt` preserve the raw call tree and single-attribution report.
+Across 55,284 vCPU stack observations: condition waits 20.14%, mutex waits
+13.17%, translated-block lookup 11.94%, MMU translation 11.84%. These include
+waits, not just on-CPU cycles, and are not additive speedup predictions.
+Of the condition-wait observations, 5,153 are under `qemu_process_cpu_events`
+and 5,059 under `cpu_exec_start`; 922 are under `start_exclusive` from queued
+CPU work. Idle/event waiting must not be confused with avoidable contention.
+The instrumented boot reached first presentation at 113.040 seconds, zero
+panics; sampling perturbs execution, so exclude it from candidate rankings.
+
+The next candidate changes only the jump-cache capacity from 2^14 to 2^16
+entries in the current epoch-invalidation implementation. Historical 2^16
+results used full-array clears and do not test this implementation. Preserve
+all invalidation and synchronization behavior; require machine SMP checks,
+then fresh disk boot comparisons. Reject absent a repeated timing benefit.
+
+
+`TCG_EPOCH16_0911A` rejected the larger epoch cache: early userspace took
+52.629 seconds and no presentation arrived within the 180-second bound
+(zero reported panics). Cross-cluster reset/atomics/IPIs passed beforehand
+(`epoch16-smp.log`), demonstrating why machine smoke tests alone are not
+boot acceptance. The source change was reverted; the experimental executable
+and manifest remain isolated under `epoch16/`. `build-fast` still contains
+that experimental binary until rebuilt, so use the accepted pinned `fast/`
+executable for controls. The installed default was never changed. This result
+does not establish the cause of the slowdown or justify removing TLB ordering.
+Both diagnostic VMs were stopped by their owned observer after collection.
+
+
+## Identical TCR writes: bounded diagnostic
+
+The current `vmsa_tcr_el12_write` flushes on every write, including identical
+values; `TCR_EL1` and `TCR_EL2` use this handler. A diagnostic candidate adds
+`DARWIN_TCR_SAME_WRITE=observe|elide`, disabled by default. Observe mode keeps
+all flushes and counts changed/identical values per CPU. Elide mode skips only
+this handler's flush when the full old and new register values are equal;
+raw register writes, changed values, TTBR/ASID paths and explicit TLBI remain
+unchanged. This is an experimental hypothesis, not an accepted optimization.
+Source and executable are pinned under `tcr-same/` for reproduction. The
+observation run must establish frequency before investing in translation
+correctness tests and fresh-boot comparisons for elision.
+
+
+`TCG_TCROBS_0911A` reached first presentation at 100.522 seconds, zero panics.
+Exit counters found 187,618 changed writes and just one identical write across
+six CPUs. Identical-write elision cannot materially help this workload; it was
+not enabled, and the diagnostic implementation was removed after preserving
+its source/binary. No correctness claim is made for unexecuted elide mode.
+
+Next candidate: scope TCR_EL2 invalidation to `alle2_tlbmask()` and TCR_EL1
+invalidation to `alle1_tlbmask(env)`, selected by actual backing field for VHE
+aliases. Both masks already serve TTBR/VMID invalidation paths in `helper.c`.
+Unknown fields retain full invalidation, and explicit guest TLBI paths remain
+unchanged. This needs exact-guest timing and translation/multicore validation;
+the presence of reusable masks is static evidence, not runtime proof.
+
+
+`TCG_TCRSCOPE_0911A`: early userspace 8.503 seconds, first presentation
+100.940 seconds, zero reported panics. No useful gain versus the 100.522-second
+observation control or the original 99–101-second controls. First-frame partial
+TLB flush counts were 1,502,549 versus 1,520,257 for the observation control;
+these are different executions, not an instruction-matched differential test.
+The candidate passed CPU0/4 atomics/IPIs and the 1,024-case PAuth matrix before
+this boot. After resuming from the first-frame pause, a helper ping received no
+ACK within 10 seconds. Serial showed helper PID87 initializing, then PID245
+initializing; readiness/input recovery was not established. This does not prove
+candidate causality. Do not retry the ambiguous packet. Evidence is in
+`tcr-scope-a/`, `tcr-scope-input.jsonl`, and the smoke logs.
+
+The scoped-flush source change was reverted for lack of demonstrated benefit.
+Its source/binary remain under `tcr-scope/`; `build-fast` currently contains that
+rejected experimental binary until rebuilt. The accepted `fast/` executable
+and installed default remain intact. The owned VM was explicitly stopped.
+
+
+## Late startup snapshot: actual first-commit work and helper abort
+
+Correction to the scoped-flush input check: its retained serial log later
+contains `DVM_INPUT_READY` and `DVM_INPUT_ACK 1789130356273 1`. The 10-second
+host deadline expired, but the ping was eventually acknowledged. This was
+late readiness, not evidence of permanently failed input or TCR causality.
+
+`TCG_LATE_0911A` uses the accepted original `fast/candidate.json`, unchanged
+TLB behavior, and pauses at 85 seconds before first presentation. Input PID87
+started at 11.960 s and initialized at 12.164 s; replacement PID246 started at
+59.707 s and initialized at 59.914 s. Full paused RAM, hashed capture manifest,
+process stacks and symbolication are retained in `late-snapshot/` (shared-cache
+slide 0x11bd8000). The VM was explicitly stopped after offline analysis.
+
+At 85 s, SpringBoard PID35's main stack is `_platform_memmove` through
+`_malloc_type_realloc`, CoreFoundation notification registration and
+`SBHIconViewContextMenuStateController registerIconView:`; below it are
+`SBIconListView`/`SBFolderView` icon construction, UIKit layout and
+`UIApplication _firstCommitBlock` -> `CA::Transaction::flush`.
+Static PCs include 0x18c373fec, 0x1c4b0f764 and 0x1849f4f84. Backboardd PID74's
+main thread is in CFRunLoop Mach receive. This is a sample of real first-commit
+work, not proof of a fixed timeout or of the percentage of boot spent there.
+
+The retained old helper PID87 has an abort stack: `query_displays` at
+0x1844e4eb4 -> `CADisplay displays` -> `RCPActiveScreens` ->
+`RCPEventEnvironment` -> `touchScreenDigitizerSenderForDisplayUUID:`. Its
+replacement PID246 is loading Objective-C categories through
+`AXUtilsBackBoardServer`, `_AXSAssistiveTouchEnabled`, and
+`RCPVirtualHIDService initWithIdentifier:properties:` (0x29b1fe774). Old process
+objects can survive in RAM; the serial PID transition corroborates which is
+the replacement. These observations motivate a controlled comparison with
+the existing direct-HID helper, avoiding Recap's display/accessibility loading.
+That comparison must preserve input functionality and the exact disk lineage;
+no boot-time benefit is established yet.
+
+
+The existing direct-HID source has been built and signed into `direct-hid/`
+and staged in a small isolated restore ramdisk with `prepare_ramdisk.sh` and
+`install_hid_in_guest.sh`. Its system trust cache merges the installed cellular
+baseline trust cache, retaining all existing hashes. The staging attachment
+was safely detached. No helper was installed into a system disk in this step;
+installation and comparative fresh boots remain pending.
+
+
+## Direct-HID comparison
+
+`TCG_HID_INSTALL1` confirmed `DVM_HID_INSTALL_DONE`, validated packets in the
+restore guest, and sealed its child. Durable disk/evidence are under
+`direct-hid-installed/`; no migrated baseline file was modified.
+The first attempted `TCG_HID_0911A` had an orchestration error: the manifest
+pinned the new backing chain but retained the old `disk.path`. It was stopped
+and excluded. `warm_boot_probe.py` now rejects such a mismatch before creating
+an overlay or launching QEMU; the new regression test and all 85 host tests pass.
+The other saved experiment manifests were checked for the same mismatch; none
+was found. Both selected path and backing-chain root were fixed before run B.
+
+`TCG_HID_0911B` with direct-HID v16 (`touch_builtin=0`): early userspace 8.130 s,
+first helper ready 25.606 s, first presentation **98.564 s**, zero panics at
+that milestone. The helper restarted once, from PID87 to PID180; the successor
+was ready and answered commands. Two Home actions dispatched both edges with
+zero timeouts; the second screenshot visibly shows the home app grid. A tap
+on Settings and horizontal page swipe were dispatched successfully, but their
+screenshots do not show the expected app/page change. Clock updates can change
+frame hashes, so `frame_changed=true` is not touch acceptance. This configuration
+is not promoted; it has only one timed boot and incomplete touch verification.
+
+`direct-hid/` contains action JSON and before/after screenshots; small final run
+artifacts are in `direct-hid-b/`. The VM was explicitly stopped. A bounded
+follow-up uses the existing `DVM_HID_TOUCH_BUILTIN=1` build option: event built-in
+metadata is already set while the previous virtual-service property was false.
+`TCG_HID_INSTALL2` confirmed installation on another child of the same original
+parent; `direct-hid-builtin-installed/` preserves it. Its boot and visible touch
+checks remain pending. Neither this metadata hypothesis nor a sub-100 boot
+establishes useful input until visible actions pass.
+
+
+`TCG_HIDBI_0911A`, built-in touch service: early userspace 8.393 s, helper
+ready 26.689 s, first presentation **98.551 s**, zero panics at first frame.
+Two Home actions visibly unlocked to the app grid with two successful HID
+edges each and zero timeouts. The Settings tap's five-second screenshot still
+showed the icon grid; a later capture (`settings-late-a.png`) confirms Settings
+opened. The launch latency was not continuously measured, so do not call that
+a five-second launch or infer touch failure from the early frame. A subsequent
+400 ms upward swipe visibly scrolled to lower Settings rows, with 13 successful
+dispatches, zero timeouts/failures, and ready state R. Action evidence and images
+are under `direct-hid-builtin/`. Small final run files are in
+`direct-hid-builtin-a/`; the VM was explicitly stopped. The identical-config
+fresh repeat `TCG_HIDBI_0911B` is the next timing check. This variant has useful
+input evidence, but a single sub-100 measurement is not repeatability proof.
+
+
+## Final direct-HID repeatability checkpoint
+
+The same built-in-touch configuration completed three fresh disk boots:
+`TCG_HIDBI_0911A` **98.551 s**, `TCG_HIDBI_0911B` **98.278 s**, and
+`TCG_HIDBI_0911C` **100.180 s** to first visible lock-screen presentation.
+Median **98.551 s** does not establish repeatable sub-100-second boot: the
+maximum still exceeds the target. Small run evidence is preserved in
+`direct-hid-builtin-a/`, `direct-hid-builtin-b/`, and `direct-hid-builtin-c/`
+under the artifact root above. The installed default remains unchanged.
+
+After B's timing, `direct-hid-final-cpu/result.json` and `vcpu-samples.txt`
+record all six CPUs executing EL0 in 40 samples (counts 19, 23, 14, 15, 26,
+25). Host process usage was 503.3%, with the six busy threads accumulating
+17.91, 17.67, 17.43, 17.23, 15.73 and 15.59 CPU seconds over about 20.3 s.
+This corroborates multicore execution; it does not establish linear scaling.
+B's later Home command acknowledged both edges but left a black capture, so
+that action is not display-recovery proof. C separately exercised power-off
+and explicit wake: `already_on:false`, `display_power_on:true`, both edges
+successful, followed by the visible lock screen in
+`direct-hid-builtin/wake-c.png`.
+
+The isolated candidate can be launched with a fresh disposable child:
+
+```sh
+DVM_SMC_MANIFEST=/Users/jdolbe1/dvm-artifacts/research/tcg-boot-multicore-20260911/direct-hid-builtin/candidate.json ./run.sh --cocoa
+```
+
+Both interactive and bounded boot entry points now reject a selected disk
+that differs from the verified backing-chain root before running subprocesses.
+All **86 host tests passed** (`host-tests-final.log`). Rejected QEMU source
+experiments were reverted; the restored-source rebuild completed successfully
+(`build-restored-source.log`). Timed results above use the separately pinned
+accepted fast binary. No experimental TCR optimization is included in this
+checkpoint.

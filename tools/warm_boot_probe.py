@@ -58,6 +58,8 @@ def main():
     if not 1 <= args.seconds <= 600:
         p.error('seconds must be 1..600')
     manifest = json.loads(args.manifest.read_text())
+    if Path(manifest['disk']['path']).resolve() != Path(manifest['disk']['backing_chain'][0]['path']).resolve():
+        raise ValueError('selected disk does not match the verified backing chain')
     verify_backing_chain(manifest['disk']['backing_chain'])
     for name, expected in manifest['qemu_inputs'].items():
         if sha256(Path(name)) != expected['sha256']:

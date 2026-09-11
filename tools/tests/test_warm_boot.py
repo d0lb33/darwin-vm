@@ -1,12 +1,17 @@
 import importlib.util
 from pathlib import Path
 import plistlib
+import json
+import tempfile
+from unittest.mock import patch
 import sys
 import unittest
 
 TOOLS = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(TOOLS))
 from warm_boot_probe import boot_command
+import warm_boot_probe
+import boot_native_smc
 
 spec = importlib.util.spec_from_file_location('cache_service', TOOLS/'input/cache_service.py')
 cache_service = importlib.util.module_from_spec(spec)
@@ -14,6 +19,39 @@ spec.loader.exec_module(cache_service)
 
 
 class WarmBootTests(unittest.TestCase):
+    def test_mismatched_disk_is_rejected_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'manifest.json'
+            manifest.write_text(json.dumps({'disk': {
+                'path': str(Path(directory) / 'wrong.qcow2'),
+                'backing_chain': [{'path': str(Path(directory) / 'verified.qcow2')}],
+            }}))
+            with patch.object(sys, 'argv', ['warm_boot_probe', str(manifest),
+                                           '--tag', 'REJECT_WRONG_DISK']), \
+                    patch.object(warm_boot_probe.subprocess, 'run') as run, \
+                    patch.object(warm_boot_probe.subprocess, 'Popen') as popen:
+                with self.assertRaisesRegex(ValueError, 'selected disk'):
+                    warm_boot_probe.main()
+                run.assert_not_called()
+                popen.assert_not_called()
+
+    def test_interactive_boot_rejects_mismatched_disk_before_launch(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / 'manifest.json'
+            manifest.write_text(json.dumps({'battery_source': 'emulated-smc', 'disk': {
+                'path': str(Path(directory) / 'wrong.qcow2'),
+                'backing_chain': [{'path': str(Path(directory) / 'verified.qcow2')}],
+            }}))
+            with patch.object(sys, 'argv', ['boot_native_smc', '--manifest', str(manifest)]), \
+                    patch.object(boot_native_smc.subprocess, 'run') as run, \
+                    patch.object(boot_native_smc.subprocess, 'Popen') as popen, \
+                    patch.object(sys, 'stderr'):
+                with self.assertRaises(SystemExit) as error:
+                    boot_native_smc.main()
+                self.assertEqual(error.exception.code, 2)
+                run.assert_not_called()
+                popen.assert_not_called()
+
     def test_disk_boot_cannot_inherit_ram_or_debugger_endpoints(self):
         argv = ['/a path/qemu', '-M', 'darwin', '-smp', '6', '-S', '-s',
                 '-drive', 'if=none,id=ans,file=/immutable/disk.qcow2',

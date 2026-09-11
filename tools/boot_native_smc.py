@@ -22,6 +22,8 @@ def main():
     manifest = json.loads(a.manifest.read_text())
     if manifest.get('battery_source') != 'emulated-smc':
         p.error('default manifest must describe an emulated-SMC disk')
+    if Path(manifest['disk']['path']).resolve() != Path(manifest['disk']['backing_chain'][0]['path']).resolve():
+        p.error('selected disk does not match the verified backing chain')
     verify_backing_chain(manifest['disk']['backing_chain'])
     for name, expected in manifest['qemu_inputs'].items():
         if sha256(Path(name)) != expected['sha256']:
