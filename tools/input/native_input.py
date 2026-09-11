@@ -129,8 +129,10 @@ def outcome(before, after):
     keys = ('sent', 'acked', 'ack_failed', 'ack_not_ready', 'ack_rejected',
             'timeouts', 'dispatched', 'dispatch_failed', 'overflow_or_not_ready_drops')
     result = {k: after[k] - before[k] for k in keys}
-    result['records_sent'] = result.pop('sent')
-    result['records_acked'] = result.pop('acked')
+    pings = after['pings'] - before['pings']
+    result['pings'] = pings
+    result['records_sent'] = result.pop('sent') - pings
+    result['records_acked'] = result.pop('acked') - pings
     return result
 
 
@@ -162,7 +164,11 @@ class DisplayPower:
     would perturb the very interaction this tool is measuring.
     """
     def __init__(self, run):
-        self.path = Path(run) / 'stderr.log'
+        run = Path(run)
+        self.path = run / ('stderr.log' if (run / 'stderr.log').exists()
+                           else 'qemu.stderr.log')
+        if not self.path.exists():
+            raise RuntimeError(f'no QEMU stderr log in {run}')
         self.offset = 0
         self.partial = b''
         self.on = None
@@ -226,7 +232,7 @@ def key_press(args, run, qcode, hold_ms, button=None):
     status_path = run / 'input-status.json'
     before = ready(args, status_path)
     qmp = QMP(run / 'qmp.sock')
-    hmp = HMP(run / 'monitor.sock')
+    hmp = HMP(run / 'monitor.sock') if args.frames else None
     frames = {}
     if args.frames:
         frames['before'] = screendump(hmp, args.frames + '-before.png')
@@ -262,7 +268,7 @@ def wheel(args, run, x, y, notches):
     status_path = run / 'input-status.json'
     before = ready(args, status_path)
     qmp = QMP(run / 'qmp.sock')
-    hmp = HMP(run / 'monitor.sock')
+    hmp = HMP(run / 'monitor.sock') if args.frames else None
     frames = {}
     if args.frames:
         frames['before'] = screendump(hmp, args.frames + '-before.png')
@@ -290,7 +296,7 @@ def gesture(args, run, points, hold_ms):
     status_path = run / 'input-status.json'
     before = ready(args, status_path)
     qmp = QMP(run / 'qmp.sock')
-    hmp = HMP(run / 'monitor.sock')
+    hmp = HMP(run / 'monitor.sock') if args.frames else None
     frames = {}
     if args.frames:
         frames['before'] = screendump(hmp, args.frames + '-before.png')

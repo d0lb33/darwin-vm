@@ -74,6 +74,22 @@ for completed migration; quits only the verified PID; checks the qcow2; hashes
 the stream, every qcow2/raw backing-chain member, QEMU, and immutable boot
 inputs; and writes `manifest.json`.
 
+After the verified source exits, the creator moves the sealed top overlay to
+`<checkpoint>/disk.qcow2`, copies the source serial log into `evidence/`, and
+rewrites only the replay copy of the ANS drive argument. This keeps the whole
+checkpoint usable after `/tmp` is cleared. The original argv remains in
+`source_qemu_argv`. `tools/relocate_checkpoint_disk.py` upgrades older
+manifests; when an earlier overlay has also moved, it requires either an
+identical backing file or a chained relocation receipt before changing a
+qcow2 backing pathname.
+
+For interactive UI work, `tools/input/snapshot_session.py restore` adds
+run-local QMP/input endpoints and waits for the native helper to be ready and
+released. `tools/input/measure_snapshot_action.py` creates a fresh restore per
+action, while `tools/input/snapshot_vnc_session.py` starts a persistent noVNC
+session with separate explicit cleanup. These modes do not impose the
+automated regression runner's 600-second lifetime.
+
 ## Restore twice
 
 Each invocation creates a fresh child disk and unique sockets.  It verifies all

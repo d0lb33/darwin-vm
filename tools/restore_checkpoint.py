@@ -15,7 +15,7 @@ from pathlib import Path
 from checkpoint_common import (
     HMP, SAFE_TAG, atomic_json, parse_migration_status, parse_pc, pid_alive,
     restore_argv, sha256, serial_hex_clock_bounds, sptm_panic_message,
-    verify_backing_chain, wait_for_path, selected_cpu_index,
+    verify_backing_chain, selected_cpu_index,
 )
 
 
@@ -87,6 +87,15 @@ def main() -> int:
     parser.add_argument("--leave-paused", action="store_true",
                         help="load and verify the exact checkpoint PC without executing; "
                              "attach debugger probes before resuming")
+    parser.add_argument("--interactive", action="store_true",
+                        help="restore as a persistent interactive input-development session; "
+                             "creates run-local QMP/monitor sockets and waits for an idle helper")
+    parser.add_argument("--ready-timeout", type=float, default=30.0,
+                        help="interactive native-input readiness deadline in seconds")
+    parser.add_argument("--vnc-port", type=int,
+                        help="interactive-only localhost VNC TCP port (for example 5989)")
+    parser.add_argument("--qemu-data-dir", type=Path,
+                        help="QEMU data directory containing keymaps (used with --vnc-port)")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--qemu", type=Path,
                         help="explicit compatible QEMU override for development replay; "
@@ -105,7 +114,20 @@ def main() -> int:
         parser.error("--tag must use 1-64 letters, digits, dots, underscores or dashes")
     if args.observe_seconds < 0:
         parser.error("--observe-seconds must be non-negative")
+    if args.ready_timeout <= 0:
+        parser.error("--ready-timeout must be positive")
+    if args.interactive and args.leave_paused:
+        parser.error("--interactive and --leave-paused are mutually exclusive")
+    if args.vnc_port is not None:
+        if not args.interactive:
+            parser.error("--vnc-port requires --interactive")
+        if not 5900 <= args.vnc_port <= 65535:
+            parser.error("--vnc-port must be in 5900..65535")
+    elif args.qemu_data_dir is not None:
+        parser.error("--qemu-data-dir requires --vnc-port")
     if args.leave_paused:
+        args.observe_seconds = 0
+    if args.interactive:
         args.observe_seconds = 0
 
     manifest = json.loads(args.manifest.read_text())
@@ -123,9 +145,14 @@ def main() -> int:
     verify_backing_chain(manifest["disk"]["backing_chain"])
 
     out = (args.out or args.manifest.resolve().parent / "restores" / args.tag).resolve()
-    monitor = Path("/tmp/dvm") / f"{args.tag}.restore.sock"
-    uart = Path("/tmp/dvm") / f"{args.tag}.restore.uart.sock"
-    qmp = Path("/tmp/dvm") / f"{args.tag}.restore.qmp.sock"
+    if args.interactive:
+        monitor = out / "monitor.sock"
+        uart = out / "uart.sock"
+        qmp = out / "qmp.sock"
+    else:
+        monitor = Path("/tmp/dvm") / f"{args.tag}.restore.sock"
+        uart = Path("/tmp/dvm") / f"{args.tag}.restore.uart.sock"
+        qmp = Path("/tmp/dvm") / f"{args.tag}.restore.qmp.sock"
     pid_file = out / "qemu.pid"
     serial = out / "serial.log"
     stderr = out / "qemu.stderr.log"
@@ -166,14 +193,31 @@ def main() -> int:
             argv[argv.index("-display") + 1] = args.display
         else:
             argv += ["-display", args.display]
-    if args.leave_paused:
+    if args.leave_paused or args.interactive:
         argv += ["-qmp", f"unix:{qmp},server=on,wait=off"]
+    if args.vnc_port is not None:
+        data_dir = (args.qemu_data_dir or
+                    Path(__file__).resolve().parents[1] / "qemu-sptm" / "pc-bios")
+        data_dir = data_dir.resolve()
+        if not (data_dir / "keymaps" / "en-us").is_file():
+            raise RuntimeError(f"QEMU data directory has no en-us keymap: {data_dir}")
+        argv += ["-L", str(data_dir)]
+        argv += ["-vnc", f"127.0.0.1:{args.vnc_port - 5900}"]
     env = {
         key: value for key, value in os.environ.items()
         if not key.startswith("DARWIN_") and not key.startswith("GXFSTAT_")
     }
     env.update(manifest.get("qemu_env", {}))
     env.update(model_env_overrides)
+    input_status = out / "input-status.json"
+    if args.interactive:
+        env["DARWIN_TOUCH_EVENTS"] = str(out / "events.jsonl")
+        if env.get("DARWIN_INPUT_UART", "0") != "0":
+            env["DARWIN_INPUT_STATUS"] = str(input_status)
+        if env.get("DARWIN_DCP_TRANSITION_TRACE_DIR"):
+            transitions = out / "transitions"
+            transitions.mkdir()
+            env["DARWIN_DCP_TRANSITION_TRACE_DIR"] = str(transitions)
     # A restored VM can itself become a checkpoint source. Record the same
     # exact launch schema used by fresh boots, without unrelated host env.
     atomic_json(out / "launch.json", {
@@ -188,7 +232,17 @@ def main() -> int:
                             env=env, start_new_session=True)
     pid_file.write_text(f"{proc.pid}\n", encoding="ascii")
     try:
-        wait_for_path(monitor, time.monotonic() + 120)
+        monitor_deadline = time.monotonic() + 120
+        while not monitor.exists():
+            if proc.poll() is not None:
+                detail = stderr.read_text(errors="replace") if stderr.exists() else ""
+                raise RuntimeError(
+                    f"restored QEMU exited with status {proc.returncode} before "
+                    f"creating its monitor: {detail[-2000:]}"
+                )
+            if time.monotonic() >= monitor_deadline:
+                raise TimeoutError(f"timed out waiting for {monitor}")
+            time.sleep(0.1)
         hmp = HMP(monitor)
         deadline = time.monotonic() + 120
         while True:
@@ -225,8 +279,46 @@ def main() -> int:
         stderr_before_resume = stderr.stat().st_size if stderr.exists() else 0
         serial_before_resume = serial.stat().st_size if serial.exists() else 0
         restore_seconds = time.monotonic() - started
+        interactive_ready = None
         if not args.leave_paused:
             hmp.command("cont")
+            if args.interactive and env.get("DARWIN_INPUT_UART", "0") != "0":
+                ready_deadline = time.monotonic() + args.ready_timeout
+                last_status = None
+                while time.monotonic() < ready_deadline:
+                    if proc.poll() is not None:
+                        raise RuntimeError(
+                            f"restored QEMU exited with status {proc.returncode}"
+                        )
+                    try:
+                        last_status = json.loads(input_status.read_text())
+                    except (OSError, ValueError):
+                        last_status = None
+                    if (last_status and last_status.get("guest_state") == "R" and
+                            last_status.get("inflight") == 0 and
+                            last_status.get("queue_len") == 0 and
+                            last_status.get("wire_pending", 0) == 0 and
+                            last_status.get("wheel_pending", 0) == 0 and
+                            not last_status.get("contact_sent", False)):
+                        interactive_ready = {
+                            key: last_status.get(key) for key in (
+                                "epoch", "guest_pid", "guest_state", "inflight",
+                                "queue_len", "wire_pending", "contact_sent",
+                                "timeouts", "dispatch_failed",
+                            )
+                        }
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise RuntimeError(
+                        "native input helper did not become idle after restore: "
+                        f"{last_status}"
+                    )
+            if args.interactive:
+                ready_frame = out / "ready.png"
+                answer = hmp.command(f"screendump {ready_frame} -f png")
+                if not ready_frame.is_file() or ready_frame.stat().st_size < 1024:
+                    raise RuntimeError(f"interactive ready screendump failed: {answer}")
         peak_rss_kib = 0
         observation_started = time.monotonic()
         observe_deadline = time.monotonic() + args.observe_seconds
@@ -310,6 +402,7 @@ def main() -> int:
             },
             "qemu_pid": proc.pid,
             "monitor": str(monitor),
+            "qmp": str(qmp) if args.leave_paused or args.interactive else None,
             "uart": str(uart),
             "disk_child": str(disk),
             "source_pc": manifest["source_pc"],
@@ -328,6 +421,13 @@ def main() -> int:
             "left_paused": args.leave_paused,
             "observation_seconds_actual": round(observed_seconds, 3),
             "observation_ended_on_panic": panic_seen,
+            "interactive": args.interactive,
+            "interactive_ready": interactive_ready,
+            "ready_frame": ({
+                "path": str(out / "ready.png"),
+                "sha256": sha256(out / "ready.png"),
+            } if args.interactive else None),
+            "vnc_port": args.vnc_port,
             "qemu_alive": pid_alive(proc.pid),
             "serial_bytes_before_resume": serial_before_resume,
             "serial_bytes_after_resume": len(serial_bytes),

@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from pathlib import Path
@@ -14,7 +15,8 @@ from pathlib import Path
 from checkpoint_common import (
     HMP, SAFE_TAG, atomic_json, parse_migration_status, parse_pc, pid_alive,
     process_argv_env, qcow2_backing_chain, qemu_input_files,
-    serial_hex_clock_bounds, sha256, wait_pid_exit, selected_cpu_index,
+    replace_drive_file, serial_hex_clock_bounds, sha256, wait_pid_exit,
+    selected_cpu_index,
 )
 
 
@@ -85,6 +87,28 @@ def main() -> int:
     if not qemu_img.is_file() or not os.access(qemu_img, os.X_OK):
         raise RuntimeError(f"build the checkpoint disk verifier first: {qemu_img}")
 
+    # Validate a requested guest boundary before pausing the interactive VM.
+    # A typo in a marker must not strand a healthy session in PAUSED state or
+    # consume its output directory.
+    serial_text = args.serial_log.read_text(errors="replace")
+    _, source_clock_last = serial_hex_clock_bounds(serial_text)
+    marker = None
+    if args.marker_regex:
+        matches = list(re.finditer(args.marker_regex, serial_text, re.MULTILINE))
+        if not matches:
+            raise RuntimeError("the requested guest marker is absent from the serial log")
+        match = matches[-1]
+        line_start = serial_text.rfind("\n", 0, match.start()) + 1
+        line_end = serial_text.find("\n", match.end())
+        if line_end < 0:
+            line_end = len(serial_text)
+        marker = {
+            "regex": args.marker_regex,
+            "match": match.group(0),
+            "line": serial_text[line_start:line_end],
+            "character_offset": match.start(),
+        }
+
     # Do not consume the tag with an empty directory when ownership or argv
     # validation fails.  From here onward the exact source has been verified.
     out.mkdir(parents=True, exist_ok=False, mode=0o700)
@@ -111,24 +135,7 @@ def main() -> int:
     (evidence / "cpus.txt").write_text(cpus + "\n")
     (evidence / "block.txt").write_text(hmp.command("info block") + "\n")
 
-    serial_text = args.serial_log.read_text(errors="replace")
-    _, source_clock_last = serial_hex_clock_bounds(serial_text)
-    marker = None
-    if args.marker_regex:
-        matches = list(re.finditer(args.marker_regex, serial_text, re.MULTILINE))
-        if not matches:
-            raise RuntimeError("the requested guest marker is absent from the serial log")
-        match = matches[-1]
-        line_start = serial_text.rfind("\n", 0, match.start()) + 1
-        line_end = serial_text.find("\n", match.end())
-        if line_end < 0:
-            line_end = len(serial_text)
-        marker = {
-            "regex": args.marker_regex,
-            "match": match.group(0),
-            "line": serial_text[line_start:line_end],
-            "character_offset": match.start(),
-        }
+    if marker:
         (evidence / "guest-marker.txt").write_text(
             marker["line"] + "\n", encoding="utf-8"
         )
@@ -169,6 +176,27 @@ def main() -> int:
     # Freeze the disk generation immediately after the verified source exits,
     # before any analysis or hashing that could itself fail.
     disk.chmod(0o444)
+    # A checkpoint whose top disk remains in /tmp is not durable: clearing the
+    # runtime directory destroys the disk generation paired with vmstate.bin.
+    # QEMU is gone, so retain that sealed overlay beside the manifest and make
+    # the replay argv refer to the retained location.
+    source_disk = disk
+    retained_disk = out / "disk.qcow2"
+    if source_disk != retained_disk.resolve():
+        shutil.move(str(source_disk), retained_disk)
+    disk = retained_disk.resolve()
+    checkpoint_argv = []
+    index = 0
+    while index < len(argv):
+        if argv[index] == "-drive" and index + 1 < len(argv):
+            checkpoint_argv += [
+                argv[index],
+                replace_drive_file(argv[index + 1], source_disk, disk),
+            ]
+            index += 2
+        else:
+            checkpoint_argv.append(argv[index])
+            index += 1
 
     analyzer = qemu.parent.parent / "scripts" / "analyze-migration.py"
     if analyzer.is_file():
@@ -196,6 +224,8 @@ def main() -> int:
         key: value for key, value in environ.items()
         if key.startswith("DARWIN_") or key.startswith("GXFSTAT_")
     }
+    retained_serial = evidence / "source-serial.log"
+    shutil.copy2(args.serial_log, retained_serial)
     total_seconds = time.monotonic() - started
     manifest = {
         "format": "darwin-vm-external-checkpoint-v1",
@@ -207,11 +237,12 @@ def main() -> int:
         "guest_marker": marker,
         "source_serial_clock_last": source_clock_last,
         "source_serial_log": {
-            "path": str(args.serial_log.resolve()),
-            "bytes": args.serial_log.stat().st_size,
-            "sha256": sha256(args.serial_log),
+            "path": str(retained_serial),
+            "bytes": retained_serial.stat().st_size,
+            "sha256": sha256(retained_serial),
         },
-        "qemu_argv": argv,
+        "qemu_argv": checkpoint_argv,
+        "source_qemu_argv": argv,
         "qemu_env": filtered_env,
         "qemu_inputs": inputs,
         "vmstate": {

@@ -53,6 +53,15 @@ class CompletionTests(unittest.TestCase):
             after[key] = 1
             self.assertFalse(native.successful(native.outcome(before, after)))
 
+    def test_periodic_pings_are_not_reported_as_user_input(self):
+        before = self.baseline()
+        after = dict(before, sent=5, acked=5, pings=3, dispatched=2)
+        result = native.outcome(before, after)
+        self.assertEqual(result['pings'], 3)
+        self.assertEqual(result['records_sent'], 2)
+        self.assertEqual(result['records_acked'], 2)
+        self.assertTrue(native.successful(result))
+
     def test_bad_coordinates_rejected_before_sending(self):
         for value in ('-1', '32768'):
             with self.assertRaises(ValueError):
@@ -60,6 +69,12 @@ class CompletionTests(unittest.TestCase):
 
 
 class WakeTests(unittest.TestCase):
+    def test_power_uses_restore_stderr_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory)/'qemu.stderr.log'
+            log.write_text('iomfb: A484 display power 0 -> 1 (flags 00)\n')
+            self.assertTrue(native.DisplayPower(directory).poll())
+
     def test_power_requires_complete_A484_not_a_frame_or_ack(self):
         with tempfile.TemporaryDirectory() as directory:
             log = Path(directory)/'stderr.log'
