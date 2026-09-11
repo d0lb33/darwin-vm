@@ -9,6 +9,7 @@ import argparse
 import collections
 import json
 import os
+import re
 from pathlib import Path
 import signal
 import subprocess
@@ -49,7 +50,9 @@ def main():
     p.add_argument('--seconds', type=int, default=180)
     p.add_argument('--keep-paused', action='store_true')
     p.add_argument('--stop-on', help='stop after this literal serial/stderr milestone')
+    p.add_argument('--trace-line', help='record timestamps for matching log lines (diagnostic runs)')
     args = p.parse_args()
+    trace_line = re.compile(args.trace_line) if args.trace_line else None
     if not SAFE_TAG.fullmatch(args.tag) or len(args.tag) > 40:
         p.error('invalid tag')
     if not 1 <= args.seconds <= 600:
@@ -114,6 +117,10 @@ def main():
                     if b'TXM [Error]' in raw:
                         continue
                     line = raw.decode(errors='replace')
+                    if trace_line and trace_line.search(line):
+                        event = dict(seconds=round(elapsed, 3), file=name, trace=True, line=line)
+                        report['events'].append(event)
+                        print(json.dumps(event), flush=True)
                     if 'iomfb: presented ' in line:
                         counts['presentations'] += 1
                     if 'D594 completed' in line:
@@ -158,7 +165,7 @@ def main():
                 hmp = HMP(out / 'monitor.sock', timeout=10)
                 hmp.command('stop')
                 for name, request in [('status', 'info status'), ('cpus', 'info cpus'),
-                                      ('registers', 'info registers')]:
+                                      ('registers', 'info registers'), ('jit', 'info jit')]:
                     (out / f'{name}.txt').write_text(hmp.command(request) + '\n')
                 hmp.command(f'screendump {out}/final.png -f png')
         finally:

@@ -39,11 +39,17 @@ def hmp(path, command, timeout=30):
     s.connect(str(path))
     buf = b""
     while not buf.rstrip().endswith(b"(qemu)"):
-        buf += s.recv(65536)
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
     s.sendall(command.encode() + b"\n")
     buf = b""
     while not buf.rstrip().endswith(b"(qemu)"):
-        buf += s.recv(65536)
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        buf += chunk
     s.close()
     out = []
     for line in buf.decode(errors="replace").replace("\r", "").split("\n"):
