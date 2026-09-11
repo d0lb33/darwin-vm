@@ -343,3 +343,37 @@ experiments were reverted; the restored-source rebuild completed successfully
 (`build-restored-source.log`). Timed results above use the separately pinned
 accepted fast binary. No experimental TCR optimization is included in this
 checkpoint.
+
+
+## Bounded range jump-cache invalidation experiment
+
+Question: does the epoch jump cache make full hint invalidation cheaper than
+page-by-page bucket clearing during large TLB range invalidations?
+Static evidence: `accel/tcg/cputlb.c:tlb_flush_range_by_mmuidx_async_0` retains
+the old `TARGET_PAGE_SIZE * TB_JMP_CACHE_SIZE` crossover; each
+`tb_jmp_cache_clear_page` clears `TB_JMP_PAGE_SIZE` atomic pointers.
+`translate-all.c:tcg_flush_jmp_cache` now advances an epoch except at wrap.
+The candidate uses the epoch path at 16 pages while retaining every TLB flush,
+cross-CPU work item and synchronization operation. Invalidating additional
+jump-cache hints is conservative, but the resulting refill cost may lose.
+
+Acceptance: same direct-HID built-in disk/firmware/topology, real visible first
+frame, no panic, then repeat and input checks if the initial timing improves
+meaningfully. Stop at 180 seconds without presentation, any panic, or no useful
+initial speedup; do not retain a performance change merely because it boots.
+The source patch and build log are preserved with `range-epoch16/` artifacts.
+
+
+Result: **rejected for no demonstrated performance benefit**.
+`TCG_RANGE16_0911A` reached early userspace at 8.184 s, input-ready at
+28.146 s and first presentation at **100.713 s**, with zero reported panics.
+`range-epoch16-a/final.png` was visually checked and contains the lock screen.
+The cross-cluster machine smoke passed `(1,1,1,40000,1,1,24589)` before boot
+(`range-epoch16-smp.log`). This is no useful improvement over the selected
+control's 98.278–100.180 s range. One run does not prove a statistically
+significant regression or identify refill cost as the cause. Per the stop
+condition, no additional boot was spent on this threshold and the source was
+restored. The owned test VM exited and all small evidence was copied outside
+`/tmp`. The next investigation should measure synchronization frequency and
+queue depth before attempting to batch exclusive work; this experiment did
+not alter or establish the safety of that contract.
