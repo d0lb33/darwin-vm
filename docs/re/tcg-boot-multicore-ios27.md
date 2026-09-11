@@ -423,3 +423,48 @@ requires identifying the actual issuing operation and its architectural
 completion boundary, not relaxing the existing handshake. Source, executable,
 manifest and summary are under `work-probe/`; raw evidence is in
 `work-probe-b/`. The owned VM exited normally after collection.
+
+
+## TLBI issuing-operation diagnostic
+
+Question: which guest TLB-maintenance operations generate the large exclusive
+work count? The temporary `DARWIN_TLBI_PROBE` patch instruments 42 write entry
+points in `target/arm/tcg/tlb-insns.c`, preserving their behavior. Per-thread,
+per-register counters log item 1 and each 4096 items, with a sampled PC and
+operand. There are 128 slots per thread and an explicit overflow error.
+`tools/re/tlbi_report.py` rejects counter resets and overflow; totals exclude
+unreported tails. Sampled PCs are not a full precise instruction trace.
+
+Stop on first presentation, panic or 180 seconds. Preserve the candidate and
+patch in `tlbi-probe/`; this instrumented timing is ineligible as a speed
+comparison. Use operation counts and source call paths to select the next
+contract investigation; counts alone do not measure operation cost.
+
+
+`TCG_TLBI_0911A` completed first presentation at 102.719 s with zero reported
+panics (diagnostic timing only). Reported lower-bound counts: VALE1ISNXS
+**425,984**, VAALE1ISNXS **212,992**, RVALE1ISNXS **16,386**; remaining names
+have only small sampled counts. Periodic sampling cannot exclude substantial
+sub-4096 tails for a rare name on each CPU. There was no counter-slot overflow.
+The sampled runtime PCs 0xfffffff0070d4e84 and 0xfffffff0070d4dcc correspond
+to `tlbi vale1isnxs, x9` and `tlbi vaale1isnxs, x9` at linked SPTM addresses
+0xfffffff0270d4e84 and 0xfffffff0270d4dcc. Disassembly is preserved in
+`tlbi-probe/sptm-issuing-loops.txt` and `sptm-issuing-tail.txt`. These are
+operation-dispatch sites; this alone does not establish a batching loop or
+where every caller completes its maintenance sequence.
+
+Both names use `tlbi_aa64_vae1is_write` in QEMU, which computes the address-bit
+mask and invokes the synchronized page-bits API. `tlbbits_for_regime` returns
+56 with TBI, 64 otherwise. For masked single pages,
+`tlb_flush_range_by_mmuidx_all_cpus_synced` currently copies one parameter
+allocation per CPU in addition to each queued work item. This suggests a
+narrow allocation optimization: pack eligible page parameters into the
+existing 64-bit work payload, preserving all callbacks and synchronization.
+Runtime frequency of eligible masked/canonical addresses is still unmeasured;
+this trace establishes the instruction family, not that all calls allocate.
+Any implementation must round-trip the complete MMU mask and address, fall
+back for ineligible parameters, and demonstrate a boot benefit before being
+retained. No guest, SPTM or TXM change is proposed.
+
+The diagnostic VM exited and small evidence is in `tlbi-probe-a/`. The
+instrumentation was removed from source after preserving its exact patch.
