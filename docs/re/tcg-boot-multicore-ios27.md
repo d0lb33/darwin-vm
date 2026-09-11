@@ -377,3 +377,49 @@ restored. The owned test VM exited and all small evidence was copied outside
 `/tmp`. The next investigation should measure synchronization frequency and
 queue depth before attempting to batch exclusive work; this experiment did
 not alter or establish the safety of that contract.
+
+
+## Exclusive-work diagnostic
+
+Question: is there enough adjacent exclusive CPU work to amortize repeated
+stop-the-world handshakes without changing queue ordering? The temporary
+`DVM_CPU_WORK_PROBE` instrumentation in `cpu-common.c` preserves the existing
+BQL unlock, `start_exclusive`, callback, `end_exclusive`, BQL lock sequence.
+It measures those phases separately and, under the existing queue mutex,
+counts an immediately exclusive successor and maximum remaining depth (capped
+at 64). Per-thread counters log at item 1 and each 1024 items. No shared
+counter lock is introduced. `work-probe/source.patch` and its pinned candidate
+preserve the exact instrumented source and executable.
+
+Expected evidence: per-CPU cumulative counts and phase times from one isolated
+fresh boot, analyzed by `tools/re/cpu_work_report.py`. Stop on first presentation,
+panic or 180-second deadline. Wait times overlap across CPUs, callback timing
+includes `end_exclusive`, and unreported tails are excluded. This diagnostic
+run is not eligible for boot-performance acceptance. If adjacent exclusive
+items are rare, do not implement general queue batching on that hypothesis.
+
+
+`TCG_WORK_0911A` was excluded and stopped after detecting that the boot tool
+filtered out `DVM_CPU_WORK_PROBE`; its saved launch environment confirms this.
+A temporary explicit allowance in `warm_boot_probe.py` enabled run B. Both
+instrumentation patches are preserved in `work-probe/`; production source and
+launcher filtering were restored afterward.
+
+`TCG_WORK_0911B` completed first presentation at 101.368 s, zero reported
+panics. This is instrumented diagnostic timing, not a candidate speed result.
+Its 694 periodic samples cover **704,512 exclusive items**, with **zero
+immediately exclusive successors** across all six CPUs. Maximum remaining
+queue depths were 2, 2, 2, 3, 2, 3; these items were not adjacent exclusive
+work. Summed phase times: **8.950666 s** acquiring exclusivity, **3.839376 s**
+callback plus ending exclusivity, **0.802921 s** reacquiring BQL. Largest
+single observed exclusivity acquisition was 48.833 ms on CPU2. Summed waits
+can overlap and omit time other CPUs spend stalled, so they are not an
+estimate of achievable boot speedup.
+
+Conclusion: no demonstrated opportunity for batching adjacent exclusive queue
+items. Do not implement it on the prior profile hypothesis. The many
+synchronization points remain a possible cost, but reducing their number
+requires identifying the actual issuing operation and its architectural
+completion boundary, not relaxing the existing handshake. Source, executable,
+manifest and summary are under `work-probe/`; raw evidence is in
+`work-probe-b/`. The owned VM exited normally after collection.
