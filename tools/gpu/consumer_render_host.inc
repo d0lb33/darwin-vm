@@ -297,7 +297,7 @@ static NSDictionary *RenderSubmit(DVMHost *host,uint64_t seq,NSDictionary *r) {
 }
 static NSDictionary *WriteRenderBuffer(DVMHost *host,uint64_t seq,NSDictionary *r) {
     DVMEntry *b=Entry(host,r[@"buffer"],@"buffer");uint64_t offset;NSData *data=DVMBPayload(r[@"data"]);
-    if(!b||!Number(r[@"offset"],&offset)||!data.length||data.length>32768||offset>b.textureBytes||data.length>b.textureBytes-offset)return HostError(seq,EINVAL,@"buffer chunk bounds");
+    if(!b||!Number(r[@"offset"],&offset)||!data.length||data.length>DVM_STAGING_BYTES||offset>b.textureBytes||data.length>b.textureBytes-offset)return HostError(seq,EINVAL,@"buffer chunk bounds");
     memcpy((uint8_t *)[(id<MTLBuffer>)b.object contents]+offset,data.bytes,data.length);
     return @{@"seq":@(seq),@"ok":@YES};
 }

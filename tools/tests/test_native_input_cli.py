@@ -3,6 +3,7 @@ import importlib.util
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
+import tempfile
 from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location(
@@ -56,6 +57,44 @@ class CompletionTests(unittest.TestCase):
         for value in ('-1', '32768'):
             with self.assertRaises(ValueError):
                 native.norm(value, 1179, False)
+
+
+class WakeTests(unittest.TestCase):
+    def test_power_requires_complete_A484_not_a_frame_or_ack(self):
+        with tempfile.TemporaryDirectory() as directory:
+            log = Path(directory)/'stderr.log'
+            log.write_text('iomfb: A484 display power 1 -> 0 (flags 00)\n')
+            power = native.DisplayPower(directory)
+            self.assertFalse(power.poll())
+            with log.open('a') as f:
+                f.write('iomfb: presented frame\niomfb: A484 display power 0 -> 1 ')
+            self.assertFalse(power.poll())
+            with log.open('a') as f:
+                f.write('(flags 00)\n')
+            self.assertTrue(power.poll())
+
+    def test_wake_is_idempotent_and_unknown_does_not_toggle(self):
+        args = SimpleNamespace(hold_ms=80, wake_timeout=.1)
+        with patch.object(native, 'DisplayPower') as power, patch.object(native, 'key_press') as press:
+            power.return_value.poll.return_value = True
+            self.assertTrue(native.wake_display(args, Path('/unused'))['already_on'])
+            press.assert_not_called()
+            power.return_value.poll.return_value = None
+            with self.assertRaisesRegex(RuntimeError, 'power unknown'):
+                native.wake_display(args, Path('/unused'))
+            press.assert_not_called()
+
+    def test_ack_without_power_on_times_out_without_retry(self):
+        args = SimpleNamespace(hold_ms=80, wake_timeout=0)
+        result = dict(records_sent=2, records_acked=2, ack_failed=0, ack_not_ready=0,
+                      ack_rejected=0, timeouts=0, dispatch_failed=0, overflow_or_not_ready_drops=0)
+        with patch.object(native, 'DisplayPower') as power, \
+             patch.object(native, 'key_press', return_value=result) as press, \
+             patch.object(native, 'ready', return_value={'epoch':1}):
+            power.return_value.poll.return_value = False
+            with self.assertRaisesRegex(TimeoutError, 'A484 display ON'):
+                native.wake_display(args, Path('/unused'))
+            self.assertEqual(press.call_count, 1)
 
 
 if __name__ == '__main__':

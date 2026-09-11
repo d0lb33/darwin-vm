@@ -18,6 +18,8 @@ import argparse
 import hashlib
 import json
 import socket
+import re
+from types import SimpleNamespace
 import sys
 import time
 from pathlib import Path
@@ -153,6 +155,66 @@ def move(qmp, x, y):
     ])
 
 
+class DisplayPower:
+    """Observe the guest's A484 power contract, independently of HID ACKs.
+
+    Read incrementally: re-reading a multi-megabyte compositor log per poll
+    would perturb the very interaction this tool is measuring.
+    """
+    def __init__(self, run):
+        self.path = Path(run) / 'stderr.log'
+        self.offset = 0
+        self.partial = b''
+        self.on = None
+
+    def poll(self):
+        with self.path.open('rb') as stream:
+            if stream.seek(0, 2) < self.offset:
+                raise RuntimeError('display log was replaced/truncated')
+            stream.seek(self.offset)
+            data = self.partial + stream.read()
+            self.offset = stream.tell()
+        lines = data.split(b'\n')
+        self.partial = lines.pop()
+        for line in lines:
+            match = re.search(rb'iomfb: A484 display power \d+ -> (\d+) ', line)
+            if match:
+                value = int(match[1])
+                if value not in (0, 1):
+                    raise RuntimeError(f'unsupported display power state {value}')
+                self.on = bool(value)
+        return self.on
+
+
+def wake_display(args, run):
+    """Wake once if off; do not mistake that wake press for Home/unlock.
+
+    No UI action is retried and no active contact is replayed. A484 ON is a
+    power acknowledgement, not evidence of unlock or a completed animation.
+    """
+    power = DisplayPower(run)
+    initial = power.poll()
+    if initial is None:
+        raise RuntimeError('display power unknown: no A484 evidence; refusing a blind wake toggle')
+    if initial:
+        return dict(ok=True, already_on=True, display_power_on=True)
+    options = SimpleNamespace(**vars(args))
+    options.frames = None
+    result = key_press(options, run, 'f5', args.hold_ms)
+    if not successful(result):
+        raise RuntimeError(f'wake HID dispatch failed: {result}')
+    identity = ready(args, Path(run) / 'input-status.json')
+    deadline = time.monotonic() + args.wake_timeout
+    while time.monotonic() < deadline:
+        status = read_status(Path(run) / 'input-status.json')
+        if not status or status['epoch'] != identity['epoch'] or status['guest_state'] != 'R':
+            raise RuntimeError('input service changed while waiting for display wake')
+        if power.poll():
+            return dict(ok=True, already_on=False, display_power_on=True, input=result)
+        time.sleep(.05)
+    raise TimeoutError('Home dispatched but A484 display ON was not observed; no action replayed')
+
+
 def screendump(hmp, path):
     hmp.command(f'screendump {json.dumps(str(path))} -f png')
     data = Path(path).read_bytes()
@@ -274,6 +336,8 @@ def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument('--run', type=Path, required=True,
                    help='run directory holding qmp.sock, monitor.sock and input-status.json')
+    p.add_argument('--wake', action='store_true', help='wake an off display and await A484 ON before this action')
+    p.add_argument('--wake-timeout', type=float, default=10)
     p.add_argument('--px', action='store_true', help='coordinates are framebuffer pixels')
     p.add_argument('--hold-ms', type=int, default=80, help='tap hold / swipe duration')
     p.add_argument('--steps', type=int, default=12, help='swipe motion samples')
@@ -291,6 +355,7 @@ def main():
     sub.add_parser('power', help='press F6 (Power)')
     s = sub.add_parser('wheel'); s.add_argument('x'); s.add_argument('y')
     s.add_argument('notches', type=int, help='positive = wheel up (content scrolls up)')
+    sub.add_parser('wake', help='idempotent display wake; does not claim unlock')
     sub.add_parser('status')
     s = sub.add_parser('wait-ready'); s.add_argument('--timeout', type=float, default=600)
     s = sub.add_parser('frame'); s.add_argument('path')
@@ -309,8 +374,21 @@ def main():
     if args.cmd == 'frame':
         print(json.dumps(dict(path=args.path, sha256=screendump(HMP(run / 'monitor.sock'), args.path))))
         return
+    if args.wake and args.cmd not in ('home', 'tap', 'swipe', 'wheel'):
+        p.error('--wake applies to home, tap, swipe or wheel')
+    if args.cmd == 'wake' or args.wake:
+        try:
+            wake = wake_display(args, run)
+        except (TimeoutError, RuntimeError, OSError, ValueError) as error:
+            print(json.dumps(dict(command=args.cmd, ok=False, error=str(error))))
+            sys.exit(1)
+        if args.cmd == 'wake':
+            print(json.dumps(wake, indent=1))
+            return
+    else:
+        wake = None
     if args.cmd in ('home', 'power'):
-        result = dict(command=args.cmd, run=str(run), unix=time.time())
+        result = dict(command=args.cmd, run=str(run), unix=time.time(), wake=wake)
         try:
             result.update(key_press(args, run, 'f5' if args.cmd == 'home' else 'f6',
                                     args.hold_ms, button=getattr(args, 'button', None)))
@@ -323,7 +401,7 @@ def main():
                 log.write(json.dumps(result) + '\n')
         sys.exit(0 if result.get('ok') else 1)
     if args.cmd == 'wheel':
-        result = dict(command='wheel', notches=args.notches, run=str(run), unix=time.time())
+        result = dict(command='wheel', notches=args.notches, run=str(run), unix=time.time(), wake=wake)
         try:
             result.update(wheel(args, run, norm(args.x, FB_W, args.px), norm(args.y, FB_H, args.px),
                                 args.notches))
@@ -344,7 +422,7 @@ def main():
         points = [(round(x1 + (x2 - x1) * i / (n - 1)), round(y1 + (y2 - y1) * i / (n - 1)))
                   for i in range(n)]
     result = dict(command=args.cmd, points=points, hold_ms=args.hold_ms,
-                  run=str(run), unix=time.time())
+                  run=str(run), unix=time.time(), wake=wake)
     try:
         result.update(gesture(args, run, points, args.hold_ms))
         # Pings sent between the gesture's records are acknowledged too.

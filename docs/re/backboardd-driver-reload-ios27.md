@@ -391,6 +391,10 @@ after the replacement that matters.
   a first unmistakable transition 1.405 s after input with a 648 ms frame gap
   during icon movement. Nothing in this work measures or improves it, and the
   Home checks above prove dispatch, ack and a later frame -- not responsiveness.
+  Measured on 2026-09-07 in `gpu-home-sluggishness-ios27.md`: host Metal work
+  is under 3% of wall time; the guest-side JSON/base64/bit-serial-CRC encoding
+  and the session daemon's O(n) loop are the driver-attributable costs, and
+  the rest is compositor/SpringBoard code under TCG.
 * **Retirement has only ever been observed succeeding.** `quarantined=0` in
   every cycle. The quarantine path, the reuse stop and the ownership failures
   are covered by host regressions, not by a guest run that actually failed to

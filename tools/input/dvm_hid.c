@@ -52,7 +52,10 @@
 #include <time.h>
 #include <unistd.h>
 
-#define VERSION 15
+#define VERSION 16
+#ifndef DVM_HID_TOUCH_BUILTIN
+#define DVM_HID_TOUCH_BUILTIN 0
+#endif
 #define RECOVERY_ATTEMPTS 3
 #define RECOVERY_TIMEOUT_SECONDS 20
 
@@ -302,7 +305,7 @@ static bool initialize_hid(void) {
                            cfstr("ProductID"), cfstr("PrimaryUsagePage"), cfstr("PrimaryUsage"),
                            cfstr("DeviceUsagePairs"), cfstr("DisplayIntegrated"),
                            cfstr("Product")};
-        const void *v[] = {cfstr("<main>"), cfstr("<main>"), kBoolFalse, kBoolTrue,
+        const void *v[] = {cfstr("<main>"), cfstr("<main>"), DVM_HID_TOUCH_BUILTIN ? kBoolTrue : kBoolFalse, kBoolTrue,
                            cfstr("Recap"), cfnum(0x05ac), cfnum(0xd001), cfnum(0x0d), cfnum(0x04),
                            pairs, kBoolTrue, cfstr("dvm-hid touch")};
         touch_service.props = make_dict(k, v, 12);
@@ -878,7 +881,7 @@ int main(int argc, char **argv) {
     /* Same lock as the v6 helper so the two can never both read the console. */
     int lock_fd = open("/var/run/dvm-input.lock", O_CREAT | O_RDWR | O_CLOEXEC, 0600);
     if (lock_fd < 0 || flock(lock_fd, LOCK_EX | LOCK_NB)) { perror("dvm-hid singleton lock"); return 1; }
-    say("DVM_HID_START version=%d pid=%d\n", VERSION, getpid());
+    say("DVM_HID_START version=%d pid=%d touch_builtin=%d\n", VERSION, getpid(), DVM_HID_TOUCH_BUILTIN);
     if (!freopen("/dev/console", "r", stdin)) { perror("dvm-hid open console"); return 1; }
     install_signal_handlers();
     sigset_t signals;

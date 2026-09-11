@@ -6,6 +6,7 @@ from build_system_bootstrap import sha
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('build',type=Path);p.add_argument('cache',type=Path);p.add_argument('tc',type=Path);p.add_argument('out',type=Path)
+    p.add_argument('--poster',action='store_true',help='also install the patched MercuryPosterExtension executable from the build')
     a=p.parse_args();a.out.mkdir(exist_ok=False);repo=Path(__file__).resolve().parents[2]
     cache=plistlib.loads(a.cache.read_bytes());jobs=cache['LaunchDaemons']
     helper='/System/Library/LaunchDaemons/org.darwin-vm.gpu-load.plist'
@@ -45,6 +46,18 @@ test "$(cksum < /mnt1/System/Library/xpc/launchd.plist)" = "$(cksum < /libexec/c
 sync
 echo GPU_LOAD_INSTALLED
 '''
+    if a.poster:
+        appex='/mnt1/System/Library/ExtensionKit/Extensions/MercuryPosterExtension.appex/MercuryPosterExtension'
+        poster='\n'.join([
+            'test "$(cksum < %s)" = "$(cksum < /libexec/MercuryPosterExtension.before)"'%appex,
+            'test ! -e /mnt1/usr/libexec/MercuryPosterExtension.dvm-software',
+            # Keep the backup outside the appex so its sealed resources stay untouched.
+            'cp %s /mnt1/usr/libexec/MercuryPosterExtension.dvm-software'%appex,
+            'cp /libexec/MercuryPosterExtension %s'%appex,
+            'chmod 755 %s'%appex,'chown 0:0 %s'%appex,
+            'test "$(cksum < %s)" = "$(cksum < /libexec/MercuryPosterExtension)"'%appex,
+            'sync','echo GPU_LOAD_INSTALLED'])
+        script=script.replace('sync\necho GPU_LOAD_INSTALLED',poster)
     if runtime:
         # Existing kernel path gate is exact. Only this disposable Data child
         # grants mobile ownership of the staging directory; baseline unchanged.
@@ -69,6 +82,8 @@ echo GPU_LOAD_INSTALLED
     try:
         d=mount/'libexec'
         for n in ('backboardd','backboardd.before'):shutil.copyfile(a.build/n,d/n)
+        if a.poster:
+            for n in ('MercuryPosterExtension','MercuryPosterExtension.before'):shutil.copyfile(a.build/n,d/n)
         shutil.copytree(a.build/'DVMMetal.bundle',d/'DVMMetal.bundle')
         shutil.copyfile(a.cache,d/'cache.before');shutil.copyfile(a.out/'launchd.plist',d/'cache.after')
         shutil.copyfile(a.out/'gpu-load-install.sh',d/'gpu-load-install.sh')
@@ -77,5 +92,5 @@ echo GPU_LOAD_INSTALLED
     subprocess.run(['python3',str(repo/'tools/rootfs/merge_tc.py'),str(a.out/'system.tc'),str(a.tc),str(a.build/'helper.tc')],check=True)
     (a.out/'provenance.json').write_text(json.dumps(dict(build=str(a.build.resolve()),build_sha256=sha(a.build/'build.json'),
         before_cache_sha256=sha(a.cache),after_cache_sha256=sha(a.out/'launchd.plist'),
-        scope='backboardd-only boot registration; runner disabled; original software executable/cache saved in disposable child'),indent=2)+'\n')
+        scope='backboardd-only boot registration; runner disabled; original software executable/cache saved in disposable child'+('; poster extension registration' if a.poster else '')),indent=2)+'\n')
 if __name__=='__main__':main()

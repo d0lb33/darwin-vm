@@ -17,7 +17,8 @@
 #include <string.h>
 
 enum {
-    kMaxFrame = 2 * 1024 * 1024,
+    // A staged 1.875 MiB payload arrives from the peer as base64 inside JSON.
+    kMaxFrame = 4 * 1024 * 1024,
     kMaxObjects = DVM_OBJECTS,
     kMaxTextures = DVM_ORDINARY_RESOURCE_BYTES,
     kMaxDispatches = 32,
@@ -388,7 +389,7 @@ static NSDictionary *TextureChunk(DVMHost *host,uint64_t seq,NSDictionary *r){
         e.textureUpload=nil;return @{@"seq":@(seq),@"ok":@YES};
     }
     NSData *data=DVMBPayload(r[@"data"]);
-    if(!data.length||data.length>DVM_TEXTURE_TRANSFER_CHUNK||!Number(r[@"offset"],&offset)||offset>e.textureBytes||data.length>e.textureBytes-offset)
+    if(!data.length||data.length>DVM_STAGING_BYTES||!Number(r[@"offset"],&offset)||offset>e.textureBytes||data.length>e.textureBytes-offset)
         return HostError(seq,EINVAL,@"texture upload chunk extent");
     if(!token){
         if(offset)return HostError(seq,EINVAL,@"texture upload must start at zero");

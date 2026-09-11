@@ -439,6 +439,25 @@ class HostTests(unittest.TestCase):
             self.assertEqual(self.rpc('stats')['live']['ordinaryLogicalBytes'],0)
             self.assertEqual(self.rpc('stats')['live']['objects'],0)
 
+    def test_staged_size_texture_chunk_and_buffer_span(self):
+        """Contract 29: one request may carry a whole icon or dirty buffer span."""
+        encode=lambda b:base64.b64encode(b).decode()
+        contract=self.rpc('capabilities')['contract']
+        self.assertEqual(contract['stagedTransferBytes'],0x1E0000);self.assertEqual(contract['stagedTransferVersion'],1)
+        handle=self.rpc('texture',width=204,height=204,format=115,usage=1)['handle']
+        data=bytes(i%251 for i in range(204*204*8))
+        r=self.rpc('writeTextureChunk',texture=handle,token=0,offset=0,data=encode(data))
+        self.assertTrue(r['ok'],r);self.assertTrue(r['complete']);self.assertEqual(r['accepted'],len(data))
+        actual=bytearray()
+        for offset in range(0,len(data),32768):
+            part=self.rpc('read',texture=handle,offset=offset,length=min(32768,len(data)-offset))
+            self.assertTrue(part['ok'],part);actual.extend(base64.b64decode(part['data']))
+        self.assertEqual(actual,data)
+        b=self.rpc('buffer',length=65536)['handle'];span=bytes([7])*65536
+        self.assertTrue(self.rpc('writeRenderBuffer',buffer=b,offset=0,data=encode(span))['ok'])
+        self.assertFalse(self.rpc('writeRenderBuffer',buffer=b,offset=1,data=encode(span))['ok'])
+        self.assertEqual(base64.b64decode(self.rpc('read',buffer=b)['data']),span)
+        self.assertFalse(self.rpc('writeTextureChunk',texture=handle,token=0,offset=0,data=encode(bytes(0x1E0001)))['ok'])
     def test_texture_chunks_bound_replies_and_commit_atomically(self):
         encoded=lambda data:base64.b64encode(data).decode()
         handle=self.rpc('texture',width=320,height=480,format=80,usage=5)['handle']
@@ -500,7 +519,9 @@ class HostTests(unittest.TestCase):
             self.assertEqual(self.rpc('stats')['submissions'],0)
             self.assertEqual(base64.b64decode(self.rpc('read',buffer=partial)['data']),bytes(96))
     def test_oversized_frame(self):
-        self.p.stdin.write(struct.pack('<I',2*1024*1024+1));self.p.stdin.flush()
+        # kMaxFrame is 4 MiB since contract 29: a staged 1.875 MiB payload
+        # reaches the worker as base64 inside one JSON frame.
+        self.p.stdin.write(struct.pack('<I',4*1024*1024+1));self.p.stdin.flush()
         self.assertEqual(self.p.wait(timeout=5),3)
     def test_depth_state_descriptor_validation_and_retirement(self):
         good=dict(compare=7,write=False,front=[],back=[7,0,0,0,0xffffffff,0xffffffff])

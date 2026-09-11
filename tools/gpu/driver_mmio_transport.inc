@@ -38,6 +38,41 @@ static void mmioCrash(int signal, siginfo_t *info, void *context) {
 }
 #endif
 static void mmioBarrier(void) { __asm__ volatile("dsb sy" ::: "memory"); }
+// Set by the bootstrap to "SYSTEM" or "POSTER" so the shared host journal
+// attributes each request to backboardd or the wallpaper extension.
+const char *DVMClientTag;
+// Shared channel (2026-09-07): more than one guest process may use the one
+// transport (backboardd and the wallpaper extension). A pid-tagged lock word
+// in the shared RAM serializes them; the sequence is continued from REG_DONE
+// under the lock instead of a per-process counter, and the audit ring head is
+// re-read under it. A holder that dies mid-request is stolen from once
+// kill(pid, 0) says it is gone; the drain wait before the next sequence
+// number covers its in-flight request.
+#define DVM_CHANNEL_LOCK 0x380u
+static uint64_t channelDepth;
+static void channelLock(uint8_t *shared) {
+    uint64_t me=(uint64_t)getpid();
+    uint64_t *word=(uint64_t *)(shared+DVM_CHANNEL_LOCK);
+    if(__atomic_load_n(word,__ATOMIC_ACQUIRE)==me){channelDepth++;return;}
+    double started=now(),checked=started;
+    for(;;){
+        uint64_t expected=0;
+        if(__atomic_compare_exchange_n(word,&expected,me,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){channelDepth=1;return;}
+        __asm__ volatile("yield");
+        double t=now();
+        if(t-checked>0.05){
+            checked=t;
+            uint64_t holder=__atomic_load_n(word,__ATOMIC_ACQUIRE);
+            if(holder&&holder!=me&&kill((pid_t)holder,0)&&errno==ESRCH&&
+               __atomic_compare_exchange_n(word,&holder,me,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){channelDepth=1;return;}
+        }
+        if(t-started>30)fail("mmio-channel-lock-timeout");
+    }
+}
+static void channelUnlock(uint8_t *shared) {
+    if(!channelDepth)return; /* a lock attempt that failed never took the word */
+    if(--channelDepth==0){mmioBarrier();__atomic_store_n((uint64_t *)(shared+DVM_CHANNEL_LOCK),0ull,__ATOMIC_RELEASE);}
+}
 // Single producer at a time, fixed 64 x 512-byte slots before request data.
 // Guest publishes payload/header before the monotonic head. Host checks CRC.
 static uint8_t *mmioReportRAM;
@@ -48,7 +83,13 @@ int DVMReport(FILE *stream,const char *format,...) {
     if(mmioReportRAM) {
         char text[480];int n=vsnprintf(text,sizeof(text),format,b);
         if(n<=0||n>=(int)sizeof(text))_exit(121);
+        // Channel lock before the process-local lock: call: holds the channel
+        // while it reports, so the reverse order could deadlock two threads.
+        channelLock(mmioReportRAM);
         @synchronized(mmioReportLock) {
+#ifdef DVM_TEST_RUNNER
+            mmioReportSequence=*(volatile uint64_t *)(mmioReportRAM+0x180);
+#endif
             uint64_t seq=++mmioReportSequence;
 #ifdef DVM_TEST_RUNNER
             double until=now()+10;
@@ -65,6 +106,7 @@ int DVMReport(FILE *stream,const char *format,...) {
             memcpy(slot,&seq,8);memcpy(slot+8,&length,4);memcpy(slot+12,&c,4);
             mmioBarrier();*(volatile uint64_t *)(mmioReportRAM+0x180)=seq;mmioBarrier();
         }
+        channelUnlock(mmioReportRAM);
     }
     va_end(b);int result=vfprintf(stream,format,a);va_end(a);return result;
 }
@@ -77,7 +119,11 @@ int DVMReport(FILE *stream,const char *format,...) {
 @property(nonatomic,strong) NSData *identity;
 @property(nonatomic) uint64_t sequence;
 @property(nonatomic) BOOL failed;
+@property(nonatomic) uint8_t *staging;
+@property(nonatomic) uint64_t stagingBytes;
+@property(nonatomic) BOOL ramPoll;
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)error;
+- (NSDictionary *)call:(NSDictionary *)request payload:(NSData *)payload error:(NSError **)error;
 @end
 @implementation Namespace
 - (void)dealloc {
@@ -86,12 +132,38 @@ int DVMReport(FILE *stream,const char *format,...) {
     if (_shared) _unmap(_client,DVM_GPU_MEMORY_TYPE,mach_task_self(),(uintptr_t)_shared);
     if (_client) _closeClient(_client);
 }
+- (NSDictionary *)call:(NSDictionary *)request payload:(NSData *)payload error:(NSError **)error {
+    @synchronized(self) {
+        if(!payload)return [self call:request error:error];
+        if(!_staging||payload.length>_stagingBytes)fail("mmio-staging-extent");
+        // The staging region is shared with every other process on the
+        // channel: hold the channel lock from the copy through the reply.
+        channelLock(_shared);
+        @try {
+            memcpy(_staging,payload.bytes,payload.length);
+            NSMutableDictionary *r=[request mutableCopy];
+            r[@"staged"]=@{@"offset":@0,@"length":@(payload.length),@"crc":@(crc(payload.bytes,payload.length))};
+            return [self call:r error:error];
+        } @finally { channelUnlock(_shared); }
+    }
+}
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)error {
     @synchronized(self) {
         if (_failed) fail("mmio-retired-session");
         double started=now();
-        uint64_t seq=++_sequence;
+        channelLock(_shared);
+        @try {
+        // Continue the device's sequence, not a per-process counter: another
+        // process may have submitted since this one last did. Drain first so
+        // a holder that died mid-request cannot leave us off by one.
+        while(*(volatile uint64_t *)(_regs+DVM_GPU_REG_SUBMITTED)!=*(volatile uint64_t *)(_regs+DVM_GPU_REG_DONE)){
+            if(*(volatile uint64_t *)(_regs+DVM_GPU_REG_ERROR))fail("mmio-device");
+            if(now()-started>15)fail("mmio-channel-drain-timeout");
+            __asm__ volatile("yield");
+        }
+        uint64_t seq=*(volatile uint64_t *)(_regs+DVM_GPU_REG_DONE)+1;_sequence=seq;
         NSMutableDictionary *r=[request mutableCopy];r[@"seq"]=@(seq);
+        if(DVMClientTag)r[@"client"]=@(DVMClientTag);
         BOOL binary=NO;
 #ifdef DVM_DRIVER_BINARY
         binary=[r[@"op"] isEqual:@"submit"];
@@ -106,6 +178,22 @@ int DVMReport(FILE *stream,const char *format,...) {
         double submitted=now();mmioBarrier();
         *(volatile uint64_t *)(_regs+DVM_GPU_REG_DOORBELL)=seq;
         uint64_t polls=0;
+        if(_ramPoll){
+            // The peer publishes the reply header in shared RAM before it acks
+            // QEMU, so waiting on that word costs no MMIO exits and no BQL
+            // round trips. The REG_DONE read below still gates use of the
+            // reply: QEMU sets it only after checking the reply CRC, and the
+            // ack that triggers it orders the peer's writes before our reads.
+            volatile uint64_t *published=(volatile uint64_t *)(_shared+DVM_GPU_REPLY_HEADER+16);
+            while(*published!=seq){
+                if((++polls&1023u)==0){
+                    uint64_t fault=*(volatile uint64_t *)(_regs+DVM_GPU_REG_ERROR);
+                    if (fault) {fprintf(stderr,"GPU_LOAD_ERROR mmio-device=%llu seq=%llu\n",fault,seq);fail("mmio-device");}
+                    if (now()-submitted>15) fail("mmio-completion-timeout");
+                }
+                __asm__ volatile("yield");
+            }
+        }
         while (*(volatile uint64_t *)(_regs+DVM_GPU_REG_DONE)!=seq) {
             ++polls;
             uint64_t fault=*(volatile uint64_t *)(_regs+DVM_GPU_REG_ERROR);
@@ -130,6 +218,7 @@ int DVMReport(FILE *stream,const char *format,...) {
             return nil;
         }
         return reply;
+        } @finally { channelUnlock(_shared); }
     }
 }
 @end
@@ -178,6 +267,22 @@ static Namespace *openMMIO(void *lib) {
         if(*(volatile uint64_t *)(ns.regs+DVM_GPU_REG_ERROR)||now()>until)fail("mmio-ready");
         usleep(1000);
     }
-    mmioBarrier();return ns;
+    mmioBarrier();
+#ifdef DVM_DRIVER_PRESENT
+    // Optional staging descriptor, published by the peer before READY. Exact
+    // geometry is a contract, not a negotiation: anything else keeps the
+    // chunked base64 path.
+    uint64_t magicWord,offsetWord,bytesWord,flagsWord;
+    memcpy(&magicWord,ns.shared+DVM_STAGING_DESCRIPTOR,8);memcpy(&offsetWord,ns.shared+DVM_STAGING_DESCRIPTOR+8,8);
+    memcpy(&bytesWord,ns.shared+DVM_STAGING_DESCRIPTOR+16,8);memcpy(&flagsWord,ns.shared+DVM_STAGING_DESCRIPTOR+24,8);
+    if(magicWord==DVM_STAGING_MAGIC){
+        if(offsetWord==DVM_STAGING_OFFSET&&bytesWord==DVM_STAGING_BYTES&&(flagsWord&DVM_STAGING_FLAG_ENABLED)){
+            ns.staging=ns.shared+DVM_STAGING_OFFSET;ns.stagingBytes=DVM_STAGING_BYTES;
+        }
+        ns.ramPoll=(flagsWord&DVM_STAGING_FLAG_RAM_POLL)!=0;
+    }
+    fprintf(stderr,"GPU_LOAD_DRIVER_STAGING enabled=%d bytes=%llu ram_poll=%d\n",ns.staging!=NULL,(unsigned long long)ns.stagingBytes,ns.ramPoll);
+#endif
+    return ns;
 #undef MMLOAD
 }

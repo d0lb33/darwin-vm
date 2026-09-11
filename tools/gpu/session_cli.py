@@ -141,6 +141,13 @@ class Session:
         # ever matching a registration because this buffer did not exist.
         self.audit_tail = ''
         self.witnesses = set()
+        # Incremental render-submission count. The previous per-call generator
+        # over every record made each loop iteration O(session): PERF_HOME1
+        # (2026-09-07) measured the guest-visible gap between two consecutive
+        # tiny RPCs growing from 0.97 ms to 6.5 ms over 20k records while the
+        # host service time stayed at 0.06 ms (docs/re/gpu-home-sluggishness-ios27.md).
+        self.render_scanned = 0
+        self.render_total = 0
         self.uart = None
         self.proc = None
         self.home = None
@@ -242,12 +249,24 @@ class Session:
             return 'native display rejected compositor swap; completion withheld', recorded
         return None, recorded
 
+    def render_submissions_total(self):
+        """Accepted render submissions over all records so far, scanned once."""
+        records = self.peer.records
+        while self.render_scanned < len(records):
+            record = records[self.render_scanned]
+            self.render_scanned += 1
+            reply = record['reply']
+            if reply.get('ok') and (reply.get('renderPasses') or
+                                    (record['op'] == 'renderSubmit' and reply.get('passes'))):
+                self.render_total += 1
+        return self.render_total
+
     def observe_generation(self):
         entry = self.peer.current()
         if entry and entry['generation'] not in self.generation_frames:
             self.generation_frames[entry['generation']] = dict(
                 completions=self.display.completions, presentations=self.display.presentations,
-                records=len(self.peer.records))
+                records=len(self.peer.records), render_total=self.render_submissions_total())
             self.mark('generation-%d-start' % entry['generation'],
                       time.monotonic()-self.started, pid=entry['pid'])
 
@@ -255,13 +274,11 @@ class Session:
         entry = self.peer.current()
         if not entry:
             return dict(completions=0, presentations=0, render_submissions=0)
-        base = self.generation_frames.get(entry['generation'], dict(completions=0, presentations=0, records=0))
-        records = self.peer.records[base['records']:]
+        base = self.generation_frames.get(entry['generation'],
+                                          dict(completions=0, presentations=0, records=0, render_total=0))
         return dict(completions=self.display.completions-base['completions'],
                     presentations=self.display.presentations-base['presentations'],
-                    render_submissions=sum(1 for r in records if r['reply'].get('ok') and
-                                           (r['reply'].get('renderPasses') or
-                                            (r['op'] == 'renderSubmit' and r['reply'].get('passes')))))
+                    render_submissions=self.render_submissions_total()-base.get('render_total', 0))
 
     def registered(self):
         return 'GPU_LOAD_SYSTEM_REGISTERED' in self.tail+self.audit_tail
@@ -488,6 +505,12 @@ class Session:
                                           'once; rebuilt QEMU supplies a new snapshot ID at each stop.')
             atomic_json(directory/'capture.json', record)
             return record
+        if snapshot is not None and snapshot.get('display_on') is False:
+            record['ok'] = False
+            record['scanout'] = dict(exit=None, display_blanked=True,
+                                     note='Display is powered off; retained RGhA is not the visible console.')
+            atomic_json(directory/'capture.json', record)
+            return record
         if all((directory/n).exists() for n in ('last-scanout.a408', 'last-scanout.rgha', 'last-scanout.bgra', 'scanout.ppm')):
             verifier = str(Path(__file__).with_name('verify_rgha_scanout.py'))
             check = subprocess.run([verifier_interpreter(), verifier, str(directory)],
@@ -511,6 +534,14 @@ class Session:
                     self.stop_reason = 'regression session cap'
                     break
                 self.peer.pump()
+                # The guest issues its next request about a millisecond after a
+                # reply, and one iteration of drain/contracts/status below costs
+                # more than that, so a compositor frame's 7 RPCs used to pay the
+                # bookkeeping 7 times. Serve the burst first, then account once.
+                for _ in range(64):
+                    if self.peer.sock is None or not select.select([self.peer.sock], [], [], .002)[0]:
+                        break
+                    self.peer.pump()
                 self.drain()
                 self.observe_generation()
                 failure, recorded = self.contracts()

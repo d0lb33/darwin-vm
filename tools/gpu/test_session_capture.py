@@ -20,13 +20,14 @@ class CaptureTests(unittest.TestCase):
             session.display = SimpleNamespace(presentations=1, completions=1)
             snapshot = 0
             fresh = True
+            display_on = True
 
             def command(command):
                 nonlocal snapshot
                 if command == 'stop':
                     if fresh:
                         snapshot += 1
-                        (session.out/'last-scanout.json').write_text(json.dumps(dict(version=1,snapshot=snapshot,ok=True)))
+                        (session.out/'last-scanout.json').write_text(json.dumps(dict(version=1,snapshot=snapshot,ok=True,display_on=display_on)))
                     for name in ('a408','rgha','bgra'):
                         (session.out/('last-scanout.'+name)).write_bytes(b'identical pixels')
                 elif command.startswith('screendump'):
@@ -44,6 +45,12 @@ class CaptureTests(unittest.TestCase):
                 self.assertEqual(second['snapshot']['snapshot'],2)
                 self.assertEqual(verify.call_count,2)
                 self.assertEqual((session.captures/'second/last-scanout.rgha').read_bytes(),b'identical pixels')
+                display_on = False
+                blank = session.capture('blank')
+                self.assertFalse(blank['ok'])
+                self.assertTrue(blank['scanout']['display_blanked'])
+                self.assertEqual(verify.call_count,2)
+                display_on = True
                 fresh = False
                 third = session.capture('third')
                 self.assertTrue(third['scanout']['stale_retained_source'])

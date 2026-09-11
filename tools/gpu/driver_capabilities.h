@@ -1,7 +1,7 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 28u
+#define DVM_CONTRACT_VERSION 30u
 #define DVM_COMPUTE_THREADS 1024u
 #define DVM_COMPUTE_MEMORY 32768u
 #define DVM_COMPUTE_INVOCATIONS (16u*1024u*1024u)
@@ -12,6 +12,19 @@
 #define DVM_RENDER_REQUEST_CHUNK 32768u
 #define DVM_RENDER_DIRECT_BYTES 60000u
 #define DVM_TEXTURE_TRANSFER_CHUNK 32768u
+// Staged bulk transfers (2026-09-07, docs/re/gpu-home-sluggishness-ios27.md):
+// the guest copies raw bytes into an owned region of the mode-3 shared RAM and
+// sends only {offset,length,crc} in the framed JSON request; the host peer
+// verifies the CRC and hands the worker the same base64 field it always
+// accepted. One request per texture or dirty buffer span instead of one per
+// 32 KiB base64 chunk. Mode 2's 4 MiB framed request region overlaps this
+// range, so only the present/managed layout publishes the descriptor.
+#define DVM_STAGING_OFFSET 0x20000u
+#define DVM_STAGING_BYTES 0x1E0000u
+#define DVM_STAGING_DESCRIPTOR 0x340u
+#define DVM_STAGING_MAGIC 0x31474154534d5644ull /* "DVMSTAG1" little-endian */
+#define DVM_STAGING_FLAG_ENABLED 1u
+#define DVM_STAGING_FLAG_RAM_POLL 2u
 #define DVM_QUEUED_COMMAND_BUFFERS 32u
 #define DVM_TEXTURE_DIMENSION 4096u
 #define DVM_BUFFER_BYTES (1024u*1024u)
@@ -48,14 +61,14 @@
 #define DVM_FRAGMENT_SAMPLERS 16u
 #define DVM_COLOR_ATTACHMENTS 1u
 static inline unsigned DVMFormatBytes(NSUInteger format) {
-    switch(format) {case 1:case 10:return 1;case 23:case 25:case 30:return 2;case 55:case 70:case 80:case 554:return 4;case 105:case 115:return 8;default:return 0;}
+    switch(format) {case 1:case 10:return 1;case 23:case 25:case 30:return 2;case 55:case 70:case 80:case 554:return 4;case 105:case 115:return 8;case 125:return 16;default:return 0;}
 }
 static inline BOOL DVM1DFormat(NSUInteger format) {return format==23||format==25||format==55||format==105;}
 static inline BOOL DVMColorFormat(NSUInteger format) {return format==10||format==30||format==70||format==80||format==115||format==554;}
 static inline unsigned DVMFormatUsageMask(NSUInteger format) {
     // A8 is an alpha-only sampled image in this profile. It is not a color
     // attachment or compute-write target. Other existing formats keep v8 usage.
-    return (format==1||DVM1DFormat(format))?1:format==554?5:(DVMFormatBytes(format)?DVM_TEXTURE_USAGE_MASK:0);
+    return (format==1||format==125||DVM1DFormat(format))?1:format==554?5:(DVMFormatBytes(format)?DVM_TEXTURE_USAGE_MASK:0);
 }
 static inline BOOL DVMTextureUsageValid(NSUInteger format,NSUInteger storage,NSUInteger type,NSUInteger usage) {
     // Exact backboardd HDRProcessing requests: shared integer and float LUTs.
@@ -148,6 +161,7 @@ static inline NSDictionary *DVMContractProfile(void) {
         @"renderRequestBytes":@DVM_RENDER_REQUEST_BYTES,@"renderRequestChunkBytes":@DVM_RENDER_REQUEST_CHUNK,@"renderRequestTransactions":@1,
         @"framebufferRead":@"current-fragment-single-color-attachment-ordered-programmable-blending",
         @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureDirectReadBytes":@DVM_TEXTURE_DIRECT_READ_BYTES,@"textureUploadTransactions":@1,
+        @"stagedTransferVersion":@1,@"stagedTransferBytes":@DVM_STAGING_BYTES,
         @"queuedCommandBuffers":@DVM_QUEUED_COMMAND_BUFFERS,@"executionQueues":@1,@"maximumLiveObjects":@DVM_OBJECTS,
         @"queries":@{DVM_CAPABILITY_QUERIES(DVM_BOOL_VALUE,DVM_UINT_VALUE)},
         @"computeBindings":@DVM_COMPUTE_BINDINGS,@"inlineBytes":@DVM_INLINE_BYTES,

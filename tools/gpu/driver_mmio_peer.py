@@ -22,6 +22,18 @@ import present_peer
 
 RAM_SIZE=0x1000000
 MAGIC=0x44564d31
+# Mirror of driver_capabilities.h (test_driver_mmio_peer checks the values).
+# Staged bulk transfers: the guest copies raw bytes to STAGING_OFFSET and the
+# framed JSON request carries {offset,length,crc}; the peer verifies the CRC
+# and hands the worker the base64 field it always accepted. Published only in
+# the present/managed (mode 3) layout, whose framed requests stay under 64 KiB.
+STAGING_OFFSET=0x20000
+STAGING_BYTES=0x1E0000
+STAGING_DESCRIPTOR=0x340
+STAGING_MAGIC=int.from_bytes(b'DVMSTAG1','little')
+STAGING_FLAG_ENABLED=1
+STAGING_FLAG_RAM_POLL=2
+WORKER_FRAME=4*1024*1024
 
 class MMIOPeer(DriverPeer):
     def __init__(self,out,worker,library,boot=False,library_cache=None):
@@ -34,6 +46,9 @@ class MMIOPeer(DriverPeer):
         self.present=self.managed or (mode.exists() and mode.read_text().strip()=="--mmio-present")
         self.audit_limit=120 if self.present or (mode.exists() and mode.read_text().strip()=="--mmio-blur") else 64
         self.reply_offset=0x200000 if self.present else 0x800000
+        # DVM_TRANSPORT_FLAGS: bit 0 staging, bit 1 guest RAM polling (default both).
+        self.staging_flags=int(os.environ.get('DVM_TRANSPORT_FLAGS','3'),0) if self.present else 0
+        self.staged_requests=0;self.staged_bytes=0
         self.max_bytes=0x10000 if self.present else MAX
         raw=self.library.read_bytes()
         if len(raw)!=2705796 or hashlib.sha256(raw).hexdigest()!=AIR_SHA:raise ValueError('exact AIR cache mismatch')
@@ -74,6 +89,8 @@ class MMIOPeer(DriverPeer):
             self.close();raise
     def release(self,evidence):
         self.ram[0x100:0x120]=bytes.fromhex(AIR_SHA)
+        if self.staging_flags:
+            struct.pack_into('<4Q',self.ram,STAGING_DESCRIPTOR,STAGING_MAGIC,STAGING_OFFSET,STAGING_BYTES,self.staging_flags)
         if hasattr(self,'present_config'):
             frames,hz=self.present_config
             struct.pack_into('<4I',self.ram,0x200,1,frames,hz,0)
@@ -107,6 +124,11 @@ class MMIOPeer(DriverPeer):
         binary=struct.unpack_from("<I",raw)[0]==REQUEST
         request=dict(seq=struct.unpack_from("<Q",raw,8)[0],op="blurSubmit" if blur else "submit") if binary or blur else json.loads(raw)
         if not isinstance(request,dict) or request.get('seq')!=seq:raise ValueError('MMIO request inner sequence')
+        control_bytes=n;staged_bytes=0
+        if not (binary or blur) and 'staged' in request:
+            raw,request,staged_bytes=self.unstage(request)
+            n=len(raw)
+            if n>WORKER_FRAME:raise ValueError('staged worker frame extent')
         started=time.monotonic_ns()
         control=self.control_reply(request) if hasattr(self,'control_reply') else None
         if control is None:
@@ -128,9 +150,10 @@ class MMIOPeer(DriverPeer):
             if not hasattr(self,"blur_evidence"):self.blur_evidence=blur_peer.BlurEvidence(self.out)
             if reply.get("ok"):self.blur_evidence.add(request,reply,raw,output)
         if binary:request=decode_request(raw)  # Evidence conversion follows completion publication.
-        record=dict(wire_encoding="blur-v1" if blur else "binary-v1" if binary else "json",seq=seq,op=request.get('op'),request_bytes=n,reply_bytes=length,
+        record=dict(wire_encoding="blur-v1" if blur else "binary-v1" if binary else "json",seq=seq,op=request.get('op'),request_bytes=control_bytes,reply_bytes=length,
             host_service_us=service_us,host_received_ns=started,host_completed_ns=time.monotonic_ns(),
             request={k:v for k,v in request.items() if k!='data'},reply=reply)
+        if staged_bytes:record['staged_bytes']=staged_bytes
         if request.get('op') in ('writeRenderBuffer','upload','writeTextureChunk') and 'data' in request:
             # Generated resource contents are replayable; Apple libraries stay
             # referenced by their verified hash and separate local AIR cache.
@@ -143,6 +166,24 @@ class MMIOPeer(DriverPeer):
             (self.out/f"binary-reply-{seq:04d}.bin").write_bytes(output)
         self.records.append(record)
         with (self.out/'driver-host.jsonl').open('a') as f:f.write(json.dumps(record)+'\n')
+    def unstage(self,request):
+        """Replace a staged descriptor with the base64 field the worker expects.
+
+        Returns (worker request bytes, rebuilt request, payload length). Any
+        contract violation is a protocol failure of this session, like a bad
+        framed CRC: raise, and the worker never sees the request."""
+        if not self.staging_flags&STAGING_FLAG_ENABLED:raise ValueError('staged request without staging')
+        d=request['staged']
+        if not isinstance(d,dict):raise ValueError('staged descriptor')
+        try:offset,length,crc=int(d['offset']),int(d['length']),int(d['crc'])
+        except (KeyError,TypeError,ValueError):raise ValueError('staged descriptor')
+        if offset<0 or length<=0 or offset+length>STAGING_BYTES or not 0<=crc<2**32:raise ValueError('staged extent')
+        payload=bytes(self.ram[STAGING_OFFSET+offset:STAGING_OFFSET+offset+length])
+        if zlib.crc32(payload)!=crc:raise ValueError('staged payload CRC')
+        rebuilt={k:v for k,v in request.items() if k!='staged'}
+        rebuilt['data']=base64.b64encode(payload).decode()
+        self.staged_requests+=1;self.staged_bytes+=length
+        return json.dumps(rebuilt).encode(),rebuilt,length
     def audit(self):
         if self.sock is None:return []
         if self.ram[16:32]!=self.header:raise ValueError('audit session changed')

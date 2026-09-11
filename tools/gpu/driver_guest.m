@@ -5,6 +5,7 @@
 #import <CommonCrypto/CommonDigest.h>
 #import <IOSurface/IOSurface.h>
 #include <dlfcn.h>
+#include <objc/runtime.h>
 #include "present_layout.h"
 #include "driver_capabilities.h"
 #include "dirty_buffer_range.h"
@@ -37,6 +38,8 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 
 @interface DVMDevice : NSObject <MTLDevice>
 @property(nonatomic, copy) DVMMetalRPC transport;
+@property(nonatomic, copy) DVMMetalStagedRPC stagedTransport;
+@property(nonatomic) NSUInteger stagedBytes;
 @property(nonatomic, strong) dispatch_queue_t serial;
 @property(nonatomic, strong) dispatch_queue_t submissionOrder;
 @property(nonatomic) NSUInteger pendingSubmissions;
@@ -61,9 +64,55 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @property(atomic, copy) NSString *label;
 @property(nonatomic,strong) id<DVMMetalImportedMapping> retirementMapping;
 @end
+// Soft-fail (2026-09-08, wallpaper probe): a client that would rather see a
+// logged nil/zero than an exception for a Metal protocol selector this driver
+// does not implement. Off by default; the bootstrap turns it on only in the
+// poster extension. Unknown selectors outside the conformed protocols still
+// raise. Every soft-failed call is reported so the list is evidence, not a
+// silent wrong answer.
+BOOL DVMSoftFailUnknownSelectors;
+static struct objc_method_description DVMProtocolMethod(Protocol *proto,SEL sel){
+    for(int required=1;required>=0;required--){
+        struct objc_method_description d=protocol_getMethodDescription(proto,sel,required,YES);
+        if(d.name)return d;
+    }
+    unsigned n=0;Protocol *__unsafe_unretained *list=protocol_copyProtocolList(proto,&n);
+    struct objc_method_description found={0};
+    for(unsigned i=0;i<n&&!found.name;i++)found=DVMProtocolMethod(list[i],sel);
+    free(list);return found;
+}
+static NSMethodSignature *DVMSoftSignature(Class cls,SEL sel){
+    for(Class c=cls;c;c=class_getSuperclass(c)){
+        unsigned n=0;Protocol *__unsafe_unretained *list=class_copyProtocolList(c,&n);
+        for(unsigned i=0;i<n;i++){
+            struct objc_method_description d=DVMProtocolMethod(list[i],sel);
+            if(d.name){free(list);return [NSMethodSignature signatureWithObjCTypes:d.types];}
+        }
+        free(list);
+    }
+    return nil;
+}
+static void DVMSoftForward(id target,NSInvocation *invocation){
+    int (*report)(FILE *,const char *,...)=dlsym(RTLD_DEFAULT,"DVMReport");
+    if(!report)report=fprintf;
+    report(stderr,"GPU_LOAD_SOFTFAIL class=%s selector=%s\n",class_getName([target class]),sel_getName(invocation.selector));
+    NSUInteger n=invocation.methodSignature.methodReturnLength;
+    uint8_t zero[256]={0};
+    if(n>sizeof(zero))[target doesNotRecognizeSelector:invocation.selector];
+    else if(n)[invocation setReturnValue:zero];
+}
 @implementation DVMObject
 - (id<MTLDevice>)device {
     return _owner;
+}
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
+    NSMethodSignature *s=[super methodSignatureForSelector:sel];
+    if(!s&&DVMSoftFailUnknownSelectors)s=DVMSoftSignature([self class],sel);
+    return s;
+}
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    if(DVMSoftFailUnknownSelectors&&DVMSoftSignature([self class],invocation.selector))DVMSoftForward(self,invocation);
+    else [super forwardInvocation:invocation];
 }
 - (void)dealloc {
     if (_handle)
@@ -87,12 +136,23 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @property(nonatomic) NSUInteger clientLength;
 - (NSData *)cpuData;
 @end
-static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMMetalRPC rpc){
-    NSError *e=nil;
+static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMDevice *owner){
+    NSError *e=nil;DVMMetalRPC rpc=owner.transport;
     // contents may be written directly, without didModifyRange.
     // Compare owned bytes; update the cache only after host ACK.
     BOOL initialized=buffer.renderUploaded!=nil;
     NSMutableData *uploaded=buffer.renderUploaded?:[NSMutableData dataWithLength:buffer.length];
+    if(owner.stagedTransport&&buffer.length<=owner.stagedBytes){
+        // One staged request for the contiguous changed span of the whole
+        // buffer: unchanged bytes inside the span are re-sent, requests are not.
+        DVMDirtyRange changed=initialized?DVMFindDirtyRange(buffer.contents,uploaded.bytes,buffer.length):(DVMDirtyRange){0,buffer.length};
+        if(changed.length){
+            NSData *span=[NSData dataWithBytes:(uint8_t *)buffer.contents+changed.offset length:changed.length];
+            if(!owner.stagedTransport(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(changed.offset)},span,&e))reject(e.description?:@"render buffer upload");
+            memcpy((uint8_t *)uploaded.mutableBytes+changed.offset,span.bytes,changed.length);
+        }
+        buffer.renderUploaded=uploaded;return;
+    }
     for(NSUInteger offset=0;offset<buffer.length;offset+=32768){
         NSUInteger length=MIN(32768,buffer.length-offset);
         DVMDirtyRange changed=initialized?DVMFindDirtyRange((uint8_t *)buffer.contents+offset,(uint8_t *)uploaded.bytes+offset,length):(DVMDirtyRange){0,length};
@@ -138,12 +198,19 @@ static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMMetalRPC rpc){
 @property(nonatomic) BOOL configurationFrozen;
 @property(nonatomic) NSUInteger maxCommandBufferCount,pendingSubmissions;
 @end
-static void DVMUploadTextureChunks(DVMTexture *texture,DVMMetalRPC rpc){
-    NSData *data=texture.pendingUpload;NSNumber *token=@0;NSError *failure=nil;
+static void DVMUploadTextureChunks(DVMTexture *texture,DVMDevice *owner){
+    NSData *data=texture.pendingUpload;NSNumber *token=@0;NSError *failure=nil;DVMMetalRPC rpc=owner.transport;
+    // Staged: one request per stagedBytes of raw pixels (a 204x204 RGBA16F
+    // icon is one request instead of eleven base64 chunks).
+    NSUInteger step=owner.stagedTransport?owner.stagedBytes:DVM_TEXTURE_TRANSFER_CHUNK;
     @try{
-        for(NSUInteger offset=0;offset<data.length;offset+=DVM_TEXTURE_TRANSFER_CHUNK){
-            NSUInteger length=MIN(DVM_TEXTURE_TRANSFER_CHUNK,data.length-offset);
-            NSDictionary *r=rpc(@{@"op":@"writeTextureChunk",@"texture":texture.handle,@"token":token,@"offset":@(offset),@"data":[[data subdataWithRange:NSMakeRange(offset,length)] base64EncodedStringWithOptions:0]},&failure);
+        for(NSUInteger offset=0;offset<data.length;offset+=step){
+            NSUInteger length=MIN(step,data.length-offset);
+            NSData *part=[data subdataWithRange:NSMakeRange(offset,length)];
+            NSMutableDictionary *head=[@{@"op":@"writeTextureChunk",@"texture":texture.handle,@"token":token,@"offset":@(offset)} mutableCopy];
+            NSDictionary *r;
+            if(owner.stagedTransport)r=owner.stagedTransport(head,part,&failure);
+            else{head[@"data"]=[part base64EncodedStringWithOptions:0];r=rpc(head,&failure);}
             if(!r||![r[@"token"] isKindOfClass:NSNumber.class]||![r[@"token"] unsignedLongLongValue]||
                (token.unsignedLongLongValue&&![r[@"token"] isEqual:token])||![r[@"accepted"] isEqual:@(offset+length)]||
                ![r[@"complete"] isEqual:@(offset+length==data.length)])reject(failure.description?:@"texture chunk acknowledgement");
@@ -325,6 +392,31 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     }
     return [self newLibraryWithURL:[NSURL fileURLWithPath:path] error:err];
 }
+- (NSMethodSignature *)methodSignatureForSelector:(SEL)sel {
+    NSMethodSignature *s=[super methodSignatureForSelector:sel];
+    if(!s&&DVMSoftFailUnknownSelectors)s=DVMSoftSignature([self class],sel);
+    return s;
+}
+- (void)forwardInvocation:(NSInvocation *)invocation {
+    if(DVMSoftFailUnknownSelectors&&DVMSoftSignature([self class],invocation.selector))DVMSoftForward(self,invocation);
+    else [super forwardInvocation:invocation];
+}
+// The wallpaper extension's first call (POSTER2): the default library of the
+// process's main bundle, served through the same unchanged-MTLB slice path.
+- (id<MTLLibrary>)newDefaultLibraryWithBundle:(NSBundle *)bundle error:(NSError **)err {
+    NSURL *url=[bundle URLForResource:@"default" withExtension:@"metallib"];
+    if(!url){if(err)*err=error(@"bundle has no default.metallib");return nil;}
+    return [self newLibraryWithURL:url error:err];
+}
+- (id<MTLLibrary>)newDefaultLibrary {
+    NSError *e=nil;id<MTLLibrary> library=[self newDefaultLibraryWithBundle:[NSBundle mainBundle] error:&e];
+    if(!library){
+        int (*report)(FILE *,const char *,...)=dlsym(RTLD_DEFAULT,"DVMReport");
+        if(!report)report=fprintf;
+        report(stderr,"GPU_LOAD_LIBRARY_DEFAULT_FAILED reason=%.200s\n",e.localizedDescription.UTF8String?:"unknown");
+    }
+    return library;
+}
 - (id<MTLLibrary>)newLibraryWithURL:(NSURL *)url error:(NSError **)err {
     int (*report)(FILE *,const char *,...)=dlsym(RTLD_DEFAULT,"DVMReport");
     if(!report)report=fprintf;
@@ -469,10 +561,21 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @end
 @implementation DVMLibrary
 - (id<MTLFunction>)newFunctionWithDescriptor:(MTLFunctionDescriptor *)d error:(NSError **)e {
-    if(!d||!d.name||d.options||d.binaryArchives.count){if(e)*e=error(@"function options/archive unsupported");return nil;}
-    NSArray *constants=DVMConstants(d.constantValues);
-    NSDictionary *r=[self.owner call:@{@"op":@"function",@"library":self.handle,@"name":d.name,@"specialized":d.specializedName?:@"",@"constants":constants} error:e];
-    if(!r)return nil;DVMFunction *f=[DVMFunction new];f.library=self;f.name=d.name;f.owner=self.owner;f.handle=r[@"handle"];f.functionType=[r[@"type"] unsignedIntegerValue];return f;
+    @try {
+        if(!d||!d.name||d.options||d.binaryArchives.count){if(e)*e=error(@"function options/archive unsupported");return nil;}
+        NSArray *constants=DVMConstants(d.constantValues);
+        NSDictionary *r=[self.owner call:@{@"op":@"function",@"library":self.handle,@"name":d.name,@"specialized":d.specializedName?:@"",@"constants":constants} error:e];
+        if(!r)return nil;DVMFunction *f=[DVMFunction new];f.library=self;f.name=d.name;f.owner=self.owner;f.handle=r[@"handle"];f.functionType=[r[@"type"] unsignedIntegerValue];return f;
+    } @catch(NSException *ex) {
+        // reject() raises; Metal's contract here is nil + error. Let a shared
+        // client see an ordinary failure rather than an uncaught exception.
+        if(DVMSoftFailUnknownSelectors){
+            int (*report)(FILE *,const char *,...)=dlsym(RTLD_DEFAULT,"DVMReport");if(!report)report=fprintf;
+            report(stderr,"GPU_LOAD_SOFTFAIL_FUNCTION name=%.120s reason=%.160s\n",d.name.UTF8String?:"(nil)",ex.reason.UTF8String?:"");
+            if(e)*e=error(ex.reason?:@"function unsupported");return nil;
+        }
+        @throw;
+    }
 }
 - (id<MTLFunction>)newFunctionWithName:(NSString *)name constantValues:(MTLFunctionConstantValues *)values error:(NSError **)e {
     MTLFunctionDescriptor *d=[MTLFunctionDescriptor functionDescriptor];d.name=name;d.constantValues=values;return [self newFunctionWithDescriptor:d error:e];
@@ -498,7 +601,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @implementation DVMBuffer
 - (void)prepareForPurgeability:(MTLPurgeableState)state {
     if(state==MTLPurgeableStateVolatile&&self.residencyState<=MTLPurgeableStateNonVolatile)
-        DVMUploadBufferChanges(self,self.owner.transport);
+        DVMUploadBufferChanges(self,self.owner);
 }
 - (void)purgeabilityChanged:(MTLPurgeableState)old current:(MTLPurgeableState)current {
     [super purgeabilityChanged:old current:current];
@@ -546,7 +649,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     if(self.surfaceMapping&&state>MTLPurgeableStateNonVolatile)
         reject(@"pinned IOSurface volatility requires native surface/pin retirement");
     if(state==MTLPurgeableStateVolatile&&self.pendingUpload){
-        DVMUploadTextureChunks(self,self.owner.transport);self.pendingUpload=nil;
+        DVMUploadTextureChunks(self,self.owner);self.pendingUpload=nil;
     }
 }
 - (void)purgeabilityChanged:(MTLPurgeableState)old current:(MTLPurgeableState)current {
@@ -646,7 +749,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     if (self.pendingUpload) {
         if(self.pendingUpload.length>DVM_TEXTURE_TRANSFER_CHUNK){
             __block NSException *caught=nil;
-            dispatch_sync(self.owner.serial,^{@try{DVMUploadTextureChunks(self,self.owner.transport);}@catch(NSException *exception){caught=exception;}});
+            dispatch_sync(self.owner.serial,^{@try{DVMUploadTextureChunks(self,self.owner);}@catch(NSException *exception){caught=exception;}});
             if(caught)@throw caught;
         }else if (![self.owner call:@{@"op":@"upload", @"texture":self.handle,
               @"row":@([self row]), @"data":[self.pendingUpload base64EncodedStringWithOptions:0]} error:&e])
@@ -861,11 +964,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                     [uploads addObject:@{@"op":@"upload",@"buffer":b.handle,
                         @"data":self.commandQueue.owner.binaryPayloads?[b cpuData]:[[b cpuData] base64EncodedStringWithOptions:0]}];
                 for(DVMTexture *t in textures)if(t.pendingUpload){
-                    if(t.pendingUpload.length>DVM_TEXTURE_TRANSFER_CHUNK)DVMUploadTextureChunks(t,self.commandQueue.owner.transport);
+                    if(t.pendingUpload.length>DVM_TEXTURE_TRANSFER_CHUNK)DVMUploadTextureChunks(t,self.commandQueue.owner);
                     else [uploads addObject:@{@"texture":t.handle,@"row":@([t row]),
                         @"data":self.commandQueue.owner.binaryPayloads&&!render?t.pendingUpload:[t.pendingUpload base64EncodedStringWithOptions:0]}];
                 }
-                if(render)for(DVMBuffer *buffer in buffers)DVMUploadBufferChanges(buffer,self.commandQueue.owner.transport);
+                if(render)for(DVMBuffer *buffer in buffers)DVMUploadBufferChanges(buffer,self.commandQueue.owner);
                 BOOL blur=self.commands.count&&self.commands[0][@"imageblock"]!=nil;
                 DVMTexture *output=nil;
                 if(blur)for(DVMTexture *t in textures)if([t.handle isEqual:[self.commands.lastObject[@"textures"] lastObject]])output=t;

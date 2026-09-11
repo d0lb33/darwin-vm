@@ -56,6 +56,18 @@ class SessionPeer(MMIOPeer):
         self.reuse_stopped = None
         self.ownership_failure = None
         self.tombstones = []
+        self.errors_scanned = 0
+        self.host_errors = []
+
+    def scan_host_errors(self):
+        """Sequence numbers of rejected requests, scanned incrementally; the
+        old per-status list comprehension over every record was O(session)."""
+        while self.errors_scanned < len(self.records):
+            record = self.records[self.errors_scanned]
+            self.errors_scanned += 1
+            if not record['reply'].get('ok'):
+                self.host_errors.append(record['seq'])
+        return self.host_errors
 
     def pump(self):
         super().pump()
@@ -397,4 +409,4 @@ class SessionPeer(MMIOPeer):
                     staged=[{k: v for k, v in s.items()} for s in self.staged_history],
                     workers=self.worker_generations, quarantine=self.quarantine,
                     host_requests=len(self.records),
-                    host_errors=[r['seq'] for r in self.records if not r['reply'].get('ok')])
+                    host_errors=list(self.scan_host_errors()))

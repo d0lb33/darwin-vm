@@ -19,7 +19,7 @@ static NSArray *DVMConstants(MTLFunctionConstantValues *values) {
     NSMutableArray *result=[NSMutableArray array];
     NSArray *groups=@[[(id<DVMConstantAccess>)values newNamedConstantArray],[(id<DVMConstantAccess>)values newIndexedConstantArray]];
     for(unsigned group=0;group<2;group++){
-        if(![groups[group] isKindOfClass:NSArray.class]||[groups[group] count]>128)reject(@"constant count");
+        if(![groups[group] isKindOfClass:NSArray.class]||[groups[group] count]>1024)reject(@"constant count");
         for(id<DVMConstantAccess> c in groups[group]){
             DVMRequireConstantABI(c,@selector(dataType),"Q");DVMRequireConstantABI(c,@selector(data),"^v");
             DVMRequireConstantABI(c,group?@selector(index):@selector(name),group?"Q":"@");

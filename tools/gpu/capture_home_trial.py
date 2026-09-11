@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -17,6 +18,9 @@ def main():
     p.add_argument('--session', type=Path, required=True)
     p.add_argument('--out', type=Path, required=True)
     p.add_argument('--seconds', type=float, default=4)
+    p.add_argument('--input', default='home',
+                   help='native_input.py arguments for the traced action, e.g. '
+                        '"--px --hold-ms 250 --steps 20 swipe 590 2000 590 800" (default: home)')
     a = p.parse_args()
     if not 2 <= a.seconds <= 10:
         p.error('observation must be 2..10 seconds')
@@ -39,7 +43,7 @@ def main():
     started = time.monotonic_ns()
     (run/'transition.enable').touch()
     try:
-        result = command('home')
+        result = command(*shlex.split(a.input))
         while time.monotonic_ns()-started < a.seconds*1e9:
             status = read_json(a.session/'status.json', {})
             if not status.get('alive') or not status.get('reuse') or status.get('generation') != before['generation']:

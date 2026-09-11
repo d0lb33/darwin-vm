@@ -3,14 +3,25 @@
 #include "driver_guest.m"
 #include <IOKit/IOKitLib.h>
 #include <objc/runtime.h>
+#include <errno.h>
 #include <time.h>
 #include <unistd.h>
 static double now(void) {struct timespec t;clock_gettime(CLOCK_MONOTONIC,&t);return t.tv_sec+t.tv_nsec/1e9;}
+// Standard CRC-32 (zlib polynomial), table-driven. The bit-serial form cost
+// 8 iterations per byte on every request, reply and audit line; measured
+// 2026-09-07 at 0.24 ms per 44 KB natively, and every guest byte runs under
+// TCG (docs/re/gpu-home-sluggishness-ios27.md).
+static uint32_t crcTable[256];
+static void crcInit(void) {
+    for(unsigned i=0;i<256;i++){uint32_t c=i;for(unsigned j=0;j<8;j++)c=(c>>1)^((0u-(c&1))&0xedb88320u);crcTable[i]=c;}
+}
 static uint32_t crc(const void *data,size_t n) {
+    if(!crcTable[1])crcInit();
     uint32_t c=~0u;const uint8_t *p=data;
-    while(n--){c^=*p++;for(unsigned j=0;j<8;j++)c=(c>>1)^((0u-(c&1))&0xedb88320u);}return ~c;
+    while(n--)c=crcTable[(c^*p++)&0xffu]^(c>>8);return ~c;
 }
 static void fail(const char *s) {[NSException raise:NSInternalInconsistencyException format:@"DVM boot transport: %s",s];}
+extern const char *DVMClientTag;
 #define DVM_BOOT_PLUGIN 1
 #define DVM_DRIVER_BINARY 1
 #define DVM_DRIVER_PRESENT 1
@@ -51,9 +62,14 @@ static void DVMProbeSurfacePin(IOSurfaceRef surface) {
 static uint64_t systemRegistryID;
 static id<MTLDevice> systemDevice;
 static NSUncaughtExceptionHandler *previousExceptionHandler;
+// Which client this process is: backboardd ("SYSTEM") drives the session
+// protocol and the compositor; the wallpaper extension ("POSTER") shares the
+// channel as a second client (docs/re/gpu-home-sluggishness-ios27.md, 11).
+static const char *bootPrefix="SYSTEM";
+static BOOL bootSession=YES;
 static void DVMSystemException(NSException *exception) {
     NSString *reason=[[exception.reason stringByReplacingOccurrencesOfString:@"\n" withString:@" "] stringByReplacingOccurrencesOfString:@"\r" withString:@" "];
-    DVMReport(stderr,"GPU_LOAD_SYSTEM_UNCAUGHT name=%.60s reason=%.330s\n",exception.name.UTF8String,reason.UTF8String);
+    DVMReport(stderr,"GPU_LOAD_%s_UNCAUGHT pid=%d name=%.60s reason=%.330s\n",bootPrefix,getpid(),exception.name.UTF8String,reason.UTF8String);
     if(previousExceptionHandler)previousExceptionHandler(exception);
 }
 @interface DVMDevice (BootRegistration)
@@ -79,10 +95,14 @@ static void DVMSystemException(NSException *exception) {
 
 __attribute__((constructor)) static void DVMSystemBoot(void) {
     @autoreleasepool {
-        // The bootstrap is installed only as a dependency of this executable.
+        // The bootstrap is installed only as a dependency of these executables.
         // A mismatched process must neither claim RAM nor advertise a device.
-        if(strcmp(getprogname(),"backboardd"))return;
-        fprintf(stderr,"GPU_LOAD_SYSTEM_BEGIN pid=%d\n",getpid());
+        const char *program=getprogname();
+        if(!strcmp(program,"backboardd")){bootPrefix="SYSTEM";bootSession=YES;}
+        else if(!strcmp(program,"MercuryPosterExtension")){bootPrefix="POSTER";bootSession=NO;DVMSoftFailUnknownSelectors=YES;}
+        else return;
+        DVMClientTag=bootPrefix;
+        fprintf(stderr,"GPU_LOAD_%s_BEGIN pid=%d\n",bootPrefix,getpid());
         @try {
             NSUncaughtExceptionHandler *(*getHandler)(void)=dlsym(RTLD_DEFAULT,"NSGetUncaughtExceptionHandler");
             void (*setHandler)(NSUncaughtExceptionHandler *)=dlsym(RTLD_DEFAULT,"NSSetUncaughtExceptionHandler");
@@ -94,17 +114,18 @@ __attribute__((constructor)) static void DVMSystemBoot(void) {
             Protocol *spi=objc_getProtocol("MTLDeviceSPI");
             if(!create||!add||!spi)fail("registration-symbols");
             id<MTLDevice> before=create();
-            if(before){fprintf(stderr,"GPU_LOAD_SYSTEM_SKIP existing_device=%s\n",before.name.UTF8String);return;}
+            if(before){fprintf(stderr,"GPU_LOAD_%s_SKIP existing_device=%s\n",bootPrefix,before.name.UTF8String);return;}
             void *iokit=dlopen("/System/Library/Frameworks/IOKit.framework/IOKit",RTLD_NOW|RTLD_GLOBAL);
             Namespace *ns=openMMIO(iokit);
+            DVMReport(stderr,"GPU_LOAD_%s_TRANSPORT pid=%d staging=%d ram_poll=%d\n",bootPrefix,getpid(),ns.staging!=NULL,ns.ramPoll);
 #ifdef DVM_SURFACE_PIN_PROBE
             surfacePinClient=ns.client;
 #endif
 #ifdef DVM_BOOT_RUNTIME_PROBE
-            DVMSystemRevisionProbe(ns);
+            if(bootSession)DVMSystemRevisionProbe(ns);
 #endif
 #ifdef DVM_BOOT_SESSION_RELOAD
-            DVMSessionBegin(ns);
+            if(bootSession)DVMSessionBegin(ns);
 #endif
             io_registry_entry_t service=IORegistryEntryFromPath(0,"IOService:/AppleARMPE/arm-io@10F00000/AppleH17PPlatformIO/dvm-transport@E0000000");
             kern_return_t kr=service?IORegistryEntryGetRegistryEntryID(service,&systemRegistryID):kIOReturnNotFound;
@@ -118,14 +139,26 @@ __attribute__((constructor)) static void DVMSystemBoot(void) {
 #ifdef DVM_BOOT_SESSION_RELOAD
             // A staged revision supplies its own factory. Nothing is unloaded
             // or replaced in place; this process only ever builds one device.
-            DVMSessionStaged staged=DVMSessionLoadStagedRevision(ns);
-            if(staged.create){createShared=staged.create;
+            DVMSessionStaged staged={0};
+            if(bootSession){
+                staged=DVMSessionLoadStagedRevision(ns);
+                if(staged.create){createShared=staged.create;
 #ifdef DVM_SURFACE_IMPORT
-                enableImports=staged.enable;
+                    enableImports=staged.enable;
 #endif
+                }
             }
 #endif
             systemDevice=createShared(rpc,^id<DVMMetalOwnedMapping>(NSError **e){return DVMMapDriverPool(ns,e);});
+            // Staged bulk transfers: raw bytes through the shared-RAM staging
+            // region instead of base64 JSON chunks. A staged revision built
+            // from older sources has no setter and keeps the chunked path.
+            DVMReport(stderr,"GPU_LOAD_DRIVER_STAGING enabled=%d bytes=%llu ram_poll=%d\n",ns.staging!=NULL,(unsigned long long)ns.stagingBytes,ns.ramPoll);
+            if(ns.staging&&[systemDevice respondsToSelector:@selector(setStagedTransport:)]){
+                DVMDevice *device=(DVMDevice *)systemDevice;
+                device.stagedBytes=(NSUInteger)ns.stagingBytes;
+                device.stagedTransport=^NSDictionary *(NSDictionary *r,NSData *payload,NSError **e){return [ns call:r payload:payload error:e];};
+            }
 #ifdef DVM_BOOT_SESSION_RELOAD
             if(staged.create)DVMSessionAdoptDeviceClass([systemDevice class]);
 #endif
@@ -136,23 +169,25 @@ __attribute__((constructor)) static void DVMSystemBoot(void) {
             // Registration asserts protocol identity, not complete selector
             // coverage. Unsupported selectors remain explicit failures.
             if(!class_conformsToProtocol(DVMDevice.class,spi)&&!class_addProtocol(DVMDevice.class,spi))fail("registration-protocol");
-            DVMReport(stderr,"GPU_LOAD_SYSTEM_ADD pid=%d registry=%llu\n",getpid(),systemRegistryID);
+            DVMReport(stderr,"GPU_LOAD_%s_ADD pid=%d registry=%llu\n",bootPrefix,getpid(),systemRegistryID);
             add(systemDevice);
             id<MTLDevice> after=create();
             if(after!=systemDevice)fail("default-device-registration");
-            DVMReport(stderr,"GPU_LOAD_SYSTEM_REGISTERED pid=%d registry=%llu name=%s\n",getpid(),systemRegistryID,after.name.UTF8String);
+            DVMReport(stderr,"GPU_LOAD_%s_REGISTERED pid=%d registry=%llu name=%s\n",bootPrefix,getpid(),systemRegistryID,after.name.UTF8String);
 #ifdef DVM_BOOT_SESSION_RELOAD
-            sessionPut(DVM_SESSION_GUEST_STATE,DVM_SESSION_STATE_RUNNING);
-            DVMReport(stderr,"GPU_LOAD_SYSTEM_REVISION_LOADED pid=%d generation=%llu job=%llu revision=%llu staged=%d class=%s width=%lu\n",
-                getpid(),sessionGeneration,staged.job,sessionRevision,staged.create!=NULL,class_getName([systemDevice class]),
-                (unsigned long)[(DVMDevice *)systemDevice maxTextureWidth2D]);
-            if(staged.create)DVMSessionStagedResult(ns,staged.job,YES,"registered",[systemDevice class]);
+            if(bootSession){
+                sessionPut(DVM_SESSION_GUEST_STATE,DVM_SESSION_STATE_RUNNING);
+                DVMReport(stderr,"GPU_LOAD_SYSTEM_REVISION_LOADED pid=%d generation=%llu job=%llu revision=%llu staged=%d class=%s width=%lu\n",
+                    getpid(),sessionGeneration,staged.job,sessionRevision,staged.create!=NULL,class_getName([systemDevice class]),
+                    (unsigned long)[(DVMDevice *)systemDevice maxTextureWidth2D]);
+                if(staged.create)DVMSessionStagedResult(ns,staged.job,YES,"registered",[systemDevice class]);
+            }
 #endif
         } @catch(NSException *e) {
             // Before registration, ordinary nil-device software selection stays
             // available. Post-registration failures need the recorded recovery
             // image; do not claim transparent mid-frame failover.
-            fprintf(stderr,"GPU_LOAD_SYSTEM_EXCEPTION name=%s reason=%s\n",e.name.UTF8String,e.reason.UTF8String);
+            (mmioReportRAM?DVMReport:fprintf)(stderr,"GPU_LOAD_%s_EXCEPTION pid=%d name=%s reason=%s\n",bootPrefix,getpid(),e.name.UTF8String,e.reason.UTF8String);
         }
     }
 }

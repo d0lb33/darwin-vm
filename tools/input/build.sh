@@ -8,6 +8,7 @@ src=${HELPER_SRC:-$repo/tools/input/dvm_input.c}
 mkdir -p "$out"
 sdk=$(xcrun --sdk macosx --show-sdk-path)
 clang -target arm64-apple-ios7.0 -isysroot "$sdk" -Os -Wall -Wextra \
+    -DDVM_HID_TOUCH_BUILTIN="${DVM_HID_TOUCH_BUILTIN:-0}" \
     -Werror -Wno-incompatible-sysroot "$src" -o "$out/dvm-input"
 codesign --force --sign - --timestamp=none --entitlements "$repo/tools/input/entitlements.plist" "$out/dvm-input"
 codesign -d -vvv "$out/dvm-input" 2>"$out/codesign.txt"

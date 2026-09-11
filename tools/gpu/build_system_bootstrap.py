@@ -23,6 +23,7 @@ def main():
     p.add_argument('--surface-pin-probe',action='store_true',help='audit the first actual compositor IOSurface and exercise the opt-in kernel pin/complete probe')
     p.add_argument('--surface-import',action='store_true',help='opt-in retained compositor page imports; requires matching registry kernel and QEMU')
     p.add_argument('--session-reload',action='store_true',help='opt-in host-controlled revision staging, generation announcement and retirement; process replacement only, never a live unload')
+    p.add_argument('--poster',type=Path,help='also patch this MercuryPosterExtension executable as a second transport client (wallpaper), same bundle dependency')
     a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
     source=Path(__file__).resolve().parent;repo=source.parents[1];start=time.monotonic()
     shutil.copytree(a.base/'stubs',a.out/'stubs')
@@ -43,12 +44,12 @@ def main():
     run(['xcrun','clang',*flags,'-c',str(source/'system_bootstrap.m'),'-o',str(obj)])
     symbols=set(subprocess.check_output(['nm','-u',str(obj)],text=True).split())
     additions={
-      'usr/lib/libobjc.tbd':[s for s in symbols if s.startswith('_objc_') or s.startswith('_class_') or s.startswith('_sel_')],
+      'usr/lib/libobjc.tbd':[s for s in symbols if s.startswith(('_objc_','_class_','_sel_','_protocol_'))],
       # verify_guest_imports.py checks every one of these against the exact
       # guest cache exports, so a stub entry cannot invent a missing symbol.
-      'usr/lib/libSystem.tbd':['_getprogname','_fflush','_stat','_time',
+      'usr/lib/libSystem.tbd':['_getprogname','_fflush','_stat','_time','_kill',
         '_pthread_create','_pthread_attr_init','_pthread_attr_setdetachstate','_pthread_attr_destroy'],
-      'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL','_OBJC_CLASS_$_NSMapTable','_OBJC_CLASS_$_NSFileManager'],
+      'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL','_OBJC_CLASS_$_NSMapTable','_OBJC_CLASS_$_NSFileManager','_OBJC_CLASS_$_NSMethodSignature','_OBJC_CLASS_$_NSBundle'],
       'System/Library/Frameworks/IOSurface.framework/IOSurface.tbd':[s for s in symbols if s.startswith(('_IOSurface','_kIOSurface'))],
     }
     for rel,names in additions.items():
@@ -64,21 +65,33 @@ def main():
     (bundle/'Info.plist').write_bytes(plistlib.dumps(dict(CFBundleIdentifier='org.darwin-vm.system-metal',CFBundleExecutable='DVMMetal',CFBundlePackageType='BNDL',CFBundleVersion='1')))
     # Add only a dependency command in verified zero header padding. Do not
     # shift text, chained fixups, entry points, or any existing load command.
-    b=bytearray(a.backboardd.read_bytes());original=bytes(b)
-    if struct.unpack_from('<III',b)!= (0xfeedfacf,0x100000c,0x80000002):raise ValueError('requires exact arm64e backboardd')
-    n,size=struct.unpack_from('<II',b,16);off=32
-    for _ in range(n):
-        cmd,length=struct.unpack_from('<II',b,off)
-        if cmd in (0xc,0x80000018) and install.encode() in b[off:off+length]:raise ValueError('already bootstrapped')
-        off+=length
-    if off!=32+size:raise ValueError('command extent')
-    name=install.encode()+b'\0';length=(24+len(name)+7)&~7
-    payload=struct.pack('<6I',0xc,length,24,0,0x10000,0x10000)+name
-    payload=payload.ljust(length,b'\0')
-    if any(b[off:off+length]) or len(b[off:off+length])!=length:raise ValueError('nonempty header padding')
-    b[off:off+length]=payload;struct.pack_into('<II',b,16,n+1,size+length)
+    def add_dependency(executable):
+        # Add only a dependency command in verified zero header padding. Do not
+        # shift text, chained fixups, entry points, or any existing load command.
+        b=bytearray(executable.read_bytes());original=bytes(b)
+        if struct.unpack_from('<III',b)!= (0xfeedfacf,0x100000c,0x80000002):raise ValueError('requires an exact arm64e executable: '+str(executable))
+        n,size=struct.unpack_from('<II',b,16);off=32
+        for _ in range(n):
+            cmd,length=struct.unpack_from('<II',b,off)
+            if cmd in (0xc,0x80000018) and install.encode() in b[off:off+length]:raise ValueError('already bootstrapped')
+            off+=length
+        if off!=32+size:raise ValueError('command extent')
+        name=install.encode()+b'\0';length=(24+len(name)+7)&~7
+        payload=struct.pack('<6I',0xc,length,24,0,0x10000,0x10000)+name
+        payload=payload.ljust(length,b'\0')
+        if any(b[off:off+length]) or len(b[off:off+length])!=length:raise ValueError('nonempty header padding')
+        b[off:off+length]=payload;struct.pack_into('<II',b,16,n+1,size+length)
+        return original,bytes(b),dict(offset=off,bytes=length)
+    original,patched,header_edit=add_dependency(a.backboardd)
+    off,length=header_edit['offset'],header_edit['bytes']
     before=a.out/'backboardd.before';before.write_bytes(original)
-    target=a.out/'backboardd';target.write_bytes(b);target.chmod(0o755)
+    target=a.out/'backboardd';target.write_bytes(patched);target.chmod(0o755)
+    poster_target=None;poster_edit=None
+    if a.poster:
+        poster_original,poster_patched,poster_edit=add_dependency(a.poster)
+        (a.out/'MercuryPosterExtension.before').write_bytes(poster_original)
+        poster_target=a.out/'MercuryPosterExtension';poster_target.write_bytes(poster_patched);poster_target.chmod(0o755)
+        if instruction_sections(poster_original)!=instruction_sections(poster_patched):raise ValueError('poster instruction sections changed')
     result=run(['codesign','-d','--entitlements',':-',str(a.backboardd)],capture_output=True)
     entitlements=plistlib.loads(result.stdout);entitlements['platform-application']=True;entitlements['org.darwin-vm.transport']=True
     if a.runtime_probe or a.session_reload:
@@ -88,7 +101,21 @@ def main():
     entitlements[key]=list(dict.fromkeys(entitlements.get(key,[])+['IOKitDiagnosticsClient']))
     ep=a.out/'backboardd.entitlements.plist';ep.write_bytes(plistlib.dumps(entitlements))
     hashes=[]
-    for path,extra in ((bundle,[]),(target,['--entitlements',str(ep)])):
+    signing=[(bundle,[]),(target,['--entitlements',str(ep)])]
+    if poster_target:
+        # The extension keeps its own entitlements and gains the transport
+        # entitlement and the user-client class exception, like backboardd.
+        pe=plistlib.loads(run(['codesign','-d','--entitlements',':-',str(a.poster)],capture_output=True).stdout)
+        pe['platform-application']=True;pe['org.darwin-vm.transport']=True
+        pe[key]=list(dict.fromkeys(pe.get(key,[])+['IOKitDiagnosticsClient']))
+        pep=a.out/'MercuryPosterExtension.entitlements.plist';pep.write_bytes(plistlib.dumps(pe))
+        # Signed outside its bundle, codesign would derive a filename identifier;
+        # ExtensionKit's launch constraint wants the bundle's own (POSTER1: AMFI
+        # "Launch Constraint Violation ... Constraint not matched").
+        original_sig=run(['codesign','-d','-vvvv',str(a.poster)],capture_output=True,text=True).stderr
+        identifier=re.search(r'^Identifier=(\S+)$',original_sig,re.M).group(1)
+        signing.append((poster_target,['--entitlements',str(pep),'-i',identifier]))
+    for path,extra in signing:
         run(['codesign','--force','--sign','-','--timestamp=none',*extra,str(path)])
         run(['codesign','--verify','--strict',str(path)])
         sig=run(['codesign','-d','-vvv',str(path)],capture_output=True,text=True).stderr
@@ -112,6 +139,9 @@ def main():
         runtime_probe=a.runtime_probe,session_reload=a.session_reload,surface_pin_probe=a.surface_pin_probe,surface_import=a.surface_import,
         before_sha256=sha(before),after_sha256=sha(target),plugin_sha256=sha(binary),
         dependency=install,header_edit=dict(offset=off,bytes=length),
+        poster=str(a.poster) if a.poster else None,poster_header_edit=poster_edit,
+        poster_before_sha256=sha(a.out/'MercuryPosterExtension.before') if poster_target else None,
+        poster_after_sha256=sha(poster_target) if poster_target else None,
         scope='backboardd boot dependency and dedicated transport entitlement; no kernel, guest cache, SPTM or TXM edits'),indent=2)+'\n')
     print(a.out)
 if __name__=='__main__':main()
