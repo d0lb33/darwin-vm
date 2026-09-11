@@ -468,3 +468,46 @@ retained. No guest, SPTM or TXM change is proposed.
 
 The diagnostic VM exited and small evidence is in `tlbi-probe-a/`. The
 instrumentation was removed from source after preserving its exact patch.
+
+
+## Packed page-invalidation parameter candidate
+
+The candidate packs a canonical 56-bit single-page address and a mask up to
+16 bits into the existing 64-bit queued payload. The address is already page
+aligned; its low byte and redundant sign-extension byte carry the mask.
+Larger masks, noncanonical addresses, other address widths and range lengths
+retain the original allocated parameter path. It preserves destination work
+items, the local exclusive callback, and the same range-invalidation routine.
+No guest translation, firmware or synchronization behavior is removed.
+
+`tools/re/experiments/tlb_page_payload/test.c` includes the actual candidate header and
+checks one million address/mask round trips, high-mask rejection, misalignment
+rejection and noncanonical-address rejection. It passed with Clang
+`-Wall -Wextra -Werror -fsanitize=undefined,address`. Artifacts and source are
+under `page-payload/`; the standalone test executable is in
+`page-payload-tests/`. The source patch plus the separate new header reproduce
+the QEMU change. These checks establish encoding, not a boot speedup.
+
+Next gates: cross-cluster smoke, one same-disk exact-guest boot to a visibly
+rendered first frame, then repeat timing/input if it shows useful improvement.
+Stop at 180 seconds, any panic, or no demonstrated useful initial gain. Existing
+control measurements span 98.278–100.180 s. Do not promote on compilation or
+one barely sub-100 result alone.
+
+
+Result: **not retained; no demonstrated useful boot gain**.
+`TCG_PACK_0911A` reached early userspace at 8.580 s, helper readiness at
+38.918 s and first presentation at **100.681 s**, with zero reported panics.
+The first-frame screenshot was visually checked as the lock screen. A later
+8-second host profile, collected only after timed boot had completed, contains
+`tlb_flush_page56_packed` stacks (`page-payload/postboot-sample.txt`), proving
+the candidate path executes in this guest. It does not measure its frequency
+during boot. Cross-cluster reset, shared atomics and bidirectional FIQ/IPI
+smoke passed `(1,1,1,40000,1,1,24589)` before the boot.
+
+One measurement cannot establish a statistically significant slowdown, but it
+provides no reason to retain this added path under the stated acceptance gate.
+The owned VM was explicitly quit. Evidence is in `page-payload-a/`; source and
+standalone encoding checks are also retained in
+`tools/re/experiments/tlb_page_payload/` so the rejected experiment remains
+reproducible without affecting production QEMU. QEMU source was restored.

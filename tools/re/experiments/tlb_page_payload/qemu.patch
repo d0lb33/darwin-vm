@@ -1,0 +1,53 @@
+diff --git a/accel/tcg/cputlb.c b/accel/tcg/cputlb.c
+index d59a3d3..a9b847e 100644
+--- a/accel/tcg/cputlb.c
++++ b/accel/tcg/cputlb.c
+@@ -18,6 +18,7 @@
+  */
+ 
+ #include "qemu/osdep.h"
++#include "tlb-page-payload.h"
+ #include "qemu/main-loop.h"
+ #include "qemu/target-info.h"
+ #include "accel/tcg/cpu-loop.h"
+@@ -765,6 +766,18 @@ static void tlb_flush_range_by_mmuidx_async_1(CPUState *cpu,
+     g_free(d);
+ }
+ 
++static void tlb_flush_page56_packed(CPUState *cpu, run_on_cpu_data data)
++{
++    uint64_t payload = data.target_ptr;
++    TLBFlushRangeData d = {
++        .addr = tlb_page_payload_addr(payload),
++        .len = TARGET_PAGE_SIZE,
++        .idxmap = tlb_page_payload_idx(payload),
++        .bits = 56,
++    };
++    tlb_flush_range_by_mmuidx_async_0(cpu, d);
++}
++
+ void tlb_flush_range_by_mmuidx(CPUState *cpu, vaddr addr,
+                                vaddr len, MMUIdxMap idxmap,
+                                unsigned bits)
+@@ -831,6 +844,21 @@ void tlb_flush_range_by_mmuidx_all_cpus_synced(CPUState *src_cpu,
+     d.idxmap = idxmap;
+     d.bits = bits;
+ 
++    /* TBI single-page invalidations can carry their exact parameters in
++     * the existing work item. Keep the original allocating path for all
++     * other addresses/masks. Remote callbacks and the local exclusive
++     * synchronization point are identical to the generic path.
++     */
++    uint64_t payload;
++    if (bits == 56 && len == TARGET_PAGE_SIZE && TARGET_PAGE_BITS >= 8 &&
++        tlb_page_payload_pack(d.addr, idxmap, &payload)) {
++        flush_all_helper(src_cpu, tlb_flush_page56_packed,
++                         RUN_ON_CPU_TARGET_PTR(payload));
++        async_safe_run_on_cpu(src_cpu, tlb_flush_page56_packed,
++                              RUN_ON_CPU_TARGET_PTR(payload));
++        return;
++    }
++
+     /* Allocate a separate data block for each destination cpu.  */
+     CPU_FOREACH(dst_cpu) {
+         if (dst_cpu != src_cpu) {
