@@ -27,6 +27,11 @@ def main():
     a=p.parse_args();a.out=a.out.resolve();a.out.mkdir(exist_ok=False)
     source=Path(__file__).resolve().parent;repo=source.parents[1];start=time.monotonic()
     shutil.copytree(a.base/'stubs',a.out/'stubs')
+    # Preserved evidence trees are intentionally read-only.  The copied TAPI
+    # stubs are build scratch: make those copies writable before adapting their
+    # architecture and adding imports emitted by this revision.
+    for copied in (a.out/'stubs').rglob('*'):
+        if copied.is_file():copied.chmod(copied.stat().st_mode|0o200)
     # Exact guest DYLD OS_REASON in CA_SYSTEM_BOOT_GUEST2: an arm64e
     # backboardd rejects the arm64 bundle accepted by the old arm64 runner.
     for stub in (a.out/'stubs').rglob('*.tbd'):
@@ -48,7 +53,8 @@ def main():
       # verify_guest_imports.py checks every one of these against the exact
       # guest cache exports, so a stub entry cannot invent a missing symbol.
       'usr/lib/libSystem.tbd':['_getprogname','_fflush','_stat','_time','_kill',
-        '_pthread_create','_pthread_attr_init','_pthread_attr_setdetachstate','_pthread_attr_destroy'],
+        '_pthread_create','_pthread_attr_init','_pthread_attr_setdetachstate','_pthread_attr_destroy',
+        '_pthread_threadid_np'],
       'System/Library/Frameworks/Foundation.framework/Foundation.tbd':['_OBJC_CLASS_$_NSURL','_OBJC_CLASS_$_NSMapTable','_OBJC_CLASS_$_NSFileManager','_OBJC_CLASS_$_NSMethodSignature','_OBJC_CLASS_$_NSBundle'],
       'System/Library/Frameworks/IOSurface.framework/IOSurface.tbd':[s for s in symbols if s.startswith(('_IOSurface','_kIOSurface'))],
     }

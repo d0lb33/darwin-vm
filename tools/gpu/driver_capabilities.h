@@ -1,7 +1,7 @@
 #pragma once
 // Versioned forwarding limits, not a snapshot of the host MTLDevice limits.
 // Use these constants in both validation and capability replies.
-#define DVM_CONTRACT_VERSION 30u
+#define DVM_CONTRACT_VERSION 31u
 #define DVM_COMPUTE_THREADS 1024u
 #define DVM_COMPUTE_MEMORY 32768u
 #define DVM_COMPUTE_INVOCATIONS (16u*1024u*1024u)
@@ -25,12 +25,27 @@
 #define DVM_STAGING_MAGIC 0x31474154534d5644ull /* "DVMSTAG1" little-endian */
 #define DVM_STAGING_FLAG_ENABLED 1u
 #define DVM_STAGING_FLAG_RAM_POLL 2u
+// Reusable Metal buffers occupy the otherwise unused mode-3 presentation
+// aperture.  The host assigns page ranges from one process-wide table and
+// returns the offset with the buffer handle; this keeps backboardd and poster
+// clients from selecting overlapping pages.  The copied buffer path remains
+// available when the descriptor is absent or the pool is full.
+#define DVM_STAGING_FLAG_BUFFER_POOL 4u
+#define DVM_BUFFER_POOL_DESCRIPTOR 0x360u
+#define DVM_BUFFER_POOL_MAGIC 0x00314655424d5644ull /* "DVMBUF1\\0" little-endian */
+#define DVM_BUFFER_POOL_OFFSET 0x300000u
+#define DVM_BUFFER_POOL_BYTES 0xD00000u
+#define DVM_SHARED_RAM_BYTES 0x1000000u
 #define DVM_QUEUED_COMMAND_BUFFERS 32u
 #define DVM_TEXTURE_DIMENSION 4096u
 #define DVM_BUFFER_BYTES (1024u*1024u)
-// Exact compositor requests a 1280x932 RG8 sampled texture (2,385,920 bytes).
-// Allocation is distinct from the 32 KiB chunk and 1 MiB legacy reply bounds.
-#define DVM_TEXTURE_BYTES (4u*1024u*1024u)
+// Shared textures are transferred in bounded staging chunks; their allocation
+// limit is independent of the chunk size. Preferences repeatedly requests an
+// ordinary 1179x2556 BGRA8 texture (12,054,096 bytes), so a 4 MiB ceiling
+// rejected a supported host-Metal format and left the launched app black.
+// Keep headroom for larger screen resources while the total ordinary-resource
+// budget, transfer bounds, ownership, and release accounting remain enforced.
+#define DVM_TEXTURE_BYTES (64u*1024u*1024u)
 #define DVM_TEXTURE_DIRECT_READ_BYTES (1024u*1024u)
 // Private images never cross the framed CPU-transfer channel. Keep their
 // allocation budget separate; total live ordinary/shared resources stay capped.
@@ -148,7 +163,7 @@ static inline unsigned DVMConstantBytes(NSUInteger type) {
 static inline NSDictionary *DVMContractProfile(void) {
 #define DVM_BOOL_VALUE(selector,value) @#selector:@((BOOL)(value)),
 #define DVM_UINT_VALUE(selector,value) @#selector:@((NSUInteger)(value)),
-    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-development-headroom-v28",
+    return @{@"version":@DVM_CONTRACT_VERSION,@"profile":@"quartzcore-shared-buffer-v31",
         @"computeDescriptorVersion":@1,@"orderedComputeRenderBlit":@YES,@"orderedCommandLimit":@DVM_ORDERED_COMMANDS,@"encoderOperationLimit":@DVM_ENCODER_OPERATIONS,@"computeReflectionArrays":@NO,
         @"computeThreadsPerGroup":@DVM_COMPUTE_THREADS,@"computeThreadgroupBytes":@DVM_COMPUTE_MEMORY,@"computeInvocationsPerDispatch":@DVM_COMPUTE_INVOCATIONS,
         @"resourcePurgeabilityVersion":@1,@"resourcePurgeabilityStates":@[@1,@2,@3,@4],
@@ -162,6 +177,7 @@ static inline NSDictionary *DVMContractProfile(void) {
         @"framebufferRead":@"current-fragment-single-color-attachment-ordered-programmable-blending",
         @"textureTransferChunkBytes":@DVM_TEXTURE_TRANSFER_CHUNK,@"textureDirectReadBytes":@DVM_TEXTURE_DIRECT_READ_BYTES,@"textureUploadTransactions":@1,
         @"stagedTransferVersion":@1,@"stagedTransferBytes":@DVM_STAGING_BYTES,
+        @"sharedBufferVersion":@1,@"sharedBufferBytes":@DVM_BUFFER_POOL_BYTES,@"sharedBufferAlignment":@DVM_MANAGED_PAGE_BYTES,
         @"queuedCommandBuffers":@DVM_QUEUED_COMMAND_BUFFERS,@"executionQueues":@1,@"maximumLiveObjects":@DVM_OBJECTS,
         @"queries":@{DVM_CAPABILITY_QUERIES(DVM_BOOL_VALUE,DVM_UINT_VALUE)},
         @"computeBindings":@DVM_COMPUTE_BINDINGS,@"inlineBytes":@DVM_INLINE_BYTES,

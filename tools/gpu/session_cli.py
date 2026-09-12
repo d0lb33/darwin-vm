@@ -41,6 +41,7 @@ from session_peer import SessionPeer
 FATAL_MARKERS = ('GPU_LOAD_SYSTEM_UNCAUGHT', 'GPU_LOAD_SYSTEM_EXCEPTION', 'panic(cpu', 'GPU_LOAD_ERROR')
 RECORDED_MARKERS = ('GPU_LOAD_SYSTEM_MISSING', 'GPU_LOAD_TEXTURE_REJECT', 'GPU_LOAD_SESSION_STAGE_FAILED')
 REGRESSION_CAP = 600
+STAGED_RESULT_GRACE = 10
 
 
 def verifier_interpreter():
@@ -376,6 +377,16 @@ class Session:
                 successor = peer.current()
                 status = peer.guest_status()
                 if status['state'] == 'running' and status['generation'] == successor['generation']:
+                    # The guest publishes RUNNING before the staged loader's
+                    # result RPC necessarily reaches this loop.  That gap is
+                    # observable (134 ms in GPU_SMOOTH_FAST2), so absence is a
+                    # pending contract until a small independent grace expires.
+                    # Once a result exists, digest/class/revision failures are
+                    # still terminal immediately.
+                    if successor.get('staged_job') is not None and successor.get('staged_result') is None:
+                        seen = pending.setdefault('running_without_staged_result', time.monotonic())
+                        if time.monotonic() - seen <= STAGED_RESULT_GRACE:
+                            return
                     # A new PID and a registration are not a revision change.
                     # Require the staged revision, its package digest and its
                     # distinct class before calling this cycle a success.

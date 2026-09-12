@@ -25,7 +25,11 @@ def main():
     p.add_argument('--stage', type=Path, required=True)
     p.add_argument('--tag', required=True)
     p.add_argument('--mmio-restore',action='store_true',help='supply owned RAM/registration for the three-range managed transport DT; no GPU worker or commands')
+    p.add_argument('--install-seconds', type=int, default=120,
+                   help='restore-shell and guarded-installer deadline (default: 120)')
     a = p.parse_args()
+    if not 30 <= a.install_seconds <= 1800:
+        p.error('--install-seconds must be between 30 and 1800')
     if not SAFE_TAG.fullmatch(a.tag) or len(a.tag) > 40:
         p.error('invalid tag')
     for name in ('ramdisk.dmg', 'system.tc'):
@@ -70,7 +74,7 @@ def main():
     argv = ['bash', str(repo/'tools/probe.sh'), '--tag', a.tag, '--out', str(out),
         '--dtree', m['qemu_argv'][m['qemu_argv'].index('-dtree')+1],
         '--bootkc', m['qemu_argv'][m['qemu_argv'].index('-bootkc')+1],
-        '--secs', '120', '--mem', '12G', '--ramdisk', str(a.stage/'ramdisk.dmg'),
+        '--secs', str(a.install_seconds), '--mem', '12G', '--ramdisk', str(a.stage/'ramdisk.dmg'),
         '--uart-socket', str(uart), '--stop-file', str(stop),
         '--pid-file', str(out/'qemu.pid'), '--launch-manifest', str(out/'launch.json'),
         '--', '-drive', f'if=none,id=ans,file={disk},format=qcow2',
@@ -86,7 +90,7 @@ def main():
     connected = None
     sent = False
     try:
-        deadline = time.monotonic()+150
+        deadline = time.monotonic()+a.install_seconds+30
         while proc.poll() is None and time.monotonic() < deadline:
             data = serial.read_bytes() if serial.exists() else b''
             if not sent and b"can't access tty" in data:
@@ -119,11 +123,24 @@ def main():
     verify_backing_chain(m['disk']['backing_chain'])
     derived = {key:m[key] for key in ('qemu_argv','qemu_inputs','qemu_env')}
     derived.update(format='darwin-vm-warm-disk-v1', created_unix=time.time(), source_manifest=str(a.manifest.resolve()))
-    for key in ('battery_source', 'driver_smc_migration'):
+    for key in ('battery_source', 'driver_smc_migration',
+                'cellular_service_installation', 'cellular_boot_validation',
+                'tcg_comparison', 'input_installation'):
         if key in m:
             derived[key] = m[key]
     if (a.stage/'provenance.json').exists():
-        derived['guest_installation']=json.loads((a.stage/'provenance.json').read_text())
+        installation = json.loads((a.stage/'provenance.json').read_text())
+        history = list(m.get('installation_history') or [])
+        if installation.get('scope', '').startswith('restore reviewed native HID'):
+            if m.get('guest_installation'):
+                derived['guest_installation'] = m['guest_installation']
+            derived['input_installation'] = installation
+        else:
+            if m.get('guest_installation'):
+                history.append(m['guest_installation'])
+            derived['guest_installation'] = installation
+        if history:
+            derived['installation_history'] = history
     derived['disk'] = dict(path=str(disk.resolve()),
         backing_chain=qcow2_backing_chain(Path(shutil.which('qemu-img')),disk))
     normal = derived['qemu_argv']

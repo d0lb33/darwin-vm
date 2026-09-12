@@ -218,6 +218,10 @@ def main() -> int:
                         help="retain the stopped /tmp runtime for diagnosis")
     parser.add_argument("--retain-all-transitions", action="store_true",
                         help="retain every thumbnail instead of changed keyframes")
+    parser.add_argument(
+        "--model-env", action="append", default=[], metavar="KEY=VALUE",
+        help="pass an explicit DARWIN_/GXFSTAT_ model override to restore",
+    )
     parser.add_argument("--require-visible-change", action="store_true")
     parser.add_argument("--require-major-change", action="store_true")
     action = parser.add_subparsers(dest="action", required=True)
@@ -252,6 +256,8 @@ def main() -> int:
         str(args.qemu.resolve()), "--model-env", "DARWIN_DCP_IOMFB_QUIET=1",
         "--model-env", "DARWIN_DCP_IOMFB_TIMING_TRACE=1",
     ]
+    for value in args.model_env:
+        restore += ["--model-env", value]
     subprocess.run(restore, check=True)
     pid = int((run / "qemu.pid").read_text())
     should_stop = not args.leave_running

@@ -44,7 +44,7 @@ def peer(directory):
 
     def replace(worker=None):
         record = dict(generation=p.generation, pid=1000+len(p.replacements),
-                      path='worker', replaced_monotonic=__import__('time').monotonic())
+                      path=str(worker or 'worker'), replaced_monotonic=__import__('time').monotonic())
         p.worker_generations.append(record)
         p.replacements.append(record)
         return record
@@ -234,6 +234,13 @@ class Quiescence(unittest.TestCase):
                          'the aliasing worker must be gone before a tombstone authorizes an unpin')
         self.assertLess(self.p.replacements[0]['replaced_monotonic'],
                         self.p.tombstones[0]['monotonic'])
+
+    def test_quiesce_uses_the_worker_paired_with_the_staged_revision(self):
+        package(self.p)
+        self.p.staged['worker'] = '/validated/revision-worker'
+        reply = self.p.quiesce(dict(generation=1, imports=[]))
+        self.assertEqual(reply['worker'], 1000)
+        self.assertEqual(self.p.replacements[0]['path'], '/validated/revision-worker')
 
     def test_tombstone_record_matches_the_registry_abi(self):
         pages(self.p, 7)

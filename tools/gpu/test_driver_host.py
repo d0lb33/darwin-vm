@@ -13,7 +13,7 @@ from driver_peer import DriverPeer
 
 ROOT = Path(__file__).resolve().parents[2]
 BUILD = Path(os.environ.get('DVM_DRIVER_BUILD', '/tmp/dvm/METAL_DRIVER_BUILD1'))
-AIR = Path('/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib')
+AIR = Path(os.environ.get('DVM_DRIVER_AIR', '/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib'))
 SHA = '8860e4a17d89783da06429a302db0bc61b2939963f202c0c6ad31189a1021364'
 
 class HostTests(unittest.TestCase):
@@ -126,7 +126,7 @@ class HostTests(unittest.TestCase):
     def test_large_copied_textures_chunk_completion_and_gpu_copy(self):
         encode=lambda b:base64.b64encode(b).decode()
         contract=self.rpc('capabilities')['contract']
-        self.assertEqual(contract['textureBytes'],4*1024*1024)
+        self.assertEqual(contract['textureBytes'],64*1024*1024)
         self.assertEqual(contract['textureDirectReadBytes'],1024*1024)
         for width,height,fmt,bpp in ((1280,932,30,2),(1024,1024,80,4)):
             src=self.rpc('texture',width=width,height=height,format=fmt,usage=1)['handle']
@@ -152,7 +152,7 @@ class HostTests(unittest.TestCase):
             self.assertEqual(actual,data)
             for handle in (src,dst):self.assertTrue(self.rpc('release',handle=handle)['ok'])
             self.assertEqual(self.rpc('stats')['live']['resourceBytes'],0)
-        self.assertFalse(self.rpc('texture',width=1024,height=1025,format=80,usage=1)['ok'])
+        self.assertFalse(self.rpc('texture',width=4096,height=2049,format=115,usage=1)['ok'])
 
     def test_native_purgeability_and_alias_reacquisition(self):
         b=self.rpc('buffer',length=65536)['handle']
@@ -232,6 +232,28 @@ class HostTests(unittest.TestCase):
         self.p.stdin.write(struct.pack('<I',len(raw))+raw);self.p.stdin.flush()
         n,=struct.unpack('<I',self.p.stdout.read(4))
         return json.loads(self.p.stdout.read(n))
+    def test_serialized_render_submit_contract(self):
+        target=self.rpc('texture',width=4,height=4,format=80,usage=5)['handle']
+        inner=dict(op='renderSubmit',commands=[dict(kind='render',target=target,load=2,store=1,
+                   clear=[1,0,0,1],operations=[])],uploads=[],readbacks=[])
+        encoded=base64.b64encode(json.dumps(inner,separators=(',',':')).encode()).decode()
+        reply=self.rpc('renderSubmitJSON',data=encoded)
+        self.assertTrue(reply['ok'],reply);self.assertEqual(reply['status'],4)
+        self.assertEqual(base64.b64decode(self.rpc('read',texture=target)['data']),bytes([0,0,255,255])*16)
+        for bad in (b'',b'[]',b'{"op":"submit"}',b'{"op":"renderSubmit","seq":7}'):
+            reply=self.rpc('renderSubmitJSON',data=base64.b64encode(bad).decode())
+            self.assertFalse(reply['ok'],reply)
+        self.assertTrue(self.rpc('release',handle=target)['ok'])
+    def test_staged_render_readback_contract(self):
+        payload=bytes(range(256))*256
+        handle=self.rpc('buffer',length=len(payload))['handle']
+        self.assertTrue(self.rpc('writeRenderBuffer',buffer=handle,offset=0,
+                                 data=base64.b64encode(payload).decode())['ok'])
+        reply=self.rpc('readRenderBufferStaged',buffer=handle,offset=0,length=len(payload))
+        self.assertTrue(reply['ok'],reply)
+        self.assertEqual(base64.b64decode(reply['data'],validate=True),payload)
+        self.assertFalse(self.rpc('readRenderBufferStaged',buffer=handle,offset=0,length=0)['ok'])
+        self.assertFalse(self.rpc('readRenderBufferStaged',buffer=handle,offset=0,length=0x1e0001)['ok'])
     def test_identity_and_stale_handles(self):
         b=self.rpc('buffer',length=96);self.assertTrue(b['ok'])
         self.assertFalse(self.rpc('read',texture=b['handle'])['ok'])
@@ -392,7 +414,9 @@ class HostTests(unittest.TestCase):
         self.assertEqual(contract['privateTextureBytes'],128*1024*1024)
         self.assertEqual(contract['ordinaryResourceBytes'],512*1024*1024)
         for storage in (0,1):
-            self.assertFalse(self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=storage)['ok'])
+            copied=self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=storage)
+            self.assertTrue(copied['ok'],copied);self.assertTrue(self.rpc('release',handle=copied['handle'])['ok'])
+            self.assertFalse(self.rpc('texture',width=4096,height=2049,format=115,usage=1,storage=storage)['ok'])
         screen=self.rpc('texture',width=1179,height=2556,format=80,usage=5,storage=2)
         self.assertTrue(screen['ok']);self.assertEqual(screen['nativeStorageMode'],2)
         self.assertTrue(self.rpc('release',handle=screen['handle'])['ok'])
@@ -532,7 +556,7 @@ class HostTests(unittest.TestCase):
         self.assertEqual(self.rpc('stats')['live']['objects'],0)
     def test_resource_limits_and_typed_counts(self):
         self.assertFalse(self.rpc('buffer',length=True)['ok'])
-        self.assertFalse(self.rpc('texture',width=1024,height=513,format=115,usage=1)['ok'])
+        self.assertFalse(self.rpc('texture',width=4096,height=2049,format=115,usage=1)['ok'])
         self.rpc('buffer',length=16)
         live=self.rpc('stats')['live']
         self.assertEqual(live['buffers'],1)

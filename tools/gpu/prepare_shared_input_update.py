@@ -10,6 +10,8 @@ p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('--before',type=Path,nargs='+',required=True)
 p.add_argument('--build',type=Path,required=True)
 p.add_argument('--cache',type=Path,required=True)
+p.add_argument('--current-tc',type=Path,required=True,
+               help='trust cache for the exact source lineage; the input helper hash is merged into it')
 p.add_argument('--out',type=Path,required=True)
 a=p.parse_args();a.out.mkdir(exist_ok=False)
 repo=Path(__file__).resolve().parents[2]
@@ -50,5 +52,10 @@ try:
     for f in payload.iterdir():shutil.copyfile(f,mount/'libexec'/f.name)
     subprocess.run(['sync'],check=True)
 finally:subprocess.run([str(wrapper),'detach',str(mount)],check=True)
-shutil.copyfile(a.build/'system.tc',a.out/'system.tc')
-(a.out/'provenance.json').write_text(json.dumps(dict(scope='restore reviewed native HID on disposable reconstructed GPU child; keep launchd jobs, native SMC and driver',inputs={str(f.resolve()):hashlib.sha256(f.read_bytes()).hexdigest() for f in [*a.before,a.build/'dvm-input',a.build/'system.tc',a.cache,script]}),indent=2)+'\n')
+subprocess.run(['python3',str(repo/'tools/rootfs/merge_tc.py'),str(a.out/'system.tc'),
+                str(a.current_tc),str(a.build/'helper.tc')],check=True)
+(a.out/'provenance.json').write_text(json.dumps(dict(
+    scope='restore reviewed native HID on disposable reconstructed GPU child; keep launchd jobs, native SMC and driver',
+    trust_cache='merge exact source-lineage cache with only the reviewed input helper CDHash',
+    inputs={str(f.resolve()):hashlib.sha256(f.read_bytes()).hexdigest()
+            for f in [*a.before,a.build/'dvm-input',a.build/'helper.tc',a.current_tc,a.cache,script]}),indent=2)+'\n')

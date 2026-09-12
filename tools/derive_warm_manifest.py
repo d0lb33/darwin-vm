@@ -31,6 +31,10 @@ def main():
     # RAM checkpoint witnesses describe the source run, never this unbooted
     # disk candidate. Retain provenance through source_manifest instead.
     result = {k: source[k] for k in ('qemu_argv', 'qemu_inputs', 'qemu_env')}
+    for key in ('guest_installation', 'battery_source', 'driver_smc_migration',
+                'cellular_service_installation', 'tcg_comparison'):
+        if key in source:
+            result[key] = source[key]
     result.update(format='darwin-vm-warm-disk-v1', created_unix=time.time(),
                   source_manifest=str(a.source.resolve()))
     result['disk'] = dict(path=str(a.disk.resolve()),

@@ -45,11 +45,11 @@ int main(void){@autoreleasepool{
         NSDictionary *reply=ProcessRequest(host,++seq,r);
         if(![reply[@"ok"] boolValue]){if(error)*error=[NSError errorWithDomain:@"LargeTextureTest" code:1 userInfo:@{NSLocalizedDescriptionKey:reply.description}];return nil;}return reply;
     }});
-    for(NSArray *s in @[@[@1280,@932,@30],@[@1024,@1024,@80]]){
+    for(NSArray *s in @[@[@1280,@932,@30],@[@1024,@1024,@80],@[@1179,@2556,@80]]){
         NSUInteger w=[s[0] unsignedIntegerValue],h=[s[1] unsignedIntegerValue],fmt=[s[2] unsignedIntegerValue];
         NSArray *native=exercise(host.device,w,h,fmt),*proxy=exercise(forwarded,w,h,fmt);
         check([native isEqual:proxy],"native versus forwarded pixels");
         check(host.entries.count==0&&host.textureBytes==0,"completed resources retired");
     }
-    puts("DVM_LARGE_TEXTURE_PASS profiles=2 frames=6 padded_rows=1 partial_updates=1 native_equal=1 gpu_completion=1 retirement=1");
+    puts("DVM_LARGE_TEXTURE_PASS profiles=3 frames=9 fullscreen_bgra=1 padded_rows=1 partial_updates=1 native_equal=1 gpu_completion=1 retirement=1");
 }}

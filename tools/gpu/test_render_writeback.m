@@ -8,6 +8,10 @@
 @protocol DVMLinearTest
 - (id<MTLTexture>)newLinearTextureWithDescriptor:(MTLTextureDescriptor *)d offset:(NSUInteger)o bytesPerRow:(NSUInteger)r bytesPerImage:(NSUInteger)i;
 @end
+@interface NSObject (DVMStagedReadTest)
+- (void)setStagedBytes:(NSUInteger)bytes;
+- (void)setStagedReadTransport:(DVMMetalStagedReadRPC)transport;
+@end
 
 static void require(BOOL ok,const char *why){if(!ok){fprintf(stderr,"FAIL %s\n",why);exit(1);}}
 static void testRegions(id<MTLDevice> device,id<MTLTexture> target){
@@ -102,6 +106,17 @@ int main(void){@autoreleasepool {
         }}
         uint8_t pixels[16384];[t getBytes:pixels bytesPerRow:256 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];for(unsigned i=0;i<4096;i++)require(!pixels[i*4]&&!pixels[i*4+1]&&pixels[i*4+2]==255&&pixels[i*4+3]==255,"render pixels");
         require(chunks==9,"three chunks per written buffer");
+        __block unsigned stagedReads=0;
+        [(id)d setStagedBytes:DVM_STAGING_BYTES];
+        [(id)d setStagedReadTransport:^NSData *(NSDictionary *request,NSUInteger length,NSError **outError){
+            @synchronized(host){
+                stagedReads++;NSMutableDictionary *r=[request mutableCopy];r[@"length"]=@(length);
+                NSDictionary *reply=ProcessRequest(host,++seq,r);id encoded=reply[@"data"];
+                NSData *data=[encoded isKindOfClass:NSString.class]?[[NSData alloc]initWithBase64EncodedString:encoded options:0]:nil;
+                if(![reply[@"ok"] boolValue]||data.length!=length){if(outError)*outError=[NSError errorWithDomain:@"HostTest" code:1 userInfo:nil];return nil;}
+                return corrupt?[data subdataWithRange:NSMakeRange(0,data.length-1)]:data;
+            }
+        }];
         MTLRenderPassDescriptor *pass=[MTLRenderPassDescriptor renderPassDescriptor];pass.colorAttachments[0].texture=t;pass.colorAttachments[0].storeAction=MTLStoreActionStore;
         uint64_t before=host.submissions;
         id<MTLCommandBuffer> bad=[q commandBuffer];id<MTLRenderCommandEncoder> e=[bad renderCommandEncoderWithDescriptor:pass];[e setRenderPipelineState:pipeline];[e setVertexBytes:words length:4 atIndex:30];[e setVertexBytes:&step length:4 atIndex:8];[e setFragmentBytes:red length:16 atIndex:30];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];[bad commit];[bad waitUntilCompleted];
@@ -117,6 +132,7 @@ int main(void){@autoreleasepool {
         corrupt=YES;uint32_t old0=words[0],oldLast=words[16384];
         id<MTLCommandBuffer> damaged=[q commandBuffer];e=[damaged renderCommandEncoderWithDescriptor:pass];[e setRenderPipelineState:pipeline];[e setVertexBuffer:b offset:0 atIndex:30];[e setVertexBytes:&step length:4 atIndex:8];[e setFragmentBytes:red length:16 atIndex:30];[e drawPrimitives:MTLPrimitiveTypeTriangle vertexStart:0 vertexCount:3];[e endEncoding];[damaged commit];[damaged waitUntilCompleted];
         require(damaged.status==MTLCommandBufferStatusError&&words[0]==old0&&words[16384]==oldLast,"bad later chunk cannot partially publish CPU shadow");
+        require(stagedReads==1,"corrupt staged readback attempted once");
         corrupt=NO;
         desc.fragmentFunction=[lib newFunctionWithName:@"ft"];
         id<MTLRenderPipelineState> textured=[d newRenderPipelineStateWithDescriptor:desc error:&error];require(textured!=nil,"3D sampling pipeline");
@@ -146,8 +162,9 @@ int main(void){@autoreleasepool {
             if(wrong)require(tc.status==MTLCommandBufferStatusError&&host.submissions==prior,"wrong texture dimension rejected before GPU");
             else {require(uploads==7&&words[0]==old0+step&&words[16384]==oldLast+7,"failed writeback invalidates upload cache before reuse");require(tc.status==MTLCommandBufferStatusCompleted,"3D sampling completion");[t getBytes:pixels bytesPerRow:256 fromRegion:MTLRegionMake2D(0,0,64,64) mipmapLevel:0];for(unsigned i=0;i<4096;i++)require(pixels[i*4]==0&&pixels[i*4+1]==255&&pixels[i*4+2]==0&&pixels[i*4+3]==255,"3D sample produces green output");}
         }
+        require(stagedReads==2,"one synchronized staged read per valid written buffer");
         fprintf(stderr,"PASS texture sampling: 3D pitch/padding, slots 8/15, sampler 15, bulk unbinding, correct GPU pixels, dimension/boundary rejection\n");
-        fprintf(stderr,"PASS render writes: GPU pixels, 3-chunk CPU coherence, ordered draws, reuse, completion, slots 8/30, boundary/ownership/inline rejection, atomic error publication\n");
+        fprintf(stderr,"PASS render writes: GPU pixels, legacy chunks and one-shot staged CPU coherence, ordered draws, reuse, completion, slots 8/30, boundary/ownership/inline rejection, atomic error publication\n");
         void *client=NULL;require(!posix_memalign(&client,16384,16384),"client aligned allocation");
         memset(client,0,16384);__block unsigned freed=0;
         void (^deallocator)(void *,NSUInteger)=^(void *pointer,NSUInteger length){require(pointer==client&&length==16384,"client deallocator identity");freed++;free(pointer);};

@@ -19,6 +19,8 @@ static double blurRPCus,blurDoorbellus;
 #define DVM_EXPECTED_MODE 2
 #endif
 #include <signal.h>
+#include <limits.h>
+#include <pthread.h>
 #include <sys/ucontext.h>
 #ifndef DVM_BOOT_PLUGIN
 static void mmioCrash(int signal, siginfo_t *info, void *context) {
@@ -41,37 +43,68 @@ static void mmioBarrier(void) { __asm__ volatile("dsb sy" ::: "memory"); }
 // Set by the bootstrap to "SYSTEM" or "POSTER" so the shared host journal
 // attributes each request to backboardd or the wallpaper extension.
 const char *DVMClientTag;
-// Shared channel (2026-09-07): more than one guest process may use the one
-// transport (backboardd and the wallpaper extension). A pid-tagged lock word
-// in the shared RAM serializes them; the sequence is continued from REG_DONE
-// under the lock instead of a per-process counter, and the audit ring head is
-// re-read under it. A holder that dies mid-request is stolen from once
-// kill(pid, 0) says it is gone; the drain wait before the next sequence
-// number covers its in-flight request.
+// Shared channel (2026-09-11): more than one guest process, thread, and
+// driver image may use the one transport.  backboardd deliberately contains
+// both the boot-trusted carrier and a staged revision, so neither a pid owner
+// nor a dylib-local recursive lock serializes the process.  Keep the thread
+// owner, its process and recursion depth in shared RAM.  pthread thread IDs
+// are process-wide across every loaded image.  A holder is stolen only after
+// its whole process is gone; the drain before the next sequence covers the
+// abandoned in-flight request.
 #define DVM_CHANNEL_LOCK 0x380u
-static uint64_t channelDepth;
+#define DVM_CHANNEL_PID 0x388u
+#define DVM_CHANNEL_DEPTH 0x390u
+static uint64_t channelIdentity(void) {
+    uint64_t identity=0;
+    if(pthread_threadid_np(NULL,&identity)||!identity)fail("mmio-thread-identity");
+    return identity;
+}
 static void channelLock(uint8_t *shared) {
-    uint64_t me=(uint64_t)getpid();
+    uint64_t me=channelIdentity();
     uint64_t *word=(uint64_t *)(shared+DVM_CHANNEL_LOCK);
-    if(__atomic_load_n(word,__ATOMIC_ACQUIRE)==me){channelDepth++;return;}
+    uint64_t *ownerPID=(uint64_t *)(shared+DVM_CHANNEL_PID);
+    uint64_t *depth=(uint64_t *)(shared+DVM_CHANNEL_DEPTH);
+    if(__atomic_load_n(word,__ATOMIC_ACQUIRE)==me){
+        if(!__atomic_fetch_add(depth,1,__ATOMIC_ACQ_REL))fail("mmio-channel-depth");
+        return;
+    }
     double started=now(),checked=started;
     for(;;){
         uint64_t expected=0;
-        if(__atomic_compare_exchange_n(word,&expected,me,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){channelDepth=1;return;}
+        if(__atomic_compare_exchange_n(word,&expected,me,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
+            __atomic_store_n(ownerPID,(uint64_t)getpid(),__ATOMIC_RELAXED);
+            __atomic_store_n(depth,1,__ATOMIC_RELEASE);
+            return;
+        }
         __asm__ volatile("yield");
         double t=now();
         if(t-checked>0.05){
             checked=t;
             uint64_t holder=__atomic_load_n(word,__ATOMIC_ACQUIRE);
-            if(holder&&holder!=me&&kill((pid_t)holder,0)&&errno==ESRCH&&
-               __atomic_compare_exchange_n(word,&holder,me,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){channelDepth=1;return;}
+            uint64_t pid=__atomic_load_n(ownerPID,__ATOMIC_ACQUIRE);
+            if(holder&&holder!=me&&pid&&pid<=INT_MAX&&kill((pid_t)pid,0)&&errno==ESRCH&&
+               __atomic_compare_exchange_n(word,&holder,me,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)){
+                __atomic_store_n(ownerPID,(uint64_t)getpid(),__ATOMIC_RELAXED);
+                __atomic_store_n(depth,1,__ATOMIC_RELEASE);
+                return;
+            }
         }
         if(t-started>30)fail("mmio-channel-lock-timeout");
     }
 }
 static void channelUnlock(uint8_t *shared) {
-    if(!channelDepth)return; /* a lock attempt that failed never took the word */
-    if(--channelDepth==0){mmioBarrier();__atomic_store_n((uint64_t *)(shared+DVM_CHANNEL_LOCK),0ull,__ATOMIC_RELEASE);}
+    uint64_t me=channelIdentity();
+    uint64_t *word=(uint64_t *)(shared+DVM_CHANNEL_LOCK);
+    uint64_t *ownerPID=(uint64_t *)(shared+DVM_CHANNEL_PID);
+    uint64_t *depth=(uint64_t *)(shared+DVM_CHANNEL_DEPTH);
+    if(__atomic_load_n(word,__ATOMIC_ACQUIRE)!=me)fail("mmio-channel-unlock-owner");
+    uint64_t prior=__atomic_fetch_sub(depth,1,__ATOMIC_ACQ_REL);
+    if(!prior)fail("mmio-channel-unlock-depth");
+    if(prior==1){
+        mmioBarrier();
+        __atomic_store_n(ownerPID,0ull,__ATOMIC_RELAXED);
+        __atomic_store_n(word,0ull,__ATOMIC_RELEASE);
+    }
 }
 // Single producer at a time, fixed 64 x 512-byte slots before request data.
 // Guest publishes payload/header before the monotonic head. Host checks CRC.
@@ -121,9 +154,12 @@ int DVMReport(FILE *stream,const char *format,...) {
 @property(nonatomic) BOOL failed;
 @property(nonatomic) uint8_t *staging;
 @property(nonatomic) uint64_t stagingBytes;
+@property(nonatomic) uint8_t *bufferPool;
+@property(nonatomic) uint64_t bufferPoolBytes;
 @property(nonatomic) BOOL ramPoll;
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)error;
 - (NSDictionary *)call:(NSDictionary *)request payload:(NSData *)payload error:(NSError **)error;
+- (NSData *)call:(NSDictionary *)request replyPayloadLength:(NSUInteger)length error:(NSError **)error;
 @end
 @implementation Namespace
 - (void)dealloc {
@@ -145,6 +181,25 @@ int DVMReport(FILE *stream,const char *format,...) {
             r[@"staged"]=@{@"offset":@0,@"length":@(payload.length),@"crc":@(crc(payload.bytes,payload.length))};
             return [self call:r error:error];
         } @finally { channelUnlock(_shared); }
+    }
+}
+- (NSData *)call:(NSDictionary *)request replyPayloadLength:(NSUInteger)length error:(NSError **)error {
+    @synchronized(self) {
+        if(!_staging||!length||length>_stagingBytes)fail("mmio-staged-reply-extent");
+        // Keep the shared channel until the bytes are copied: another process
+        // may reuse staging immediately after this method returns.
+        channelLock(_shared);
+        @try {
+            NSMutableDictionary *r=[request mutableCopy];r[@"length"]=@(length);
+            NSDictionary *reply=[self call:r error:error];
+            if(!reply)return nil;
+            uint64_t offset=[reply[@"stagedOffset"] unsignedLongLongValue];
+            uint64_t returned=[reply[@"stagedLength"] unsignedLongLongValue];
+            uint64_t expectedCRC=[reply[@"stagedCRC"] unsignedLongLongValue];
+            if(offset||returned!=length||expectedCRC>UINT32_MAX||crc(_staging,length)!=(uint32_t)expectedCRC)
+                fail("mmio-staged-reply-contract");
+            return [NSData dataWithBytes:_staging length:length];
+        } @finally {channelUnlock(_shared);}
     }
 }
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)error {
@@ -281,7 +336,16 @@ static Namespace *openMMIO(void *lib) {
         }
         ns.ramPoll=(flagsWord&DVM_STAGING_FLAG_RAM_POLL)!=0;
     }
-    fprintf(stderr,"GPU_LOAD_DRIVER_STAGING enabled=%d bytes=%llu ram_poll=%d\n",ns.staging!=NULL,(unsigned long long)ns.stagingBytes,ns.ramPoll);
+    if(flagsWord&DVM_STAGING_FLAG_BUFFER_POOL){
+        uint64_t poolMagic,poolOffset,poolBytes,poolReserved;
+        memcpy(&poolMagic,ns.shared+DVM_BUFFER_POOL_DESCRIPTOR,8);memcpy(&poolOffset,ns.shared+DVM_BUFFER_POOL_DESCRIPTOR+8,8);
+        memcpy(&poolBytes,ns.shared+DVM_BUFFER_POOL_DESCRIPTOR+16,8);memcpy(&poolReserved,ns.shared+DVM_BUFFER_POOL_DESCRIPTOR+24,8);
+        if(poolMagic!=DVM_BUFFER_POOL_MAGIC||poolOffset!=DVM_BUFFER_POOL_OFFSET||poolBytes!=DVM_BUFFER_POOL_BYTES||poolReserved||
+           poolOffset%DVM_MANAGED_PAGE_BYTES||poolBytes%DVM_MANAGED_PAGE_BYTES||poolOffset<DVM_GPU_REPLY_DATA+DVM_GPU_MAX_BYTES||
+           poolOffset+poolBytes!=DVM_GPU_RAM_SIZE)fail("mmio-buffer-pool-contract");
+        ns.bufferPool=ns.shared+poolOffset;ns.bufferPoolBytes=poolBytes;
+    }
+    fprintf(stderr,"GPU_LOAD_DRIVER_STAGING enabled=%d bytes=%llu ram_poll=%d buffer_pool=%llu\n",ns.staging!=NULL,(unsigned long long)ns.stagingBytes,ns.ramPoll,(unsigned long long)ns.bufferPoolBytes);
 #endif
     return ns;
 #undef MMLOAD

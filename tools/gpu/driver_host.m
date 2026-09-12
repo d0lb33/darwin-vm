@@ -10,7 +10,9 @@
 #include "shared_render_host.h"
 #include "imported_pages_host.h"
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -42,6 +44,7 @@ enum {
 @property(nonatomic,strong) NSMutableData *textureUpload;
 @property(nonatomic) uint64_t textureUploadToken;
 @property(nonatomic) MTLPurgeableState purgeableState;
+@property(nonatomic) NSUInteger poolOffset,poolSpan;
 @end
 @implementation DVMEntry
 - (void)dealloc {_object=nil;_sharedRender=nil;}
@@ -68,8 +71,15 @@ static BOOL TextureLevelsOverlap(DVMEntry *a,DVMEntry *b){
 @property(nonatomic,strong) NSMutableData *renderStage;
 @property(nonatomic,copy) NSString *renderStageSHA;
 @property(nonatomic) uint64_t renderStageToken,renderStageLength;
+@property(nonatomic) void *bufferPoolMap;
+@property(nonatomic) int bufferPoolFD;
+@property(nonatomic,strong) NSMutableIndexSet *bufferPoolPages;
 @end
 @implementation DVMHost
+- (void)dealloc {
+    if(_bufferPoolMap&&_bufferPoolMap!=MAP_FAILED)munmap(_bufferPoolMap,DVM_SHARED_RAM_BYTES);
+    if(_bufferPoolFD>=0)close(_bufferPoolFD);
+}
 @end
 
 static NSDictionary *ErrorReply(uint64_t seq, NSString *domain, NSInteger code,
@@ -429,6 +439,12 @@ static NSDictionary *Release(DVMHost *host, uint64_t seq, NSDictionary *request)
             retiredID=mapping.resourceID;
         }
     }
+    if(entry.poolSpan){
+        entry.object=nil;
+        NSRange pages=NSMakeRange((entry.poolOffset-DVM_BUFFER_POOL_OFFSET)/DVM_MANAGED_PAGE_BYTES,
+                                  entry.poolSpan/DVM_MANAGED_PAGE_BYTES);
+        [host.bufferPoolPages removeIndexesInRange:pages];
+    }
     if(!entry.textureView)host.textureBytes -= entry.textureBytes;
     if([entry.kind isEqual:@"resident"])host.residentBytes=0;
     [host.entries removeObjectForKey:@(handle)];
@@ -459,24 +475,57 @@ static NSDictionary *Stats(DVMHost *host, uint64_t seq) {
             @"ordinaryLogicalBytes" : @(host.textureBytes),
             @"residentWorkloads":@(host.residentBytes?1:0),
             @"stagedRenderBytes":@(host.renderStage.length),@"stagedRenderTransactions":@(host.renderStage?1:0),
-            @"importedBytes":@(host.importedBytes),@"importedAllocations":@(host.imports.count)
+            @"importedBytes":@(host.importedBytes),@"importedAllocations":@(host.imports.count),
+            @"sharedBufferBytes":@(host.bufferPoolPages.count*DVM_MANAGED_PAGE_BYTES),@"sharedBufferPages":@(host.bufferPoolPages.count)
         },
         @"creations" : @(host.creations),
         @"submissions" : @(host.submissions),@"renderPasses":@(host.renderPasses),@"renderDraws":@(host.renderDraws),@"blitPasses":@(host.blitPasses),@"computePasses":@(host.computePasses)
     };
 }
+static BOOL MapBufferPool(DVMHost *host) {
+    if(host.bufferPoolMap)return host.bufferPoolMap!=MAP_FAILED;
+    host.bufferPoolFD=-1;
+    const char *path=getenv("DVM_DRIVER_PRESENT_RAM");
+    if(!path||!*path){host.bufferPoolMap=MAP_FAILED;return NO;}
+    int fd=open(path,O_RDWR);struct stat st;
+    if(fd<0||fstat(fd,&st)||st.st_size!=DVM_SHARED_RAM_BYTES){if(fd>=0)close(fd);host.bufferPoolMap=MAP_FAILED;return NO;}
+    void *map=mmap(NULL,DVM_SHARED_RAM_BYTES,PROT_READ|PROT_WRITE,MAP_SHARED,fd,0);
+    uint32_t magic=0;if(map!=MAP_FAILED)memcpy(&magic,map,4);
+    if(map==MAP_FAILED||magic!=0x44564d31u){if(map!=MAP_FAILED)munmap(map,DVM_SHARED_RAM_BYTES);close(fd);host.bufferPoolMap=MAP_FAILED;return NO;}
+    host.bufferPoolFD=fd;host.bufferPoolMap=map;host.bufferPoolPages=[NSMutableIndexSet indexSet];return YES;
+}
+static NSRange AllocateBufferPool(DVMHost *host,NSUInteger length) {
+    NSUInteger pages=(length+DVM_MANAGED_PAGE_BYTES-1)/DVM_MANAGED_PAGE_BYTES;
+    NSUInteger capacity=DVM_BUFFER_POOL_BYTES/DVM_MANAGED_PAGE_BYTES;
+    for(NSUInteger start=0;start+pages<=capacity;start++){
+        NSRange range=NSMakeRange(start,pages);
+        if(![host.bufferPoolPages intersectsIndexesInRange:range]){[host.bufferPoolPages addIndexesInRange:range];return range;}
+    }
+    return NSMakeRange(NSNotFound,0);
+}
 static NSDictionary *Buffer(DVMHost *host, uint64_t seq, NSDictionary *r) {
     uint64_t n;
     if (!Number(r[@"length"], &n) || !n || n > DVM_BUFFER_BYTES || n > kMaxTextures - host.textureBytes)
         return HostError(seq, EINVAL, @"invalid buffer length");
-    id<MTLBuffer> b = [host.device newBufferWithLength:n options:MTLResourceStorageModeShared];
+    BOOL requested=[r[@"sharedPool"] isEqual:@YES];NSRange pages=NSMakeRange(NSNotFound,0);
+    if(requested&&!MapBufferPool(host))return HostError(seq,EIO,@"shared buffer pool mapping");
+    if(requested)pages=AllocateBufferPool(host,(NSUInteger)n);
+    NSUInteger span=pages.location==NSNotFound?0:pages.length*DVM_MANAGED_PAGE_BYTES;
+    NSUInteger offset=pages.location==NSNotFound?0:DVM_BUFFER_POOL_OFFSET+pages.location*DVM_MANAGED_PAGE_BYTES;
+    id<MTLBuffer> b=span?[host.device newBufferWithBytesNoCopy:(uint8_t *)host.bufferPoolMap+offset length:span options:MTLResourceStorageModeShared deallocator:nil]:
+                         [host.device newBufferWithLength:n options:MTLResourceStorageModeShared];
     DVMEntry *e;
-    if (!b || !Add(host, @"buffer", b, &e))
+    if (!b || !Add(host, @"buffer", b, &e)) {
+        if(span)[host.bufferPoolPages removeIndexesInRange:pages];
         return HostError(seq, ENOMEM, @"buffer allocation");
+    }
     e.textureBytes = n;
+    e.poolOffset=offset;e.poolSpan=span;
     host.textureBytes += n;
-    memset(b.contents, 0, n);
-    return @{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(e.handle), @"allocatedSize":@(b.allocatedSize)};
+    memset(b.contents, 0, span?:n);
+    NSMutableDictionary *reply=[@{@"seq" : @(seq), @"ok" : @YES, @"handle" : @(e.handle), @"allocatedSize":@(b.allocatedSize)} mutableCopy];
+    if(span){reply[@"sharedOffset"]=@(offset);reply[@"sharedSpan"]=@(span);}
+    return reply;
 }
 
 #include "blur_host_submit.inc"
@@ -643,6 +692,18 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
         return HostError(seq, EINVAL, @"request lacks op");
     if([op hasPrefix:@"renderStage"])return RenderStage(host,seq,request);
     if(host.renderStage&&![op isEqual:@"stats"])return HostError(seq,EBUSY,@"incomplete render request transaction");
+    if([op isEqual:@"renderSubmitJSON"]){
+        NSString *encoded=request[@"data"];
+        NSData *data=[encoded isKindOfClass:NSString.class]
+            ?[[NSData alloc] initWithBase64EncodedString:encoded options:0]:nil;
+        if(!data.length||data.length>DVM_RENDER_REQUEST_BYTES)
+            return HostError(seq,EINVAL,@"serialized render request extent");
+        NSError *failure=nil;
+        id decoded=[NSJSONSerialization JSONObjectWithData:data options:0 error:&failure];
+        if(![decoded isKindOfClass:NSDictionary.class]||![decoded[@"op"] isEqual:@"renderSubmit"]||decoded[@"seq"]||decoded[@"client"])
+            return HostError(seq,EINVAL,@"serialized render request contract");
+        return ProcessRequest(host,seq,decoded);
+    }
     if([op isEqual:@"textureView"])return TextureView(host,seq,request);
     if([op isEqual:@"computePipeline"])return ComputePipeline(host,seq,request);
     if([op isEqual:@"writeTextureChunk"]||[op isEqual:@"abortTextureUpload"])return TextureChunk(host,seq,request);
@@ -706,6 +767,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
     if([op isEqual:@"renderSubmit"])return RenderSubmit(host,seq,request);
     if([op isEqual:@"writeRenderBuffer"])return WriteRenderBuffer(host,seq,request);
     if([op isEqual:@"readRenderBuffer"])return ReadRenderBuffer(host,seq,request);
+    if([op isEqual:@"readRenderBufferStaged"])return ReadRenderBufferStaged(host,seq,request);
     if([op isEqual:@"function"])return SpecializedFunction(host,seq,request);
     if ([op isEqual:@"buffer"])
         return Buffer(host, seq, request);
@@ -730,6 +792,7 @@ static NSDictionary *ProcessRequest(DVMHost *host, uint64_t seq, NSDictionary *r
 int main(void) {
     @autoreleasepool {
         DVMHost *host = [DVMHost new];
+        host.bufferPoolFD=-1;
         host.device = MTLCreateSystemDefaultDevice();
         if (!host.device)
             return 2;

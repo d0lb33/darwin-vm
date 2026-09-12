@@ -8,10 +8,11 @@ import struct
 import tempfile
 import unittest
 import zlib
-from driver_mmio_peer import MMIOPeer,MAGIC,STAGING_MAGIC,STAGING_OFFSET,STAGING_BYTES,STAGING_DESCRIPTOR
+from driver_mmio_peer import (MMIOPeer,MAGIC,STAGING_MAGIC,STAGING_OFFSET,STAGING_BYTES,STAGING_DESCRIPTOR,
+    STAGING_FLAG_BUFFER_POOL,BUFFER_POOL_MAGIC,BUFFER_POOL_OFFSET,BUFFER_POOL_BYTES,BUFFER_POOL_DESCRIPTOR)
 
 BUILD=Path(os.environ.get('DVM_DRIVER_BUILD','/tmp/dvm/MMIO_METAL_BUILD1'))
-AIR=Path('/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib')
+AIR=Path(os.environ.get('DVM_DRIVER_AIR','/tmp/dvm/GPU_FEAS_SHADER1/air/slice0.metallib'))
 
 class MMIOPeerTests(unittest.TestCase):
     def setUp(self):
@@ -79,6 +80,31 @@ class MMIOPeerTests(unittest.TestCase):
         self.assertEqual(defines['DVM_STAGING_OFFSET'],STAGING_OFFSET);self.assertEqual(defines['DVM_STAGING_BYTES'],STAGING_BYTES)
         self.assertEqual(defines['DVM_STAGING_DESCRIPTOR'],STAGING_DESCRIPTOR);self.assertEqual(defines['DVM_STAGING_MAGIC'],STAGING_MAGIC)
         self.assertEqual(STAGING_OFFSET+STAGING_BYTES,0x200000)  # ends where mode-3 replies begin
+        pool={m[1]:int(m[2],0) for m in __import__('re').finditer(r'#define (DVM_BUFFER_POOL_\w+|DVM_STAGING_FLAG_BUFFER_POOL) (0x[0-9a-fA-F]+|\d+)',header)}
+        self.assertEqual((pool['DVM_BUFFER_POOL_DESCRIPTOR'],pool['DVM_BUFFER_POOL_MAGIC'],pool['DVM_BUFFER_POOL_OFFSET'],pool['DVM_BUFFER_POOL_BYTES']),
+                         (BUFFER_POOL_DESCRIPTOR,BUFFER_POOL_MAGIC,BUFFER_POOL_OFFSET,BUFFER_POOL_BYTES))
+        self.assertEqual(pool['DVM_STAGING_FLAG_BUFFER_POOL'],STAGING_FLAG_BUFFER_POOL)
+        self.assertEqual(BUFFER_POOL_OFFSET+BUFFER_POOL_BYTES,0x1000000)
+    def test_shared_buffer_pool_has_bidirectional_gpu_coherence_and_reuse(self):
+        if not self.peer.managed:self.skipTest('shared buffers are a mode-3 managed contract')
+        self.assertTrue(self.peer.staging_flags&STAGING_FLAG_BUFFER_POOL)
+        self.assertEqual(struct.unpack_from('<4Q',self.peer.ram,BUFFER_POOL_DESCRIPTOR),
+                         (BUFFER_POOL_MAGIC,BUFFER_POOL_OFFSET,BUFFER_POOL_BYTES,0))
+        self.wire.sendall(self.framed(dict(op='buffer',length=65536,sharedPool=True),1));self.peer.pump()
+        first=self.reply(1);self.assertTrue(first['ok'],first)
+        offset,span=first['sharedOffset'],first['sharedSpan'];self.assertEqual(span,65536)
+        pattern=bytes(range(256))*256;self.peer.ram[offset:offset+span]=pattern
+        self.wire.sendall(self.framed(dict(op='readRenderBufferStaged',buffer=first['handle'],offset=0,length=span),2));self.peer.pump()
+        self.assertTrue(self.reply(2)['ok']);self.assertEqual(self.peer.ram[STAGING_OFFSET:STAGING_OFFSET+span],pattern)
+        blit=dict(op='renderSubmit',commands=[dict(kind='blit',operations=[['fillBuffer',first['handle'],0,span,0x5a]])],uploads=[],readbacks=[])
+        self.wire.sendall(self.framed(blit,3));self.peer.pump();done=self.reply(3)
+        self.assertTrue(done['ok'],done);self.assertEqual(done['writtenBuffers'],[first['handle']])
+        self.assertEqual(self.peer.ram[offset:offset+span],b'Z'*span)
+        self.wire.sendall(self.framed(dict(op='buffer',length=16384,sharedPool=True),4));self.peer.pump()
+        second=self.reply(4);self.assertNotEqual(second['sharedOffset'],offset)
+        self.wire.sendall(self.framed(dict(op='release',handle=first['handle']),5));self.peer.pump();self.assertTrue(self.reply(5)['ok'])
+        self.wire.sendall(self.framed(dict(op='buffer',length=65536,sharedPool=True),6));self.peer.pump()
+        reused=self.reply(6);self.assertEqual(reused['sharedOffset'],offset)
     def test_staged_payload_reaches_worker_as_base64_and_bad_crc_never_does(self):
         if not self.peer.present:self.skipTest('staging is a mode-3 (present/managed) contract')
         self.assertEqual(struct.unpack_from('<3Q',self.peer.ram,STAGING_DESCRIPTOR),(STAGING_MAGIC,STAGING_OFFSET,STAGING_BYTES))
@@ -90,12 +116,33 @@ class MMIOPeerTests(unittest.TestCase):
         record=self.peer.records[-1]
         self.assertEqual(record['staged_bytes'],65536);self.assertLess(record['request_bytes'],256)
         self.assertNotIn('data',record['request']);self.assertNotIn('staged',record['request'])
-        for seq,offset in ((3,0),(4,32768)):
-            self.wire.sendall(self.framed(dict(op='readRenderBuffer',buffer=handle,offset=offset,length=32768),seq));self.peer.pump()
-            self.assertEqual(base64.b64decode(self.reply(seq)['data']),payload[offset:offset+32768])
+        self.wire.sendall(self.framed(dict(op='readRenderBufferStaged',buffer=handle,offset=0,length=len(payload)),3));self.peer.pump()
+        staged=self.reply(3)
+        self.assertEqual((staged['stagedOffset'],staged['stagedLength'],staged['stagedCRC']),
+                         (0,len(payload),zlib.crc32(payload)))
+        self.assertEqual(self.peer.ram[STAGING_OFFSET:STAGING_OFFSET+len(payload)],payload)
+        self.assertEqual(self.peer.records[-1]['staged_reply_bytes'],len(payload))
+        self.assertNotIn('data',self.peer.records[-1]['reply'])
+        self.wire.sendall(self.framed(dict(op='readRenderBuffer',buffer=handle,offset=32768,length=32768),4));self.peer.pump()
+        self.assertEqual(base64.b64decode(self.reply(4)['data']),payload[32768:])
         self.wire.sendall(self.framed(dict(op='writeRenderBuffer',buffer=handle,offset=0),5,payload,crc_bad=True))
         with self.assertRaisesRegex(ValueError,'staged payload CRC'):self.peer.pump()
         self.assertEqual(max(self.peer.seen),4)
+    def test_serialized_render_request_is_forwarded_without_base64_envelope(self):
+        if not self.peer.present:self.skipTest('staging is a mode-3 (present/managed) contract')
+        self.wire.sendall(self.framed(dict(op='texture',width=4,height=4,format=80,usage=5),1));self.peer.pump()
+        target=self.reply(1)['handle']
+        inner=dict(op='renderSubmit',commands=[dict(kind='render',target=target,load=2,store=1,
+                   clear=[1,0,0,1],operations=[])],uploads=[],readbacks=[])
+        payload=json.dumps(inner,separators=(',',':')).encode()
+        self.wire.sendall(self.framed(dict(op='renderSubmitJSON',client='SYSTEM'),2,payload));self.peer.pump()
+        reply=self.reply(2);self.assertTrue(reply['ok'],reply);self.assertEqual(reply['status'],4)
+        record=self.peer.records[-1]
+        self.assertEqual(record['op'],'renderSubmit');self.assertEqual(record['staged_bytes'],len(payload))
+        self.assertNotIn('data',record['request']);self.assertNotIn('staged',record['request'])
+        self.wire.sendall(self.framed(dict(op='renderSubmitJSON'),3,b'{"op":"submit"}'))
+        with self.assertRaisesRegex(ValueError,'serialized render request contract'):self.peer.pump()
+        self.assertEqual(max(self.peer.seen),2)
     def test_audit_publication_and_corruption(self):
         raw=b'GPU_LOAD_DRIVER_RUN bounded=1\n'
         self.peer.ram[0x1010:0x1010+len(raw)]=raw

@@ -24,10 +24,16 @@
     if(self.purgeabilityRoot.residencyState>MTLPurgeableStateNonVolatile)reject(@"volatile resource requires nonvolatile reacquisition");
 }
 - (void)setResponsibleProcess:(int32_t)process {
-    NSError *e=nil;NSNumber *bits=@((uint32_t)process);
-    NSDictionary *r=[self.owner call:@{@"op":@"resourceProcess",@"handle":self.handle,@"processBits":bits} error:&e];
-    if(![r[@"handle"] isEqual:self.handle]||![r[@"processBits"] isEqual:bits])reject(e.description?:@"resource process metadata acknowledgement");
-    _responsibleProcess=process;
+    @synchronized(self){
+        // QuartzCore repeats the same attribution on retained resources every
+        // frame. The host table is stateful and creation initializes it to 0,
+        // so an unchanged setter has no observable work to forward.
+        if(_responsibleProcess==process)return;
+        NSError *e=nil;NSNumber *bits=@((uint32_t)process);
+        NSDictionary *r=[self.owner call:@{@"op":@"resourceProcess",@"handle":self.handle,@"processBits":bits} error:&e];
+        if(![r[@"handle"] isEqual:self.handle]||![r[@"processBits"] isEqual:bits])reject(e.description?:@"resource process metadata acknowledgement");
+        _responsibleProcess=process;
+    }
 }
 - (MTLStorageMode)storageMode {return (self.acceptedOptions>>4)&15;}
 - (MTLCPUCacheMode)cpuCacheMode {return self.acceptedOptions&15;}

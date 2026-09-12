@@ -1,10 +1,18 @@
 // Stage oversized serialized command lists without splitting their semantics.
 // Resource lifetime and serialization remain owned by the existing device FIFO.
-static NSDictionary *DVMRenderTransport(DVMMetalRPC rpc,NSDictionary *request,NSError **failure){
+static NSDictionary *DVMRenderTransport(DVMMetalRPC rpc,DVMMetalStagedRPC stagedRPC,
+                                        NSUInteger stagedBytes,NSDictionary *request,NSError **failure){
     NSData *data=[NSJSONSerialization dataWithJSONObject:request options:0 error:failure];
     if(!data)return nil;
-    if(data.length<=DVM_RENDER_DIRECT_BYTES)return rpc(request,failure);
     if(data.length>DVM_RENDER_REQUEST_BYTES){if(failure)*failure=error(@"render command request exceeds negotiated byte limit");return nil;}
+    // The ordinary dictionary RPC serializes its request after assigning the
+    // sequence.  Reusing it here made every render command list pay for the
+    // same large Objective-C -> JSON conversion twice in the guest.  The
+    // staging transport carries these already-serialized bytes and sends only
+    // a small sequenced descriptor through the ordinary path.
+    if(stagedRPC&&data.length<=stagedBytes)
+        return stagedRPC(@{@"op":@"renderSubmitJSON"},data,failure);
+    if(data.length<=DVM_RENDER_DIRECT_BYTES)return rpc(request,failure);
     unsigned char digest[CC_SHA256_DIGEST_LENGTH];char hex[65];
     CC_SHA256(data.bytes,(CC_LONG)data.length,digest);
     for(unsigned i=0;i<32;i++)snprintf(hex+i*2,3,"%02x",digest[i]);

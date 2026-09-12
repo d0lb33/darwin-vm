@@ -25,14 +25,22 @@ MAGIC=0x44564d31
 # Mirror of driver_capabilities.h (test_driver_mmio_peer checks the values).
 # Staged bulk transfers: the guest copies raw bytes to STAGING_OFFSET and the
 # framed JSON request carries {offset,length,crc}; the peer verifies the CRC
-# and hands the worker the base64 field it always accepted. Published only in
-# the present/managed (mode 3) layout, whose framed requests stay under 64 KiB.
+# and normally hands the worker the base64 field it always accepted. A
+# renderSubmitJSON payload is already a complete serialized command request;
+# decode that once on the host and forward the original renderSubmit shape.
+# Published only in the present/managed (mode 3) layout, whose framed requests
+# stay under 64 KiB.
 STAGING_OFFSET=0x20000
 STAGING_BYTES=0x1E0000
 STAGING_DESCRIPTOR=0x340
 STAGING_MAGIC=int.from_bytes(b'DVMSTAG1','little')
 STAGING_FLAG_ENABLED=1
 STAGING_FLAG_RAM_POLL=2
+STAGING_FLAG_BUFFER_POOL=4
+BUFFER_POOL_DESCRIPTOR=0x360
+BUFFER_POOL_MAGIC=int.from_bytes(b'DVMBUF1\0','little')
+BUFFER_POOL_OFFSET=0x300000
+BUFFER_POOL_BYTES=0xD00000
 WORKER_FRAME=4*1024*1024
 
 class MMIOPeer(DriverPeer):
@@ -46,8 +54,11 @@ class MMIOPeer(DriverPeer):
         self.present=self.managed or (mode.exists() and mode.read_text().strip()=="--mmio-present")
         self.audit_limit=120 if self.present or (mode.exists() and mode.read_text().strip()=="--mmio-blur") else 64
         self.reply_offset=0x200000 if self.present else 0x800000
-        # DVM_TRANSPORT_FLAGS: bit 0 staging, bit 1 guest RAM polling (default both).
-        self.staging_flags=int(os.environ.get('DVM_TRANSPORT_FLAGS','3'),0) if self.present else 0
+        # DVM_TRANSPORT_FLAGS: bit 0 staging, bit 1 guest RAM polling, bit 2
+        # reusable buffers.  The buffer pool is mode-3 only.
+        default_flags='7' if self.managed else '3'
+        self.staging_flags=int(os.environ.get('DVM_TRANSPORT_FLAGS',default_flags),0) if self.present else 0
+        if not self.managed:self.staging_flags&=~STAGING_FLAG_BUFFER_POOL
         self.staged_requests=0;self.staged_bytes=0
         self.max_bytes=0x10000 if self.present else MAX
         raw=self.library.read_bytes()
@@ -91,6 +102,8 @@ class MMIOPeer(DriverPeer):
         self.ram[0x100:0x120]=bytes.fromhex(AIR_SHA)
         if self.staging_flags:
             struct.pack_into('<4Q',self.ram,STAGING_DESCRIPTOR,STAGING_MAGIC,STAGING_OFFSET,STAGING_BYTES,self.staging_flags)
+        if self.staging_flags&STAGING_FLAG_BUFFER_POOL:
+            struct.pack_into('<4Q',self.ram,BUFFER_POOL_DESCRIPTOR,BUFFER_POOL_MAGIC,BUFFER_POOL_OFFSET,BUFFER_POOL_BYTES,0)
         if hasattr(self,'present_config'):
             frames,hz=self.present_config
             struct.pack_into('<4I',self.ram,0x200,1,frames,hz,0)
@@ -134,8 +147,23 @@ class MMIOPeer(DriverPeer):
         if control is None:
             self.proc.stdin.write(struct.pack('<I',n)+raw);self.proc.stdin.flush()
             length,=struct.unpack('<I',self.read(4))
-            if not 0<length<=self.max_bytes:raise ValueError('host reply length')
+            worker_limit=WORKER_FRAME if request.get('op')=='readRenderBufferStaged' else self.max_bytes
+            if not 0<length<=worker_limit:raise ValueError('host reply length')
             output=self.read(length);reply=blur_peer.reply(output) if struct.unpack_from("<I",output)[0]==blur_peer.REPLY else decode_reply(output) if struct.unpack_from("<I",output)[0]==REPLY else json.loads(output)
+            staged_reply_bytes=0
+            if request.get('op')=='readRenderBufferStaged':
+                try:data=base64.b64decode(reply['data'],validate=True)
+                except (KeyError,TypeError,ValueError):raise ValueError('staged readback payload')
+                expected=request.get('length')
+                if not reply.get('ok') or reply.get('buffer')!=request.get('buffer') or reply.get('offset')!=request.get('offset') or \
+                        not isinstance(expected,int) or not 0<expected<=STAGING_BYTES or len(data)!=expected:
+                    raise ValueError('staged readback contract')
+                self.ram[STAGING_OFFSET:STAGING_OFFSET+len(data)]=data
+                staged_reply_bytes=len(data)
+                reply=dict(seq=seq,ok=True,buffer=request['buffer'],stagedOffset=0,
+                           stagedLength=len(data),stagedCRC=zlib.crc32(data))
+                output=json.dumps(reply,separators=(',',':')).encode();length=len(output)
+                if length>self.max_bytes:raise ValueError('staged readback descriptor extent')
         else:
             reply=dict(control,seq=seq,ok=True);output=json.dumps(reply).encode();length=len(output)
             if length>self.max_bytes:raise ValueError('runner reply extent')
@@ -154,6 +182,7 @@ class MMIOPeer(DriverPeer):
             host_service_us=service_us,host_received_ns=started,host_completed_ns=time.monotonic_ns(),
             request={k:v for k,v in request.items() if k!='data'},reply=reply)
         if staged_bytes:record['staged_bytes']=staged_bytes
+        if 'staged_reply_bytes' in locals() and staged_reply_bytes:record['staged_reply_bytes']=staged_reply_bytes
         if request.get('op') in ('writeRenderBuffer','upload','writeTextureChunk') and 'data' in request:
             # Generated resource contents are replayable; Apple libraries stay
             # referenced by their verified hash and separate local AIR cache.
@@ -181,7 +210,17 @@ class MMIOPeer(DriverPeer):
         payload=bytes(self.ram[STAGING_OFFSET+offset:STAGING_OFFSET+offset+length])
         if zlib.crc32(payload)!=crc:raise ValueError('staged payload CRC')
         rebuilt={k:v for k,v in request.items() if k!='staged'}
-        rebuilt['data']=base64.b64encode(payload).decode()
+        if rebuilt.get('op')=='renderSubmitJSON':
+            try:decoded=json.loads(payload)
+            except (UnicodeDecodeError,json.JSONDecodeError):raise ValueError('serialized render request JSON')
+            if not isinstance(decoded,dict) or decoded.get('op')!='renderSubmit' or \
+                    'seq' in decoded or 'client' in decoded:
+                raise ValueError('serialized render request contract')
+            decoded['seq']=rebuilt['seq']
+            if 'client' in rebuilt:decoded['client']=rebuilt['client']
+            rebuilt=decoded
+        else:
+            rebuilt['data']=base64.b64encode(payload).decode()
         self.staged_requests+=1;self.staged_bytes+=length
         return json.dumps(rebuilt).encode(),rebuilt,length
     def audit(self):

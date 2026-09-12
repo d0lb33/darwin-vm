@@ -10,7 +10,7 @@ xcrun clang -O1 -Wall -Wextra -Werror -fsanitize=address,undefined "$repo/tools/
 xcrun clang -O1 -Wall -Wextra -Werror -fsanitize=address,undefined -I "$repo/qemu-sptm/include" "$repo/tools/gpu/surface_registry_test.c" -o "$out/surface_registry_test"
 flags=(-fobjc-arc -fobjc-arc-exceptions -O1 -Wall -Wextra -Werror -Wno-deprecated-declarations -Wno-protocol -Wno-objc-protocol-property-synthesis)
 xcrun clang "${flags[@]}" "$repo/tools/gpu/driver_host.m" -framework Metal -framework Foundation -o "$out/driver_host"
-for name in driver_contract_test driver_capability_test test_render_writeback test_owned_surface_frontend test_imported_surface_frontend test_purgeability_frontend test_framebuffer_read test_private_block_texture test_submission_queues test_submission_reentrancy test_blit_forwarding test_library_loading test_texture_1d test_large_texture_frontend test_compute_render_forwarding test_texture_views; do
+for name in driver_contract_test driver_capability_test test_render_writeback test_shared_buffer_frontend test_owned_surface_frontend test_imported_surface_frontend test_purgeability_frontend test_framebuffer_read test_private_block_texture test_submission_queues test_submission_reentrancy test_blit_forwarding test_library_loading test_texture_1d test_large_texture_frontend test_compute_render_forwarding test_texture_views test_resource_process_frontend; do
     xcrun clang "${flags[@]}" "$repo/tools/gpu/$name.m" "$repo/tools/gpu/driver_guest.m" -framework Metal -framework Foundation -framework IOSurface -o "$out/$name"
 done
 xcrun clang "${flags[@]}" "$repo/tools/gpu/surface_pages_test.m" -framework Metal -framework Foundation -o "$out/surface_pages_test"

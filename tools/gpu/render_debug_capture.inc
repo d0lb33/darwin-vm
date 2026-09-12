@@ -2,15 +2,33 @@
 // change GPU scheduling: these captures are not performance measurements.
 // Never expose this mechanism as a guest command or capability.
 static NSUInteger DVMDebugCaptureBytes,DVMDebugCaptureIndex;
+static BOOL DVMDebugSelectedHandle(const char *selected,NSUInteger handle){
+    if(!selected)return YES;
+    const char *at=selected;
+    while(*at){
+        char *end=NULL;unsigned long long value=strtoull(at,&end,0);
+        if(end==at)return NO;
+        if(value==handle)return YES;
+        if(*end==',')at=end+1;else if(!*end)break;else return NO;
+    }
+    return NO;
+}
 static void DVMDebugSnapshot(DVMHost *host,id<MTLCommandBuffer> command,
     NSMutableArray *captures,DVMEntry *entry,NSUInteger level,uint64_t seq,
     NSUInteger pass,NSString *phase){
     if(!getenv("DVM_RENDER_CAPTURE_DIR"))return;
+    const char *selected=getenv("DVM_RENDER_CAPTURE_SEQ");
+    if(selected&&strtoull(selected,NULL,0)!=seq)return;
+    selected=getenv("DVM_RENDER_CAPTURE_PASS");
+    if(selected&&strtoull(selected,NULL,0)!=pass)return;
+    selected=getenv("DVM_RENDER_CAPTURE_PHASE");
+    if(selected&&strcmp(selected,phase.UTF8String))return;
+    if(!DVMDebugSelectedHandle(getenv("DVM_RENDER_CAPTURE_HANDLE"),entry.handle))return;
     id<MTLTexture> texture=entry.object;
     if(texture.textureType!=MTLTextureType2D)return;
     NSUInteger width=MAX((NSUInteger)1,texture.width>>level),height=MAX((NSUInteger)1,texture.height>>level);
     NSUInteger row=(width*DVMFormatBytes(texture.pixelFormat)+255)&~255ul,length=row*height;
-    if(!length||length>16*1024*1024||DVMDebugCaptureBytes>128*1024*1024-length){fprintf(stderr,"DVM_CAPTURE_FAIL byte budget\n");exit(78);}
+    if(!length||length>32*1024*1024||DVMDebugCaptureBytes>256*1024*1024-length){fprintf(stderr,"DVM_CAPTURE_FAIL byte budget\n");exit(78);}
     id<MTLBuffer> buffer=[host.device newBufferWithLength:length options:MTLResourceStorageModeShared];
     if(!buffer){fprintf(stderr,"DVM_CAPTURE_FAIL allocation\n");exit(78);}
     id<MTLBlitCommandEncoder> blit=[command blitCommandEncoder];

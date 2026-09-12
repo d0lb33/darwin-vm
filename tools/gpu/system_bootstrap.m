@@ -158,6 +158,11 @@ __attribute__((constructor)) static void DVMSystemBoot(void) {
                 DVMDevice *device=(DVMDevice *)systemDevice;
                 device.stagedBytes=(NSUInteger)ns.stagingBytes;
                 device.stagedTransport=^NSDictionary *(NSDictionary *r,NSData *payload,NSError **e){return [ns call:r payload:payload error:e];};
+                device.stagedReadTransport=^NSData *(NSDictionary *r,NSUInteger length,NSError **e){return [ns call:r replyPayloadLength:length error:e];};
+            }
+            if(ns.bufferPool&&[systemDevice respondsToSelector:@selector(setBufferPool:)]){
+                DVMDevice *device=(DVMDevice *)systemDevice;
+                device.bufferPool=ns.bufferPool;device.bufferPoolBytes=(NSUInteger)ns.bufferPoolBytes;
             }
 #ifdef DVM_BOOT_SESSION_RELOAD
             if(staged.create)DVMSessionAdoptDeviceClass([systemDevice class]);

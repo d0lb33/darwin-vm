@@ -25,6 +25,8 @@ def main():
     build=json.loads((a.base/'build.json').read_text())
     if not (build.get('runtime_probe') or build.get('session_reload')):p.error('requires opted-in loader build')
     a.out.mkdir(exist_ok=False);shutil.copytree(a.base/'stubs',a.out/'stubs')
+    for copied in (a.out/'stubs').rglob('*'):
+        if copied.is_file():copied.chmod(copied.stat().st_mode|0o200)
     src=Path(__file__).resolve().parent;commands=[]
     def run(cmd):commands.append(cmd);subprocess.run(cmd,check=True)
     sdk=subprocess.check_output(['xcrun','--sdk','macosx','--show-sdk-path'],text=True).strip()
@@ -41,11 +43,17 @@ def main():
     # Declare emitted imports, then verify them against the exact guest exports.
     symbols=set(subprocess.check_output(['nm','-u',str(a.out/'revision.o')],text=True).split())
     objc=a.out/'stubs/usr/lib/libobjc.tbd';text=objc.read_text()
-    names=sorted(s for s in symbols if s.startswith('_objc_') and '"'+s+'"' not in text)
+    objc_runtime_prefixes = ('_objc_', '_class_', '_protocol_')
+    names=sorted(s for s in symbols if s.startswith(objc_runtime_prefixes) and '"'+s+'"' not in text)
     objc.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in names)))
+    system=a.out/'stubs/usr/lib/libSystem.tbd';text=system.read_text()
+    names=sorted(s for s in symbols if s in ('_pthread_threadid_np',) and '"'+s+'"' not in text)
+    if names:system.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in names)))
     stub=a.out/'stubs/System/Library/Frameworks/Foundation.framework/Foundation.tbd'
-    text=stub.read_text();symbol='"_OBJC_CLASS_$_NSURL"'
-    if symbol not in text:stub.write_text(text.replace('symbols: [ ','symbols: [ '+symbol+', '))
+    text=stub.read_text()
+    foundation_classes=('_OBJC_CLASS_$_NSURL', '_OBJC_CLASS_$_NSMethodSignature')
+    names=sorted(s for s in foundation_classes if s in symbols and '"'+s+'"' not in text)
+    if names:stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in names)))
     run(['xcrun','clang',*flags,'-dynamiclib','-Wl,-install_name,@rpath/DVMProxy.bundle/DVMProxy',str(a.out/'revision.o'),
         '-F',str(a.out/'stubs/System/Library/Frameworks'),'-L',str(a.out/'stubs/usr/lib'),
         '-framework','Foundation','-framework','CoreFoundation','-framework','Metal','-framework','IOSurface','-lobjc','-o',str(bundle/'DVMProxy')])

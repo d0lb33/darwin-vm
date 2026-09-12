@@ -4,12 +4,15 @@
 #import "driver_api.h"
 #import <CommonCrypto/CommonDigest.h>
 #import <IOSurface/IOSurface.h>
+#import <IOKit/IOKitLib.h>
 #include <dlfcn.h>
 #include <objc/runtime.h>
+#include <time.h>
 #include "present_layout.h"
 #include "driver_capabilities.h"
 #include "dirty_buffer_range.h"
 #include "metal_library_slice.h"
+#include "../../qemu-sptm/include/xnu/darwin_gpu_transport.h"
 #ifdef DVM_SURFACE_PIN_PROBE
 static void DVMProbeSurfacePin(IOSurfaceRef surface);
 #endif
@@ -39,7 +42,11 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 @interface DVMDevice : NSObject <MTLDevice>
 @property(nonatomic, copy) DVMMetalRPC transport;
 @property(nonatomic, copy) DVMMetalStagedRPC stagedTransport;
+@property(nonatomic, copy) DVMMetalStagedReadRPC stagedReadTransport;
 @property(nonatomic) NSUInteger stagedBytes;
+@property(nonatomic) uint8_t *bufferPool;
+@property(nonatomic) NSUInteger bufferPoolBytes;
+@property(nonatomic,strong) id bufferPoolOwner;
 @property(nonatomic, strong) dispatch_queue_t serial;
 @property(nonatomic, strong) dispatch_queue_t submissionOrder;
 @property(nonatomic) NSUInteger pendingSubmissions;
@@ -57,6 +64,21 @@ static void DVMTextureRejection(const char *reason,MTLTextureDescriptor *d,IOSur
 - (NSDictionary *)contractCapabilities;
 - (NSDictionary *)call:(NSDictionary *)request error:(NSError **)err;
 - (void)retire:(NSNumber *)handle mapping:(id<DVMMetalImportedMapping>)mapping;
+- (id<MTLBuffer>)dvmNewBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)options allowSharedPool:(BOOL)allowPool;
+@end
+typedef __typeof__(&IOConnectUnmapMemory64) DVMIOUnmapFn;
+typedef __typeof__(&IOServiceClose) DVMIOCloseFn;
+@interface DVMBufferPoolMapping : NSObject
+@property(nonatomic) io_connect_t client;
+@property(nonatomic) uint8_t *bytes;
+@property(nonatomic) DVMIOUnmapFn unmap;
+@property(nonatomic) DVMIOCloseFn closeClient;
+@end
+@implementation DVMBufferPoolMapping
+- (void)dealloc {
+    if(_bytes&&_client&&_unmap)_unmap(_client,DVM_GPU_MEMORY_TYPE,mach_task_self(),(mach_vm_address_t)_bytes);
+    if(_client&&_closeClient)_closeClient(_client);
+}
 @end
 @interface DVMObject : NSObject
 @property(nonatomic, strong) DVMDevice *owner;
@@ -134,9 +156,20 @@ static void DVMSoftForward(id target,NSInvocation *invocation){
 @property(nonatomic,copy) void (^clientDeallocator)(void *,NSUInteger);
 @property(nonatomic) void *clientBytes;
 @property(nonatomic) NSUInteger clientLength;
+@property(nonatomic) uint8_t *sharedBytes;
+@property(nonatomic) NSUInteger sharedOffset;
+@property(nonatomic) NSUInteger sharedLength;
 - (NSData *)cpuData;
 @end
-static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMDevice *owner){
+typedef struct {
+    uint64_t scanNS,transportNS,changedBytes,scannedBytes;
+} DVMUploadMetrics;
+static uint64_t DVMMonotonicNS(void){
+    struct timespec t;if(clock_gettime(CLOCK_MONOTONIC,&t))return 0;
+    return (uint64_t)t.tv_sec*1000000000ull+(uint64_t)t.tv_nsec;
+}
+static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMDevice *owner,DVMUploadMetrics *metrics){
+    if(buffer.sharedBytes)return;
     NSError *e=nil;DVMMetalRPC rpc=owner.transport;
     // contents may be written directly, without didModifyRange.
     // Compare owned bytes; update the cache only after host ACK.
@@ -145,22 +178,30 @@ static void DVMUploadBufferChanges(DVMBuffer *buffer,DVMDevice *owner){
     if(owner.stagedTransport&&buffer.length<=owner.stagedBytes){
         // One staged request for the contiguous changed span of the whole
         // buffer: unchanged bytes inside the span are re-sent, requests are not.
+        uint64_t started=DVMMonotonicNS();
         DVMDirtyRange changed=initialized?DVMFindDirtyRange(buffer.contents,uploaded.bytes,buffer.length):(DVMDirtyRange){0,buffer.length};
+        uint64_t scanned=DVMMonotonicNS();
+        if(metrics){metrics->scanNS+=scanned-started;metrics->scannedBytes+=initialized?buffer.length:0;metrics->changedBytes+=changed.length;}
         if(changed.length){
             NSData *span=[NSData dataWithBytes:(uint8_t *)buffer.contents+changed.offset length:changed.length];
             if(!owner.stagedTransport(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(changed.offset)},span,&e))reject(e.description?:@"render buffer upload");
             memcpy((uint8_t *)uploaded.mutableBytes+changed.offset,span.bytes,changed.length);
         }
+        if(metrics)metrics->transportNS+=DVMMonotonicNS()-scanned;
         buffer.renderUploaded=uploaded;return;
     }
     for(NSUInteger offset=0;offset<buffer.length;offset+=32768){
         NSUInteger length=MIN(32768,buffer.length-offset);
+        uint64_t started=DVMMonotonicNS();
         DVMDirtyRange changed=initialized?DVMFindDirtyRange((uint8_t *)buffer.contents+offset,(uint8_t *)uploaded.bytes+offset,length):(DVMDirtyRange){0,length};
+        uint64_t scanned=DVMMonotonicNS();
+        if(metrics){metrics->scanNS+=scanned-started;metrics->scannedBytes+=initialized?length:0;metrics->changedBytes+=changed.length;}
         if(!changed.length)continue;
         NSUInteger start=offset+changed.offset;
         NSData *chunk=[NSData dataWithBytes:(uint8_t *)buffer.contents+start length:changed.length];
         if(!rpc(@{@"op":@"writeRenderBuffer",@"buffer":buffer.handle,@"offset":@(start),@"data":[chunk base64EncodedStringWithOptions:0]},&e))reject(e.description?:@"render buffer upload");
         memcpy((uint8_t *)uploaded.mutableBytes+start,chunk.bytes,changed.length);
+        if(metrics)metrics->transportNS+=DVMMonotonicNS()-scanned;
     }
     buffer.renderUploaded=uploaded;
 }
@@ -532,16 +573,27 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     DVMQueue *queue=(id)[self newCommandQueue];queue.maxCommandBufferCount=count;return queue;
 }
 - (id<MTLBuffer>)newBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)options {
+    return [self dvmNewBufferWithLength:n options:options allowSharedPool:YES];
+}
+- (id<MTLBuffer>)dvmNewBufferWithLength:(NSUInteger)n options:(MTLResourceOptions)options allowSharedPool:(BOOL)allowPool {
     if (!n || n > DVM_BUFFER_BYTES || !DVMResourceOptionsValid(options))
         return nil;
     NSError *e = nil;
-    NSDictionary *r = [self call:@{@"op" : @"buffer", @"length" : @(n)} error:&e];
+    BOOL requestPool=allowPool&&self.bufferPool&&self.bufferPoolBytes;
+    NSDictionary *r = [self call:@{@"op" : @"buffer", @"length" : @(n),@"sharedPool":@(requestPool)} error:&e];
     if (!r)
         return nil;
     DVMBuffer *b = [DVMBuffer new];
     b.owner = self;
     b.handle = r[@"handle"];
-    b.shadow = [NSMutableData dataWithLength:n];
+    NSNumber *offset=r[@"sharedOffset"],*span=r[@"sharedSpan"];
+    if(offset||span){
+        NSUInteger o=offset.unsignedIntegerValue,s=span.unsignedIntegerValue,expected=(n+DVM_MANAGED_PAGE_BYTES-1)&~(DVM_MANAGED_PAGE_BYTES-1);
+        if(!requestPool||s!=expected||o%DVM_MANAGED_PAGE_BYTES||s>self.bufferPoolBytes||o<DVM_BUFFER_POOL_OFFSET||
+           o-DVM_BUFFER_POOL_OFFSET>self.bufferPoolBytes-s)reject(@"shared buffer allocation reply");
+        b.sharedOffset=o;b.sharedLength=n;b.sharedBytes=self.bufferPool+(o-DVM_BUFFER_POOL_OFFSET);
+        memset(b.sharedBytes,0,s);
+    }else b.shadow = [NSMutableData dataWithLength:n];
     b.acceptedOptions=options;b.hostAllocatedSize=[r[@"allocatedSize"] unsignedIntegerValue];
     return b;
 }
@@ -551,7 +603,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 }
 - (id<MTLBuffer>)newBufferWithBytesNoCopy:(void *)bytes length:(NSUInteger)length options:(MTLResourceOptions)options deallocator:(void (^)(void *,NSUInteger))deallocator {
     if(!bytes||(uintptr_t)bytes%DVM_MANAGED_PAGE_BYTES||!length||length%DVM_MANAGED_PAGE_BYTES)return nil;
-    DVMBuffer *b=(id)[self newBufferWithLength:length options:options];
+    DVMBuffer *b=(id)[self dvmNewBufferWithLength:length options:options allowSharedPool:NO];
     if(!b)return nil;
     // NSMutableData may copy even its bytesNoCopy input on mutable access.
     // Preserve the API's pointer identity explicitly until final retirement.
@@ -601,7 +653,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
 @implementation DVMBuffer
 - (void)prepareForPurgeability:(MTLPurgeableState)state {
     if(state==MTLPurgeableStateVolatile&&self.residencyState<=MTLPurgeableStateNonVolatile)
-        DVMUploadBufferChanges(self,self.owner);
+        DVMUploadBufferChanges(self,self.owner,NULL);
 }
 - (void)purgeabilityChanged:(MTLPurgeableState)old current:(MTLPurgeableState)current {
     [super purgeabilityChanged:old current:current];
@@ -625,11 +677,11 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     t.backingBuffer=self;t.backingOffset=offset;t.backingRow=row;return t;
 }
 - (NSUInteger)length {
-    return _clientBytes?_clientLength:_shadow.length;
+    return _clientBytes?_clientLength:_sharedBytes?_sharedLength:_shadow.length;
 }
 - (void *)contents {
     [self requireResident];
-    return _clientBytes?:_shadow.mutableBytes;
+    return _clientBytes?:_sharedBytes?:_shadow.mutableBytes;
 }
 - (void)didModifyRange:(NSRange)range {
     [self requireResident];
@@ -917,7 +969,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
     }
     // Encoding is finished; arrays cannot be mutated after commit. Resources
     // remain strongly owned until completion even if the caller releases them.
-    NSMutableArray *uploads = [NSMutableArray array], *buffers = [NSMutableArray array],
+    NSMutableArray *uploads = [NSMutableArray array], *buffers = [NSMutableArray array], *copiedBuffers=[NSMutableArray array],
                    *textures = [NSMutableArray array], *readbacks = [NSMutableArray array];
     BOOL render=!_commands.count||_commands[0][@"kind"]!=nil;
     for(NSUInteger i=0;i<_resources.count;i++)if([_resources[i] isKindOfClass:DVMTexture.class]){
@@ -929,7 +981,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
         if ([o isKindOfClass:DVMBuffer.class] && ![buffers containsObject:o]) {
             DVMBuffer *b = o;
             [buffers addObject:b];
-            if(!render)[readbacks addObject:b.handle];
+            if(!b.sharedBytes)[copiedBuffers addObject:b];
+            if(!render&&!b.sharedBytes)[readbacks addObject:b.handle];
         }
     for (id o in _resources)
         if ([o isKindOfClass:DVMTexture.class] && ![textures containsObject:o]) {
@@ -960,7 +1013,7 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                 // Capturing pending textures at commit would re-upload stale
                 // CPU contents over a predecessor's GPU-produced image.
                 for(DVMTexture *t in textures)[t requireResident];
-                if(!render)for(DVMBuffer *b in buffers)
+                if(!render)for(DVMBuffer *b in copiedBuffers)
                     [uploads addObject:@{@"op":@"upload",@"buffer":b.handle,
                         @"data":self.commandQueue.owner.binaryPayloads?[b cpuData]:[[b cpuData] base64EncodedStringWithOptions:0]}];
                 for(DVMTexture *t in textures)if(t.pendingUpload){
@@ -968,21 +1021,30 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                     else [uploads addObject:@{@"texture":t.handle,@"row":@([t row]),
                         @"data":self.commandQueue.owner.binaryPayloads&&!render?t.pendingUpload:[t.pendingUpload base64EncodedStringWithOptions:0]}];
                 }
-                if(render)for(DVMBuffer *buffer in buffers)DVMUploadBufferChanges(buffer,self.commandQueue.owner);
+                DVMUploadMetrics uploadMetrics={0};
+                if(render)for(DVMBuffer *buffer in buffers)DVMUploadBufferChanges(buffer,self.commandQueue.owner,&uploadMetrics);
                 BOOL blur=self.commands.count&&self.commands[0][@"imageblock"]!=nil;
                 DVMTexture *output=nil;
                 if(blur)for(DVMTexture *t in textures)if([t.handle isEqual:[self.commands.lastObject[@"textures"] lastObject]])output=t;
                 if(blur && (!output||!self.commandQueue.owner.binaryPayloads))reject(@"blur requires binary transport and output");
                 NSMutableDictionary *request=[@{@"op":render?@"renderSubmit":blur?@"blurSubmit":@"submit",@"commands":self.commands,@"uploads":uploads,@"readbacks":readbacks} mutableCopy];
                 if(render)request[@"guestTaskIDs"]=self.responsibleTaskIDs;
+                if(render){
+                    request[@"dvmGuestBufferScanNS"]=@(uploadMetrics.scanNS);
+                    request[@"dvmGuestBufferTransportNS"]=@(uploadMetrics.transportNS);
+                    request[@"dvmGuestBufferChangedBytes"]=@(uploadMetrics.changedBytes);
+                    request[@"dvmGuestBufferScannedBytes"]=@(uploadMetrics.scannedBytes);
+                }
                 if(blur){request[@"w"]=@(output.width);request[@"h"]=@(output.height);}
-                NSDictionary *r=render?DVMRenderTransport(self.commandQueue.owner.transport,request,&e):self.commandQueue.owner.transport(request,&e);
+                NSDictionary *r=render?DVMRenderTransport(self.commandQueue.owner.transport,
+                    self.commandQueue.owner.stagedTransport,self.commandQueue.owner.stagedBytes,request,&e)
+                    :self.commandQueue.owner.transport(request,&e);
                 if (!r || [r[@"status"] integerValue] != MTLCommandBufferStatusCompleted)
                     self.error = e ?: error(@"GPU did not complete");
                 else {
                     if(render){self.GPUStartTime=[r[@"gpu_start"] doubleValue];self.GPUEndTime=[r[@"gpu_end"] doubleValue];self.kernelStartTime=[r[@"kernel_start"] doubleValue];self.kernelEndTime=[r[@"kernel_end"] doubleValue];}
                     NSDictionary *returned = r[@"buffers"];
-                    if (![returned isKindOfClass:NSDictionary.class] || returned.count != (render?0:buffers.count))
+                    if (![returned isKindOfClass:NSDictionary.class] || returned.count != (render?0:copiedBuffers.count))
                         reject(@"bad batched readback table");
                     NSMutableArray *decoded = [NSMutableArray array];
                     NSMutableArray *writtenObjects = [NSMutableArray array], *writtenData = [NSMutableArray array];
@@ -995,19 +1057,27 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                             for(DVMBuffer *b in buffers)if([b.handle isEqual:handle])owned=b;
                             if(!owned||[seen containsObject:handle]||owned.length>DVM_BUFFER_BYTES-total)reject(@"render writeback ownership/budget");
                             [seen addObject:handle];total+=owned.length;owned.renderUploaded=nil;
-                            NSMutableData *data=[NSMutableData dataWithLength:owned.length];
-                            for(NSUInteger offset=0;offset<owned.length;offset+=32768){
-                                NSUInteger length=MIN(32768,owned.length-offset);
-                                NSDictionary *part=self.commandQueue.owner.transport(@{@"op":@"readRenderBuffer",@"buffer":handle,@"offset":@(offset),@"length":@(length)},&e);
-                                id encoded=part[@"data"];
-                                NSData *chunk=[encoded isKindOfClass:NSString.class]?[[NSData alloc] initWithBase64EncodedString:encoded options:0]:nil;
-                                if(![part[@"buffer"] isEqual:handle]||![part[@"offset"] isEqual:@(offset)]||chunk.length!=length)reject(e.description?:@"render writeback chunk");
-                                memcpy((uint8_t *)data.mutableBytes+offset,chunk.bytes,length);
+                            if(owned.sharedBytes)continue;
+                            NSMutableData *data=nil;
+                            if(self.commandQueue.owner.stagedReadTransport&&owned.length<=self.commandQueue.owner.stagedBytes){
+                                NSData *raw=self.commandQueue.owner.stagedReadTransport(@{@"op":@"readRenderBufferStaged",@"buffer":handle,@"offset":@0},owned.length,&e);
+                                if(raw.length!=owned.length)reject(e.description?:@"staged render writeback");
+                                data=[raw mutableCopy];
+                            }else{
+                                data=[NSMutableData dataWithLength:owned.length];
+                                for(NSUInteger offset=0;offset<owned.length;offset+=32768){
+                                    NSUInteger length=MIN(32768,owned.length-offset);
+                                    NSDictionary *part=self.commandQueue.owner.transport(@{@"op":@"readRenderBuffer",@"buffer":handle,@"offset":@(offset),@"length":@(length)},&e);
+                                    id encoded=part[@"data"];
+                                    NSData *chunk=[encoded isKindOfClass:NSString.class]?[[NSData alloc] initWithBase64EncodedString:encoded options:0]:nil;
+                                    if(![part[@"buffer"] isEqual:handle]||![part[@"offset"] isEqual:@(offset)]||chunk.length!=length)reject(e.description?:@"render writeback chunk");
+                                    memcpy((uint8_t *)data.mutableBytes+offset,chunk.bytes,length);
+                                }
                             }
                             [writtenObjects addObject:owned];[writtenData addObject:data];
                         }
                     }
-                    for (DVMBuffer *b in render?@[]:buffers) {
+                    for (DVMBuffer *b in render?@[]:copiedBuffers) {
                         id encoded = returned[b.handle.stringValue];
                         NSData *d = self.commandQueue.owner.binaryPayloads&&!render
                             ? ([encoded isKindOfClass:NSData.class] ? encoded : nil)
@@ -1025,8 +1095,8 @@ DVM_CAPABILITY_QUERIES(DVM_BOOL_GETTER,DVM_UINT_GETTER)
                         DVMBuffer *b=writtenObjects[i];NSData *data=writtenData[i];
                         memcpy(b.contents,data.bytes,data.length);b.renderUploaded=[data mutableCopy];
                     }
-                    for (NSUInteger i = 0; !render && i < buffers.count; i++) {
-                        DVMBuffer *b = buffers[i]; NSData *d = decoded[i];
+                    for (NSUInteger i = 0; !render && i < copiedBuffers.count; i++) {
+                        DVMBuffer *b = copiedBuffers[i]; NSData *d = decoded[i];
                         memcpy(b.contents, d.bytes, d.length);b.renderUploaded=nil;
                     }
                     for (DVMTexture *t in textures) {t.pendingUpload = nil;if(render)t.completedShadow=nil;}
@@ -1189,9 +1259,43 @@ id<MTLDevice> DVMCreateBinaryMetalDevice(DVMMetalRPC rpc) {
     d.binaryPayloads=YES;return d;
 }
 
+// A staged arm64e revision receives the RPC from the boot carrier, but an
+// older carrier cannot pass mapping properties added by the new revision.
+// Open a second mapping of the same owned service and accept it only when the
+// exact mode-3 descriptor advertises this pool.  Any failure keeps the copied
+// buffer fallback; no offset or ownership is inferred.
+static void DVMDiscoverBufferPool(DVMDevice *device) {
+    if(device.bufferPool)return;
+    __typeof__(&IORegistryEntryFromPath) registry=dlsym(RTLD_DEFAULT,"IORegistryEntryFromPath");
+    __typeof__(&IOObjectRelease) release=dlsym(RTLD_DEFAULT,"IOObjectRelease");
+    __typeof__(&IOServiceOpen) open=dlsym(RTLD_DEFAULT,"IOServiceOpen");
+    __typeof__(&IOServiceClose) closeClient=dlsym(RTLD_DEFAULT,"IOServiceClose");
+    __typeof__(&IOConnectMapMemory64) map=dlsym(RTLD_DEFAULT,"IOConnectMapMemory64");
+    __typeof__(&IOConnectUnmapMemory64) unmap=dlsym(RTLD_DEFAULT,"IOConnectUnmapMemory64");
+    if(!registry||!release||!open||!closeClient||!map||!unmap)return;
+    io_service_t service=registry(0,"IOService:/AppleARMPE/arm-io@10F00000/AppleH17PPlatformIO/dvm-transport@E0000000");
+    io_connect_t client=0;if(!service)return;
+    kern_return_t kr=open(service,mach_task_self(),DVM_GPU_OPEN_TYPE,&client);release(service);if(kr)return;
+    mach_vm_address_t address=0;mach_vm_size_t length=0;
+    kr=map(client,DVM_GPU_MEMORY_TYPE,mach_task_self(),&address,&length,kIOMapAnywhere|kIOMapCopybackCache);
+    if(kr||length!=DVM_GPU_RAM_SIZE){if(!kr&&address)unmap(client,DVM_GPU_MEMORY_TYPE,mach_task_self(),address);closeClient(client);return;}
+    uint8_t *shared=(uint8_t *)(uintptr_t)address;uint64_t stagingMagic=0,flags=0,poolMagic=0,offset=0,bytes=0,reserved=0;
+    memcpy(&stagingMagic,shared+DVM_STAGING_DESCRIPTOR,8);memcpy(&flags,shared+DVM_STAGING_DESCRIPTOR+24,8);
+    memcpy(&poolMagic,shared+DVM_BUFFER_POOL_DESCRIPTOR,8);memcpy(&offset,shared+DVM_BUFFER_POOL_DESCRIPTOR+8,8);
+    memcpy(&bytes,shared+DVM_BUFFER_POOL_DESCRIPTOR+16,8);memcpy(&reserved,shared+DVM_BUFFER_POOL_DESCRIPTOR+24,8);
+    if(stagingMagic!=DVM_STAGING_MAGIC||!(flags&DVM_STAGING_FLAG_BUFFER_POOL)||poolMagic!=DVM_BUFFER_POOL_MAGIC||
+       offset!=DVM_BUFFER_POOL_OFFSET||bytes!=DVM_BUFFER_POOL_BYTES||reserved||offset+bytes!=DVM_GPU_RAM_SIZE){
+        unmap(client,DVM_GPU_MEMORY_TYPE,mach_task_self(),address);closeClient(client);return;
+    }
+    DVMBufferPoolMapping *owner=[DVMBufferPoolMapping new];owner.client=client;owner.bytes=shared;owner.unmap=unmap;owner.closeClient=closeClient;
+    device.bufferPool=shared+offset;device.bufferPoolBytes=(NSUInteger)bytes;device.bufferPoolOwner=owner;
+    int (*report)(FILE *,const char *,...)=dlsym(RTLD_DEFAULT,"DVMReport");if(!report)report=fprintf;
+    report(stderr,"GPU_LOAD_DRIVER_BUFFER_POOL enabled=1 offset=%llu bytes=%llu\n",(unsigned long long)offset,(unsigned long long)bytes);
+}
+
 id<MTLDevice> DVMCreateSharedMetalDevice(DVMMetalRPC rpc,DVMMetalMappingProvider provider) {
     if(!provider)return nil;
-    DVMDevice *d=(id)DVMCreateBinaryMetalDevice(rpc);d.mappingProvider=provider;return d;
+    DVMDevice *d=(id)DVMCreateBinaryMetalDevice(rpc);d.mappingProvider=provider;DVMDiscoverBufferPool(d);return d;
 }
 void DVMEnableSurfaceImports(id<MTLDevice> device,DVMMetalSurfaceProvider provider){
     if(![(id)device isKindOfClass:DVMDevice.class]||!provider)reject(@"import provider/device");

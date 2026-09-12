@@ -41,9 +41,22 @@ def main():
             if name=='driver_guest':
                 subprocess.run(['xcrun','clang',*flags,'-c',str(source/'driver_guest.m'),'-o',str(a.out/'driver_guest.o')],check=True)
                 symbols=subprocess.check_output(['nm','-u',str(a.out/'driver_guest.o')],text=True).split()
-                stub=a.out/'stubs/usr/lib/libobjc.tbd';text=stub.read_text()
-                added=[s for s in symbols if s.startswith('_objc_') and '"'+s+'"' not in text]
-                text=text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added));stub.write_text(text)
+                def add_symbols(path,wanted):
+                    text=path.read_text();added=[s for s in sorted(wanted) if '"'+s+'"' not in text]
+                    if added:path.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))
+                    return added
+                # Objective-C metadata inspection uses the public runtime C
+                # families as well as objc_* entry points.  Older revision
+                # bases predate those imports, so extend their link-only stub
+                # deterministically instead of requiring a newer boot image.
+                runtime_prefixes=('_objc_','_class_','_protocol_','_sel_','_object_','_method_','_ivar_')
+                add_symbols(a.out/'stubs/usr/lib/libobjc.tbd',[s for s in symbols if s.startswith(runtime_prefixes)])
+                # The stub is only a cross-link inventory; exact-guest import
+                # verification below remains the authority for runtime use.
+                add_symbols(a.out/'stubs/System/Library/Frameworks/Foundation.framework/Foundation.tbd',
+                            [s for s in symbols if s.startswith('_OBJC_CLASS_$_') and not s.startswith('_OBJC_CLASS_$_MTL')])
+                add_symbols(a.out/'stubs/System/Library/Frameworks/Metal.framework/Metal.tbd',
+                            [s for s in symbols if s.startswith('_OBJC_CLASS_$_MTL')])
                 stub=a.out/'stubs/System/Library/Frameworks/IOSurface.framework/IOSurface.tbd';text=stub.read_text()
                 added=[s for s in symbols if s.startswith('_IOSurfaceGet') and '"'+s+'"' not in text]
                 stub.write_text(text.replace('symbols: [ ','symbols: [ '+''.join('"'+s+'", ' for s in added)))

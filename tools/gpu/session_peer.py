@@ -366,7 +366,12 @@ class SessionPeer(MMIOPeer):
         # synchronous inside a request, so no command buffer is in flight.
         # A failed replacement authorizes nothing: no tombstone is written and
         # the generation stays unquiesced, so no successor is accepted.
-        worker = self.replace_worker()
+        # A staged guest revision and its backend implement one negotiated
+        # contract.  Relaunch the worker recorded with that package before the
+        # successor can claim it; using the session's boot worker here can make
+        # a valid guest revision reject the stale host capability dictionary.
+        staged_worker = self.staged.get('worker') if self.staged else None
+        worker = self.replace_worker(staged_worker)
         tombstones = [resource for resource in requested if self.write_tombstone(resource)]
         entry.update(quiesce_requested=requested, tombstones=tombstones,
                      quiesced_monotonic=time.monotonic(), quiesce_worker=worker['pid'])

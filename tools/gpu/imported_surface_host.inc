@@ -12,20 +12,25 @@ static NSDictionary *ImportedSurfaceRequest(DVMHost *host,uint64_t seq,NSDiction
     if(host.entries.count>=kMaxObjects)return HostError(seq,ENOSPC,@"object table full before import");
     if(!host.imports)host.imports=[NSMutableDictionary dictionary];
     DVMImportedPages *mapping=host.imports[@(resourceID)];NSString *why=nil;
+    uint64_t importStart=clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW),mapDone=importStart,bufferDone=importStart;
     if(!mapping){
         mapping=DVMOpenImportedPages(resourceID,&why);if(!mapping)return HostError(seq,EINVAL,why);
         // Failed imports remain held; no unpin permission on uncertain state.
         host.imports[@(resourceID)]=mapping;host.importedBytes+=mapping.span;
     }
+    mapDone=clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     if(mapping.retired||mapping.failed||mapping.length!=length||host.importedBytes>DVM_SURFACE_TOTAL_BYTES)return HostError(seq,EINVAL,@"registered surface state/length/budget");
     NSUInteger alignment=[host.device minimumLinearTextureAlignmentForPixelFormat:format];
     if(!alignment||row%alignment||mapping.offset%alignment)return HostError(seq,ENOTSUP,@"imported surface native linear alignment");
     if(!mapping.buffer)mapping.buffer=[host.device newBufferWithBytesNoCopy:mapping.mapping length:mapping.span options:MTLResourceStorageModeShared deallocator:nil];
     if(!mapping.buffer||mapping.buffer.contents!=mapping.mapping)return HostError(seq,ENOMEM,@"imported no-copy backing buffer");
+    bufferDone=clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
     MTLTextureDescriptor *d=[MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format width:width height:height mipmapped:NO];d.storageMode=MTLStorageModeShared;d.usage=usage;
     id<MTLTexture> texture=[mapping.buffer newTextureWithDescriptor:d offset:mapping.offset bytesPerRow:row];
     DVMEntry *entry=nil;if(!texture||!Add(host,@"texture",texture,&entry))return HostError(seq,ENOMEM,@"imported native texture");
     entry.importedPages=mapping;entry.width=width;entry.height=height;entry.row=row;entry.format=format;
     // Registration backing is counted once, separately from copied resources.
-    return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle),@"id":@(resourceID),@"allocatedSize":@(texture.allocatedSize),@"mappedBytes":@(mapping.span)};
+    uint64_t textureDone=clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW);
+    return @{@"seq":@(seq),@"ok":@YES,@"handle":@(entry.handle),@"id":@(resourceID),@"allocatedSize":@(texture.allocatedSize),@"mappedBytes":@(mapping.span),
+        @"map_us":@((mapDone-importStart)/1000),@"buffer_us":@((bufferDone-mapDone)/1000),@"texture_us":@((textureDone-bufferDone)/1000)};
 }

@@ -140,6 +140,7 @@ static NSDictionary *RenderSubmitPart(DVMHost *host,uint64_t seq,NSDictionary *r
         BOOL disjointMipCandidate=level>0&&[(id<MTLTexture>)target.object storageMode]==MTLStorageModePrivate;
 #ifdef DVM_RENDER_DIAGNOSTIC
         if(!preflight){
+            DVMDebugSnapshot(host,cb,debugCaptures,target,level,seq,debugPass,@"target-before-pass");
             NSMutableSet *inputs=[NSMutableSet set];
             for(NSArray *op in ops)if(op.count==3&&[op[0] isEqual:@"fragmentTexture"]&&![op[1] isEqual:@0])[inputs addObject:op[1]];
             for(NSNumber *handle in [[inputs allObjects] sortedArrayUsingSelector:@selector(compare:)]){
@@ -306,6 +307,14 @@ static NSDictionary *ReadRenderBuffer(DVMHost *host,uint64_t seq,NSDictionary *r
     if(!b||!Number(r[@"offset"],&offset)||!Number(r[@"length"],&length)||!length||length>32768||
        offset>b.textureBytes||length>b.textureBytes-offset)return HostError(seq,EINVAL,@"buffer read chunk bounds");
     // Requests are serialized; RenderSubmit waits for native GPU completion.
+    NSData *data=[NSData dataWithBytes:(uint8_t *)[(id<MTLBuffer>)b.object contents]+offset length:length];
+    return @{@"seq":@(seq),@"ok":@YES,@"buffer":r[@"buffer"],@"offset":@(offset),
+             @"data":[data base64EncodedStringWithOptions:0]};
+}
+static NSDictionary *ReadRenderBufferStaged(DVMHost *host,uint64_t seq,NSDictionary *r) {
+    DVMEntry *b=Entry(host,r[@"buffer"],@"buffer");uint64_t offset,length;
+    if(!b||!Number(r[@"offset"],&offset)||!Number(r[@"length"],&length)||!length||length>DVM_STAGING_BYTES||
+       offset>b.textureBytes||length>b.textureBytes-offset)return HostError(seq,EINVAL,@"staged buffer read bounds");
     NSData *data=[NSData dataWithBytes:(uint8_t *)[(id<MTLBuffer>)b.object contents]+offset length:length];
     return @{@"seq":@(seq),@"ok":@YES,@"buffer":r[@"buffer"],@"offset":@(offset),
              @"data":[data base64EncodedStringWithOptions:0]};

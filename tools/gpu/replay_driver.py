@@ -27,6 +27,11 @@ def main():
     p.add_argument('trial',type=Path);p.add_argument('--worker',type=Path,required=True)
     p.add_argument('--library',type=Path,required=True);p.add_argument('--out',type=Path,required=True)
     p.add_argument('--library-cache',type=Path,help='explicit content-addressed guest AIR directory')
+    p.add_argument('--present-ram',type=Path,help='disposable captured 16 MiB transport RAM for imported-surface replay')
+    p.add_argument('--managed-ram',type=Path,help='disposable captured managed DRAM backing for imported-surface replay')
+    p.add_argument('--managed-pages',type=Path,help='disposable captured managed-page manifest; its .imports directory is mutated by retirement')
+    p.add_argument('--start-seq',type=int,help='replay requests at or after this sequence (use a generation boundary after worker replacement)')
+    p.add_argument('--stop-seq',type=int,help='replay requests at or before this sequence')
     p.add_argument('--expect-repaired-seq',type=int,help='one previously rejected request must now succeed; all other replies still match')
     p.add_argument('--host-rehearsal',action='store_true',help='replay a run_uikit_host.py capture; never label it as guest evidence')
     a=p.parse_args();a.out.mkdir(exist_ok=False)
@@ -38,7 +43,14 @@ def main():
     env={k:v for k,v in os.environ.items() if not k.startswith('DVM_DRIVER_')}
     env['DVM_DRIVER_LIBRARY']=str(a.library.resolve())
     if a.library_cache:env['DVM_DRIVER_LIBRARY_CACHE']=str(a.library_cache.resolve())
-    started=time.monotonic();passed=False;count=0;repaired=False
+    import_inputs=(a.present_ram,a.managed_ram,a.managed_pages)
+    if any(import_inputs) and not all(import_inputs):
+        p.error('--present-ram, --managed-ram and --managed-pages must be supplied together')
+    if all(import_inputs):
+        env['DVM_DRIVER_PRESENT_RAM']=str(a.present_ram.resolve())
+        env['DVM_DRIVER_MANAGED_RAM']=str(a.managed_ram.resolve())
+        env['DVM_DRIVER_MANAGED_PAGES']=str(a.managed_pages.resolve())
+    started=time.monotonic();passed=False;count=0;skipped_control=0;skipped_range=0;repaired=False
     # The outer command can enforce an observation deadline. This worker never
     # touches a VM, and its process identity is recorded before the first call.
     with (a.out/'worker.log').open('wb') as log:
@@ -46,7 +58,17 @@ def main():
         (a.out/'process.json').write_text(json.dumps(dict(pid=worker.pid,worker=str(a.worker.resolve()),sha256=hashlib.sha256(a.worker.read_bytes()).hexdigest()))+'\n')
         try:
             for row in rows:
-                if row['op'].startswith('runner'):continue
+                request_seq=row.get('request',{}).get('seq',row.get('seq'))
+                if a.start_seq is not None and request_seq < a.start_seq:
+                    skipped_range+=1;continue
+                if a.stop_seq is not None and request_seq > a.stop_seq:
+                    skipped_range+=1;continue
+                # SessionPeer consumes these process-generation and staging
+                # requests.  A raw Metal worker never sees them.  Starting at
+                # a generation boundary recreates the worker replacement that
+                # reset its resource table in the captured run.
+                if row['op'].startswith(('runner','session')):
+                    skipped_control+=1;continue
                 if row.get('wire_encoding','json')!='json':raise ValueError('only captured JSON submissions supported')
                 request=row['request']
                 if 'upload_file' in row:
@@ -79,7 +101,9 @@ def main():
             passed=passed and worker.returncode==0
             result=dict(scope='captured-host-rehearsal-backend-replay-not-guest-evidence' if a.host_rehearsal else 'captured-guest-submission-host-replay-not-new-guest-execution',passed=passed,
                         validation_environment={k:env[k] for k in ('MTL_DEBUG_LAYER','MTL_SHADER_VALIDATION') if k in env},
-                        requests=count,repaired_sequence=a.expect_repaired_seq if repaired else None,worker_exit=worker.returncode,seconds=time.monotonic()-started)
+                        requests=count,sequence_range=dict(start=a.start_seq,stop=a.stop_seq),
+                        skipped_control=skipped_control,skipped_range=skipped_range,
+                        repaired_sequence=a.expect_repaired_seq if repaired else None,worker_exit=worker.returncode,seconds=time.monotonic()-started)
             (a.out/'result.json').write_text(json.dumps(result,indent=2)+'\n');print(json.dumps(result))
             if worker.returncode:raise RuntimeError('replay worker did not exit cleanly')
 

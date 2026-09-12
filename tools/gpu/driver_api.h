@@ -8,6 +8,10 @@ typedef NSDictionary * (^DVMMetalRPC)(NSDictionary *request, NSError **error);
 // Same request without its base64 field; the raw payload travels through the
 // transport's staging region. nil when the transport has no staging.
 typedef NSDictionary * (^DVMMetalStagedRPC)(NSDictionary *request, NSData *payload, NSError **error);
+// Completed host bytes copied from the same owned staging region while the
+// transport holds its cross-process channel lock. The implementation verifies
+// the requested extent and payload CRC before returning an immutable copy.
+typedef NSData * (^DVMMetalStagedReadRPC)(NSDictionary *request, NSUInteger length, NSError **error);
 typedef id<MTLDevice> (*DVMCreateMetalDeviceFn)(DVMMetalRPC rpc);
 id<MTLDevice> DVMCreateMetalDevice(DVMMetalRPC rpc);
 // Opt-in raw payloads for the bounded DVB1 submission transport.
