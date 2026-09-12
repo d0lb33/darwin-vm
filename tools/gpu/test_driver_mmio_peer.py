@@ -6,6 +6,7 @@ from pathlib import Path
 import socket
 import struct
 import tempfile
+import time
 import unittest
 import zlib
 from driver_mmio_peer import (MMIOPeer,MAGIC,STAGING_MAGIC,STAGING_OFFSET,STAGING_BYTES,STAGING_DESCRIPTOR,
@@ -45,6 +46,11 @@ class MMIOPeerTests(unittest.TestCase):
         self.assertEqual(zlib.crc32(raw),crc);self.assertEqual(seq,1)
         self.assertEqual(session,b'owned-session-01');self.assertTrue(json.loads(raw)['ok'])
         self.assertEqual(len(self.peer.records),1)
+        record=self.peer.records[0]
+        self.assertLessEqual(record['qemu_clock_received_ns'],record['qemu_clock_completed_ns'])
+        self.assertLessEqual(record['qemu_clock_received_ns'],record['qemu_clock_reply_ready_ns'])
+        self.assertLessEqual(record['qemu_clock_reply_ready_ns'],record['qemu_clock_notification_sent_ns'])
+        self.assertLess(abs(time.clock_gettime_ns(time.CLOCK_MONOTONIC)-record['qemu_clock_completed_ns']),1_000_000_000)
     def test_payload_bound_rejected_before_worker(self):
         present=(BUILD/"transport-mode.txt").read_text().strip() in ("--mmio-present","--mmio-present-pool")
         self.wire.sendall(struct.pack("<QII",1,(0x10000 if present else 0x200000)+1,0))

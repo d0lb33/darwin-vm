@@ -34,6 +34,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 're'))
 from idle_host_profile import thread_times, vcpu_sample, classify, hmp  # noqa: E402
 
 PRESENTED = re.compile(r'^iomfb: presented .*?monotonic_ns=(\d+)', re.M)
+PRESENTED_DETAIL = re.compile(
+    r'^iomfb: presented .*?scanout_us=(\d+) dma_us=(\d+) '
+    r'convert_us=(\d+) console_us=(\d+) monotonic_ns=(\d+)', re.M)
 COMPLETED = re.compile(r'^iomfb: swap id \d+ D594 (?:nested )?completed, status 0x([0-9a-f]+).*?monotonic_ns=(\d+)', re.M)
 DISPLAY_POWER = re.compile(r'^iomfb: A484 display power (\d) -> (\d) ', re.M)
 
@@ -140,6 +143,49 @@ def rpc_stats(text):
                                bytes=stats([p['bytes'] for p in per_frame])))
 
 
+def render_to_display_stats(stderr_text, journal_text):
+    """Correlate host completion with scanout without mixing macOS clocks."""
+    presentations = sorted(tuple(map(int, m.groups())) for m in PRESENTED_DETAIL.finditer(stderr_text))
+    records = [json.loads(line) for line in journal_text.splitlines() if line.strip()]
+    submits = [r for r in records if r.get('op') in ('renderSubmit', 'submit', 'renderStageCommit')
+               and isinstance(r.get('reply'), dict) and r['reply'].get('ok')
+               and 'qemu_clock_received_ns' in r and 'qemu_clock_reply_ready_ns' in r
+               and 'qemu_clock_notification_sent_ns' in r]
+    submits.sort(key=lambda r: r['qemu_clock_reply_ready_ns'])
+    if not presentations or not submits:
+        return dict(available=False, reason='needs detailed scanout and QEMU-clock host timestamps')
+    ready_to_scanout, notified_to_scanout, ready_to_present, present_to_next = [], [], [], []
+    scanout, dma, convert, console = [], [], [], []
+    next_submit = 0
+    for scanout_us, dma_us, convert_us, console_us, presented in presentations:
+        scanout_started = presented - scanout_us * 1000
+        candidate = None
+        while next_submit < len(submits) and submits[next_submit]['qemu_clock_reply_ready_ns'] <= scanout_started:
+            candidate = next_submit
+            next_submit += 1
+        if candidate is None:
+            continue
+        reply_ready = submits[candidate]['qemu_clock_reply_ready_ns']
+        notified = submits[candidate]['qemu_clock_notification_sent_ns']
+        ready_to_scanout.append((scanout_started - reply_ready) / 1e6)
+        notified_to_scanout.append((scanout_started - notified) / 1e6)
+        ready_to_present.append((presented - reply_ready) / 1e6)
+        scanout.append(scanout_us / 1000)
+        dma.append(dma_us / 1000)
+        convert.append(convert_us / 1000)
+        console.append(console_us / 1000)
+        if candidate + 1 < len(submits):
+            present_to_next.append((submits[candidate + 1]['qemu_clock_received_ns'] - presented) / 1e6)
+    return dict(available=True, paired=len(ready_to_present),
+                presentations=len(presentations), render_submissions=len(submits),
+                reply_ready_to_scanout_start_ms=stats(ready_to_scanout),
+                notification_sent_to_scanout_start_ms=stats(notified_to_scanout),
+                reply_ready_to_present_ms=stats(ready_to_present),
+                presentation_to_next_render_received_ms=stats(present_to_next),
+                scanout_ms=stats(scanout), dma_ms=stats(dma),
+                convert_ms=stats(convert), console_ms=stats(console))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--session', type=Path, required=True)
@@ -231,6 +277,7 @@ def main():
         offsets=dict(stderr=[err0, err1], journal=[jr0, jr1]),
         presentations=presentation_stats(err_text),
         rpc=rpc_stats(jr_text) if jr_text.strip() else None,
+        render_to_display=render_to_display_stats(err_text, jr_text),
         vcpu_samples=len(vcpu),
         vcpu_classes={str(k): dict(v) for k, v in per_cpu.items()},
         vcpu_top_pcs={str(k): [(pc, n, top_insns.get(pc, '')) for pc, n in v.most_common(5)] for k, v in top.items()},
@@ -254,6 +301,11 @@ def main():
                 print('   %-22s n=%-5d service p50 %.3f ms  gap-before p50 %s ms' % (
                     op, v['count'], v['service_ms']['p50'], v['gap_before_ms'] and v['gap_before_ms']['p50']))
             print('   per frame: %s' % r['per_frame'])
+        timing = result['render_to_display']
+        if timing['available']:
+            print('render/display pairs %d: reply-ready->scanout %s ms, scanout %s ms, present->next render %s ms' % (
+                timing['paired'], timing['reply_ready_to_scanout_start_ms'], timing['scanout_ms'],
+                timing['presentation_to_next_render_received_ms']))
         for cpu in sorted(per_cpu):
             print('cpu%d classes=%s' % (cpu, dict(per_cpu[cpu])))
             for pc, n, insn in result['vcpu_top_pcs'][str(cpu)][:3]:

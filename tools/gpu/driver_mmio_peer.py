@@ -143,6 +143,12 @@ class MMIOPeer(DriverPeer):
             n=len(raw)
             if n>WORKER_FRAME:raise ValueError('staged worker frame extent')
         started=time.monotonic_ns()
+        # QEMU_CLOCK_REALTIME uses CLOCK_MONOTONIC.  Python's monotonic_ns()
+        # uses mach_continuous_time on current macOS and includes system sleep,
+        # so it can differ by seconds even though both clocks advance at the
+        # same rate.  Preserve the existing timestamps for peer-local tools
+        # and record this second domain for exact render-to-scanout correlation.
+        qemu_clock_started=time.clock_gettime_ns(time.CLOCK_MONOTONIC)
         control=self.control_reply(request) if hasattr(self,'control_reply') else None
         if control is None:
             self.proc.stdin.write(struct.pack('<I',n)+raw);self.proc.stdin.flush()
@@ -170,8 +176,12 @@ class MMIOPeer(DriverPeer):
         if not isinstance(reply,dict) or reply.get('seq')!=seq:raise ValueError('host reply sequence')
         self.ram[self.reply_offset:self.reply_offset+length]=output
         self.ram[0x80:0xa0]=self.header+struct.pack('<QII',seq,length,zlib.crc32(output))
+        qemu_clock_reply_ready=time.clock_gettime_ns(time.CLOCK_MONOTONIC)
         self.sock.sendall(struct.pack('<QII',seq,0,0))
-        service_us=(time.monotonic_ns()-started)/1000
+        qemu_clock_notified=time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        completed=time.monotonic_ns()
+        qemu_clock_completed=time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+        service_us=(completed-started)/1000
         self.seen.add(seq)
         if blur:
             request=blur_peer.request(raw)
@@ -179,7 +189,10 @@ class MMIOPeer(DriverPeer):
             if reply.get("ok"):self.blur_evidence.add(request,reply,raw,output)
         if binary:request=decode_request(raw)  # Evidence conversion follows completion publication.
         record=dict(wire_encoding="blur-v1" if blur else "binary-v1" if binary else "json",seq=seq,op=request.get('op'),request_bytes=control_bytes,reply_bytes=length,
-            host_service_us=service_us,host_received_ns=started,host_completed_ns=time.monotonic_ns(),
+            host_service_us=service_us,host_received_ns=started,host_completed_ns=completed,
+            qemu_clock_received_ns=qemu_clock_started,qemu_clock_completed_ns=qemu_clock_completed,
+            qemu_clock_reply_ready_ns=qemu_clock_reply_ready,
+            qemu_clock_notification_sent_ns=qemu_clock_notified,
             request={k:v for k,v in request.items() if k!='data'},reply=reply)
         if staged_bytes:record['staged_bytes']=staged_bytes
         if 'staged_reply_bytes' in locals() and staged_reply_bytes:record['staged_reply_bytes']=staged_reply_bytes
